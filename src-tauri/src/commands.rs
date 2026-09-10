@@ -1,5 +1,5 @@
 use crate::app::lifecycle::configure_tray;
-use crate::app::machine::SessionState;
+use crate::app::machine::{is_cancellable, SessionState};
 use crate::app::session::{current_meter, devices, AppContext};
 use crate::audio::capture::{read_pcm16_wav, write_pcm16_wav, CaptureSession};
 use crate::audio::devices::InputDeviceInfo;
@@ -51,6 +51,7 @@ pub fn save_settings(
     } else {
         let _ = autostart.disable();
     }
+    let _ = configure_tray(&app);
     Ok(settings)
 }
 
@@ -164,7 +165,7 @@ pub fn preview_dsp(ctx: State<'_, Arc<AppContext>>) -> Result<DspPreview, AppErr
 
 #[tauri::command]
 pub fn start_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
-    if ctx.capture.lock().is_some() {
+    if is_cancellable(&ctx.state.lock()) {
         return Err(AppError::IllegalTransition(
             "dictation is already running".into(),
         ));
@@ -198,13 +199,8 @@ pub fn stop_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<DspPreview,
 
 #[tauri::command]
 pub async fn check_for_updates(app: AppHandle) -> Result<String, AppError> {
-    let ui = {
-        let ctx = app.state::<Arc<AppContext>>();
-        let locale = crate::updates::resolved_ui_locale(&ctx.settings.lock());
-        locale
-    };
-    let outcome = crate::updates::check_updates(&app, true).await;
-    Ok(crate::updates::outcome_message(outcome, &ui))
+    let outcome = crate::updates::check_and_maybe_install(&app, true).await;
+    Ok(outcome.as_str().into())
 }
 
 #[tauri::command]
@@ -255,11 +251,9 @@ pub async fn retry_recording(app: AppHandle, id: String) -> Result<Recording, Ap
 }
 
 #[tauri::command]
-pub fn open_logs(app: AppHandle) -> Result<(), AppError> {
-    let dir = app
-        .path()
-        .app_log_dir()
-        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+pub fn open_logs(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
+    let dir = ctx.data_dir.join("logs");
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::StorageFailed(e.to_string()))?;
     tauri_plugin_opener::open_path(dir, None::<&str>)
         .map_err(|e| AppError::StorageFailed(e.to_string()))
 }
@@ -353,14 +347,22 @@ pub fn recording_audio_url(
     else {
         return Ok(None);
     };
-    let path = crate::history::repository::audio_dir(&ctx.data_dir).join(name);
-    if !path.exists() {
+    if name.contains("..") || Path::new(name).is_absolute() {
+        return Err(AppError::StorageFailed("invalid audio path".into()));
+    }
+    let root = crate::history::repository::audio_dir(&ctx.data_dir);
+    let path = root.join(name);
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    let root_canonical = root
+        .canonicalize()
+        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    if !canonical.starts_with(&root_canonical) {
+        return Err(AppError::StorageFailed("audio path escaped".into()));
+    }
+    if !canonical.exists() {
         return Ok(None);
     }
-    Ok(Some(path.to_string_lossy().to_string()))
-}
-
-#[allow(dead_code)]
-pub fn _tray_hook() {
-    let _ = configure_tray;
+    Ok(Some(canonical.to_string_lossy().to_string()))
 }

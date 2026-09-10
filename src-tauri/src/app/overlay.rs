@@ -36,8 +36,6 @@ mod tests {
         );
         assert_eq!(x, (1920 - OVERLAY_WIDTH as i32) / 2);
         assert_eq!(y, 1040 - OVERLAY_HEIGHT as i32 - OVERLAY_GAP_PX);
-        assert!(OVERLAY_WIDTH <= 400.0);
-        assert!(OVERLAY_HEIGHT <= 52.0);
         assert_eq!(OVERLAY_WIDTH, 360.0);
         assert_eq!(OVERLAY_HEIGHT, 48.0);
     }

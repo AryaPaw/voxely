@@ -289,7 +289,9 @@ mod tests {
     fn transcribing_is_cancellable() {
         assert!(is_cancellable(&SessionState::Transcribing { attempt: 1 }));
         assert!(is_cancellable(&SessionState::ProcessingAudio));
-        assert!(!is_recording_active(&SessionState::Transcribing { attempt: 1 }));
+        assert!(!is_recording_active(&SessionState::Transcribing {
+            attempt: 1
+        }));
     }
 
     #[test]

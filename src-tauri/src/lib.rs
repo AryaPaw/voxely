@@ -14,30 +14,37 @@ mod transcription;
 mod updates;
 mod windows_int;
 
+use std::path::Path;
 use std::sync::Arc;
 
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
 use tracing_subscriber::EnvFilter;
 
-use crate::app::lifecycle::{attach_context, configure_tray, reregister_hotkey, show_main};
+use crate::app::lifecycle::{
+    attach_context, configure_tray, reregister_hotkey, should_hide_on_launch, show_main,
+};
 use crate::app::session::AppContext;
 use crate::commands::*;
 
-fn init_logging(debug: bool) {
+fn init_logging(debug: bool, log_dir: Option<&Path>) {
     let filter = if debug {
         "info,voxely_lib=debug"
     } else {
         "warn,voxely_lib=info"
     };
-    let _ = tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::new(filter))
-        .try_init();
+    let subscriber = tracing_subscriber::fmt().with_env_filter(EnvFilter::new(filter));
+    if let Some(dir) = log_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let file_appender = tracing_appender::rolling::daily(dir, "voxely.log");
+        let _ = subscriber.with_writer(file_appender).try_init();
+    } else {
+        let _ = subscriber.try_init();
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    init_logging(false);
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -45,21 +52,27 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
-            Some(vec![]),
+            Some(vec!["--autostart"]),
         ))
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let ctx = attach_context(app.handle())?;
             let hotkey = ctx.settings.lock().hotkey.clone();
             let debug = ctx.settings.lock().debug_logging;
-            if debug {
-                init_logging(true);
-            }
+            let logs = ctx.data_dir.join("logs");
+            init_logging(debug, Some(&logs));
             app.manage(ctx);
             configure_tray(app.handle())?;
             crate::updates::spawn_background_loop(app.handle().clone());
             if let Err(err) = reregister_hotkey(app.handle(), &hotkey) {
                 tracing::error!(error = %err, "hotkey failed");
+            }
+            if should_hide_on_launch(std::env::args()) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
             }
             if let Some(window) = app.get_webview_window("main") {
                 let handle = app.handle().clone();

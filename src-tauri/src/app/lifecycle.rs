@@ -10,10 +10,16 @@ use crate::app::shortcuts::sync_shortcuts;
 use crate::error::AppError;
 
 pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
-    let open = MenuItemBuilder::with_id("open", "Открыть")
+    let locale = {
+        let ctx = app.try_state::<Arc<AppContext>>();
+        ctx.map(|state| crate::app::locale::resolved_ui_locale(&state.settings.lock()))
+            .unwrap_or_else(|| "en".into())
+    };
+    let (open_label, quit_label) = tray_labels(&locale);
+    let open = MenuItemBuilder::with_id("open", open_label)
         .build(app)
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    let quit = MenuItemBuilder::with_id("quit", "Выход")
+    let quit = MenuItemBuilder::with_id("quit", quit_label)
         .build(app)
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
     let menu = MenuBuilder::new(app)
@@ -22,11 +28,16 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
         .item(&quit)
         .build()
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    if let Some(tray) = app.tray_by_id("main") {
+        tray.set_menu(Some(menu))
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        return Ok(());
+    }
     let icon = app
         .default_window_icon()
         .cloned()
         .ok_or_else(|| AppError::StorageFailed("missing tray icon".into()))?;
-    TrayIconBuilder::new()
+    TrayIconBuilder::with_id("main")
         .icon(icon)
         .tooltip("Voxely")
         .menu(&menu)
@@ -49,6 +60,18 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
         .build(app)
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
     Ok(())
+}
+
+pub fn tray_labels(locale: &str) -> (&'static str, &'static str) {
+    if locale == "en" {
+        ("Open", "Quit")
+    } else {
+        ("Открыть", "Выход")
+    }
+}
+
+pub fn should_hide_on_launch(args: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
+    args.into_iter().any(|arg| arg.as_ref() == "--autostart")
 }
 
 pub fn show_main(app: &AppHandle, _route: &str) {
@@ -115,5 +138,17 @@ mod tests {
         let path = preferred_data_dir(dir.path().to_path_buf());
         assert_eq!(path.file_name().unwrap(), "Voxely");
         assert!(path.join("settings.json").exists());
+    }
+
+    #[test]
+    fn tray_labels_follow_locale() {
+        assert_eq!(tray_labels("en"), ("Open", "Quit"));
+        assert_eq!(tray_labels("ru"), ("Открыть", "Выход"));
+    }
+
+    #[test]
+    fn autostart_hides_main_window() {
+        assert!(should_hide_on_launch(["voxely.exe", "--autostart"]));
+        assert!(!should_hide_on_launch(["voxely.exe"]));
     }
 }

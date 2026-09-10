@@ -163,6 +163,13 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
     ctx.abort_start.store(false, Ordering::SeqCst);
     ctx.session_generation.fetch_add(1, Ordering::SeqCst);
+    if let Some(preview) = ctx.preview_capture.lock().take() {
+        thread::spawn(move || {
+            if let Ok(result) = preview.stop() {
+                let _ = std::fs::remove_file(result.path);
+            }
+        });
+    }
     let (tx, _) = tokio::sync::watch::channel(false);
     *ctx.cancel_tx.lock() = Some(tx);
     ctx.transition(SessionEvent::StartRequested)?;

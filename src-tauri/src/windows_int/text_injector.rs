@@ -78,9 +78,7 @@ pub mod native {
     pub fn capture_target() -> Option<NativeHwnd> {
         unsafe {
             let foreground = GetForegroundWindow();
-            if hwnd_to_native(foreground).is_none() {
-                return None;
-            }
+            hwnd_to_native(foreground)?;
             if let Some(focus) = thread_focus_hwnd(foreground) {
                 if hwnd_root_value(focus) == hwnd_root_value(foreground) {
                     return hwnd_to_native(focus);
@@ -378,7 +376,6 @@ pub mod native {
         GlobalUnlock(windows::Win32::Foundation::HGLOBAL(handle.0)).ok();
         Some(text)
     }
-
 }
 
 #[cfg(not(windows))]

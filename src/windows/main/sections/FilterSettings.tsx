@@ -7,7 +7,7 @@ import {
   type DspPreview,
   type MicTune,
 } from "../../../lib/api";
-import type { Messages } from "../../../lib/i18n";
+import { formatInvokeError, type Messages } from "../../../lib/i18n";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
 import { Label } from "../../../components/ui/label";
@@ -63,7 +63,7 @@ export function FilterSettings({
         setPreview(await api.stopFilterSample());
         setRecording(false);
       } catch (error) {
-        setPreviewError(formatInvokeError(error));
+        setPreviewError(formatInvokeError(error, copy));
       } finally {
         setBusy(false);
       }
@@ -75,7 +75,7 @@ export function FilterSettings({
       setRecording(true);
       setPreview(null);
     } catch (error) {
-      setPreviewError(formatInvokeError(error));
+      setPreviewError(formatInvokeError(error, copy));
     } finally {
       setBusy(false);
     }
@@ -92,17 +92,17 @@ export function FilterSettings({
         </li>
       </ol>
       <label className="mb-4 block max-w-lg">
-        <div className="mb-1 text-sm">Активный пресет</div>
+        <div className="mb-1 text-sm">{copy.activePreset}</div>
         <SimpleSelect
-          aria-label="Активный пресет"
+          aria-label={copy.activePreset}
           value={settings.activePresetId}
           onValueChange={(activePresetId) => onChange({ activePresetId })}
           options={settings.presets.map((preset) => ({ value: preset.id, label: preset.name }))}
         />
       </label>
-      <MicLevelMeter live={recording} />
+      <MicLevelMeter live={recording} copy={copy} />
       <TuneSlider
-        label={`Громкость ${tune.gainDb.toFixed(1)} дБ`}
+        label={copy.gainDb.replace("{value}", tune.gainDb.toFixed(1))}
         min={-12}
         max={18}
         step={0.5}
@@ -110,7 +110,7 @@ export function FilterSettings({
         onChange={(gainDb) => setTune({ ...tune, gainDb })}
       />
       <TuneSlider
-        label={`Срез низов ${Math.round(tune.highpassHz)} Гц`}
+        label={copy.highpass.replace("{value}", String(Math.round(tune.highpassHz)))}
         min={20}
         max={200}
         step={5}
@@ -118,7 +118,7 @@ export function FilterSettings({
         onChange={(highpassHz) => setTune({ ...tune, highpassHz })}
       />
       <TuneSlider
-        label={`Шумодав ${tune.denoise}%`}
+        label={copy.denoise.replace("{value}", String(tune.denoise))}
         min={0}
         max={100}
         step={1}
@@ -126,7 +126,7 @@ export function FilterSettings({
         onChange={(denoise) => setTune({ ...tune, denoise })}
       />
       <TuneSlider
-        label={`Компрессия ${tune.punch}%`}
+        label={copy.punch.replace("{value}", String(tune.punch))}
         min={0}
         max={100}
         step={1}
@@ -143,14 +143,14 @@ export function FilterSettings({
             const previewObs = await api.obsPreview();
             const first = previewObs[0];
             if (!first) {
-              setUnsupported(["Источник микрофона OBS не найден"]);
+              setUnsupported([copy.obsMicMissing]);
               return;
             }
             setUnsupported(first.unsupported);
             await api.importObs(first.sourceName, `OBS ${first.sourceName}`);
           }}
         >
-          Импорт из OBS
+          {copy.importObs}
         </Button>
       </div>
       {recording ? (
@@ -161,7 +161,7 @@ export function FilterSettings({
       {unsupported.length > 0 ? (
         <ul className="mt-3 text-sm text-muted-foreground">
           {unsupported.map((item) => (
-            <li key={item}>Не поддерживается: {item}</li>
+            <li key={item}>{copy.unsupported.replace("{item}", item)}</li>
           ))}
         </ul>
       ) : null}
@@ -169,39 +169,25 @@ export function FilterSettings({
   );
 }
 
-function formatInvokeError(error: unknown): string {
-  if (typeof error === "string") {
-    return error;
-  }
-  if (error && typeof error === "object") {
-    const record = error as { message?: string; detail?: string };
-    if (record.detail) {
-      return record.detail;
-    }
-    if (record.message) {
-      return record.message;
-    }
-  }
-  return "Не удалось записать образец";
-}
-
-function MicLevelMeter({ live }: { live: boolean }) {
+function MicLevelMeter({ live, copy }: { live: boolean; copy: Messages }) {
   const [level, setLevel] = useState(0);
   useEffect(() => {
+    if (!live) {
+      setLevel(0);
+      return;
+    }
     const timer = window.setInterval(() => {
       void api.meter().then((sample) => {
         setLevel(Math.min(1, sample.rms * 12 + sample.peak * 0.4));
       });
     }, 80);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [live]);
   return (
     <div className="mb-5 max-w-lg">
-      <Label className="mb-1 text-sm">Уровень микрофона</Label>
+      <Label className="mb-1 text-sm">{copy.micLevel}</Label>
       <Progress value={level * 100} className="h-2" />
-      <p className="mt-1 text-xs text-muted-foreground">
-        {live ? "Сейчас слышно этот микрофон." : "Полоска оживёт, когда начнёте запись образца."}
-      </p>
+      <p className="mt-1 text-xs text-muted-foreground">{live ? copy.meterLive : copy.meterIdle}</p>
     </div>
   );
 }
@@ -221,8 +207,10 @@ const FilterPreviewPlayer = memo(function FilterPreviewPlayer({
   return (
     <div className="mb-4 max-w-lg rounded-xl border border-border bg-surface p-3 text-sm">
       <p className="mb-2 text-muted-foreground">
-        Пик {(preview.peak * 100).toFixed(0)}%, RMS {(preview.rms * 100).toFixed(0)}%
-        {preview.clipCount > 0 ? `, клиппинг ${preview.clipCount}` : ""}
+        {copy.peakRms
+          .replace("{peak}", (preview.peak * 100).toFixed(0))
+          .replace("{rms}", (preview.rms * 100).toFixed(0))}
+        {preview.clipCount > 0 ? copy.clipping.replace("{count}", String(preview.clipCount)) : ""}
       </p>
       <div className="mb-3 flex items-center gap-2">
         <Button
