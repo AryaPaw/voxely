@@ -28,6 +28,10 @@ wdio-logs
 *.sln
 *.sw?
 
+# Tauri icon CLI extras (Windows NSIS uses src-tauri/icons/*.png + icon.ico)
+src-tauri/icons/android/
+src-tauri/icons/ios/
+
 # Rust
 src-tauri/target
 src-tauri/gen

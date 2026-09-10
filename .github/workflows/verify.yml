@@ -39,6 +39,9 @@ jobs:
       - name: Version SSOT
         shell: pwsh
         run: ./scripts/check-version.ps1
+      - name: Icon SSOT
+        shell: pwsh
+        run: ./scripts/check-icons.ps1
       - name: Tauri compile
         run: cargo build --locked --manifest-path src-tauri/Cargo.toml --release
       - name: Upload coverage
