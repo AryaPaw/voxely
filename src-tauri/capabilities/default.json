@@ -51,6 +51,8 @@
     "allow-check-for-updates",
     "allow-recording-audio-url",
     "allow-cancel-dictation",
-    "allow-set-hotkey-capture"
+    "allow-set-hotkey-capture",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

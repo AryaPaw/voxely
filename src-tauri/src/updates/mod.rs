@@ -1,117 +1,119 @@
-pub mod coordinator;
-pub mod feed;
-pub mod launcher;
 pub mod policy;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use tauri::{AppHandle, Manager};
+use tauri_plugin_updater::UpdaterExt;
 
+use crate::app::machine::is_cancellable;
 use crate::app::session::AppContext;
-use crate::settings::AppSettings;
 
-use coordinator::{manual_copy, run_installed_pass, SilentUpdateOutcome};
-use feed::{build_client, is_reachable};
+use policy::{install_allowed, is_newer_stable};
 
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
 
-pub fn application_directory() -> Option<PathBuf> {
-    std::env::current_exe()
-        .ok()
-        .and_then(|path| path.parent().map(PathBuf::from))
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UpdateCode {
+    None,
+    Installed,
+    Busy,
+    Deferred,
+    Failed,
 }
 
-pub fn resolved_ui_locale(settings: &AppSettings) -> String {
-    match settings.ui_language.as_str() {
-        "en" => "en".into(),
-        "ru" => "ru".into(),
-        _ => "ru".into(),
+impl UpdateCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Installed => "installed",
+            Self::Busy => "busy",
+            Self::Deferred => "deferred",
+            Self::Failed => "failed",
+        }
     }
 }
 
-pub async fn check_updates(app: &AppHandle, force: bool) -> SilentUpdateOutcome {
+pub async fn check_and_maybe_install(app: &AppHandle, force: bool) -> UpdateCode {
     let ctx = app.state::<Arc<AppContext>>();
     let mut gate = ctx.update_gate.lock().await;
     if *gate {
-        return SilentUpdateOutcome::Busy;
+        return UpdateCode::Busy;
     }
     *gate = true;
     drop(gate);
     let outcome = run_check(app, force).await;
     *ctx.update_gate.lock().await = false;
-    if outcome == SilentUpdateOutcome::Applied {
-        app.exit(0);
+    if outcome == UpdateCode::Installed {
+        app.restart();
     }
     outcome
 }
 
-async fn run_check(app: &AppHandle, force: bool) -> SilentUpdateOutcome {
+async fn run_check(app: &AppHandle, force: bool) -> UpdateCode {
     let ctx = app.state::<Arc<AppContext>>();
     let settings = ctx.settings.lock().clone();
-    let auto = force || settings.auto_update_enabled;
-    let Some(app_dir) = application_directory() else {
-        return SilentUpdateOutcome::Skipped;
+    if !force && !settings.auto_update_enabled {
+        return UpdateCode::None;
+    }
+    let busy = is_cancellable(&ctx.state.lock());
+    if !install_allowed(busy) {
+        return UpdateCode::Deferred;
+    }
+    let updater = match app.updater() {
+        Ok(updater) => updater,
+        Err(err) => {
+            tracing::error!(error = %err, "updater unavailable");
+            return UpdateCode::Failed;
+        }
     };
-    let process_name = std::env::current_exe()
-        .ok()
-        .and_then(|path| {
-            path.file_stem()
-                .map(|name| name.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "voxely".into());
-    let Ok(client) = build_client(Duration::from_secs(20), true) else {
-        return SilentUpdateOutcome::Failed;
-    };
-    let download_directory = std::env::temp_dir()
-        .join("Voxely")
-        .join("updates")
-        .join(uuid::Uuid::new_v4().to_string());
-    let online = is_reachable(&client).await;
-    run_installed_pass(
-        &client,
-        auto,
-        current_version(),
-        &process_name,
-        &app_dir,
-        &download_directory,
-        online,
-    )
-    .await
+    match updater.check().await {
+        Ok(Some(update)) => {
+            let prerelease = update.version.contains('-');
+            if !is_newer_stable(current_version(), &update.version, prerelease) {
+                return UpdateCode::None;
+            }
+            match update.download_and_install(|_, _| {}, || {}).await {
+                Ok(()) => UpdateCode::Installed,
+                Err(err) => {
+                    tracing::error!(error = %err, "update install failed");
+                    UpdateCode::Failed
+                }
+            }
+        }
+        Ok(None) => UpdateCode::None,
+        Err(err) => {
+            tracing::error!(error = %err, "update check failed");
+            UpdateCode::Failed
+        }
+    }
 }
 
 pub fn spawn_background_loop(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(15)).await;
         loop {
-            tokio::time::sleep(Duration::from_secs(15)).await;
             let enabled = {
                 let ctx = app.state::<Arc<AppContext>>();
                 let enabled = ctx.settings.lock().auto_update_enabled;
                 enabled
             };
-            if !enabled {
+            if enabled {
+                let outcome = check_and_maybe_install(&app, false).await;
+                match outcome {
+                    UpdateCode::Installed => return,
+                    UpdateCode::Deferred | UpdateCode::Busy | UpdateCode::Failed => {
+                        tokio::time::sleep(Duration::from_secs(120)).await;
+                    }
+                    UpdateCode::None => {
+                        tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
+                    }
+                }
+            } else {
                 tokio::time::sleep(Duration::from_secs(120)).await;
-                continue;
-            }
-            let outcome = check_updates(&app, false).await;
-            match outcome {
-                SilentUpdateOutcome::Applied | SilentUpdateOutcome::NoUpdate => return,
-                SilentUpdateOutcome::Skipped => return,
-                _ => tokio::time::sleep(coordinator::delay_after(outcome)).await,
             }
         }
     });
-}
-
-pub fn outcome_message(outcome: SilentUpdateOutcome, ui: &str) -> String {
-    if matches!(outcome, SilentUpdateOutcome::Busy) && ui != "en" {
-        return "Проверка уже идёт.".into();
-    }
-    if matches!(outcome, SilentUpdateOutcome::Busy) {
-        return "A check is already running.".into();
-    }
-    manual_copy(outcome, ui)
 }

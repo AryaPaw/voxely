@@ -26,23 +26,38 @@
       "assetProtocol": {
         "enable": true,
         "scope": [
-          "$APPDATA/**",
-          "$APPLOCALDATA/**",
-          "$HOME/AppData/Roaming/Voxely/**"
+          "$APPDATA/Voxely/audio/**",
+          "$HOME/AppData/Roaming/Voxely/audio/**"
         ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis", "msi"],
+    "targets": ["nsis"],
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
+      }
+    }
   },
-  "plugins": {}
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIwMDRFMjEwMzQxRDhFODUKUldTRmpoMDBFT0lFSVAzeHJJY2xlQXNXOG5CQXd6ZGthSjA4R0hkM0VROGg5MldCNExqaUpHNG4K",
+      "endpoints": [
+        "https://github.com/AryaPaw/voxely/releases/latest/download/latest.json"
+      ]
+    }
+  }
 }
