@@ -29,7 +29,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "../../../components/ui/alert-dialog";
-import { SECTION_ICONS } from "../sectionNav";
+import { SECTION_ICONS, sectionLabel } from "../sectionNav";
 
 export function HistoryPane({
   items,
@@ -65,7 +65,7 @@ export function HistoryPane({
         </div>
       ) : null}
       <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-6 py-6">
-        <PageHeader icon={SECTION_ICONS.history} title={copy.historyTitle} />
+        <PageHeader icon={SECTION_ICONS.history} title={sectionLabel(copy, "history")} />
         <p className="mt-1 text-sm text-muted-foreground">{copy.historyHint}</p>
         <div className="mt-4 flex items-center gap-2">
           <Input

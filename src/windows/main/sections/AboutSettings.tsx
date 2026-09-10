@@ -5,7 +5,7 @@ import { api } from "../../../lib/api";
 import { formatInvokeError, updateToast, type Messages } from "../../../lib/i18n";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
-import { SECTION_ICONS } from "../sectionNav";
+import { SECTION_ICONS, sectionLabel } from "../sectionNav";
 
 export function AboutSettings({ copy }: { copy: Messages }) {
   const [version, setVersion] = useState("");
@@ -17,7 +17,7 @@ export function AboutSettings({ copy }: { copy: Messages }) {
 
   return (
     <div>
-      <PageHeader icon={SECTION_ICONS.about} title={copy.aboutTitle} />
+      <PageHeader icon={SECTION_ICONS.about} title={sectionLabel(copy, "about")} />
       <div className="mb-6 flex items-center gap-4">
         <img src="/favicon.png" alt="" className="h-16 w-16 rounded-2xl" />
         <div>

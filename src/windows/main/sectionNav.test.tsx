@@ -9,6 +9,6 @@ describe("SectionNav", () => {
   it("marks the active section with aria-current", () => {
     render(<SectionNav current="filters" copy={messagesFor("ru")} onSelect={() => undefined} />);
     expect(screen.getByRole("button", { name: /Фильтры/ })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("button", { name: /Записи/ })).not.toHaveAttribute("aria-current");
+    expect(screen.getByRole("button", { name: /История/ })).not.toHaveAttribute("aria-current");
   });
 });

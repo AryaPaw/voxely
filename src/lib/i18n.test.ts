@@ -20,6 +20,17 @@ describe("resolveUiLocale", () => {
 });
 
 describe("messagesFor", () => {
+  it("keeps nav and page titles on one registry", () => {
+    expect(messagesFor("ru").navHistory).toBe("История");
+    expect(messagesFor("en").navHistory).toBe("History");
+    expect(messagesFor("ru").navFilters).toBe(messagesFor("ru").filtersTitle);
+    expect(messagesFor("en").navFilters).toBe(messagesFor("en").filtersTitle);
+    expect(messagesFor("ru").navAbout).toBe(messagesFor("ru").aboutTitle);
+    expect(messagesFor("en").navAbout).toBe(messagesFor("en").aboutTitle);
+    expect(messagesFor("ru").historyTitle).toBe(messagesFor("ru").navHistory);
+    expect(messagesFor("en").historyTitle).toBe(messagesFor("en").navHistory);
+  });
+
   it("keeps insert copy free of SendInput", () => {
     expect(messagesFor("en").insertHint).not.toMatch(/SendInput/);
     expect(messagesFor("ru").insertHint).not.toMatch(/SendInput/);

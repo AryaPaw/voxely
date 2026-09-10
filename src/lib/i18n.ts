@@ -8,7 +8,7 @@ export function resolveUiLocale(uiLanguage: string, navigatorLanguage = "en"): U
 }
 
 const ru = {
-  navHistory: "Записи",
+  navHistory: "История",
   navGeneral: "Общие",
   navAudio: "Микрофон",
   navFilters: "Фильтры",
@@ -30,7 +30,7 @@ const ru = {
   copied: "Скопировано",
   filtersTitle: "Фильтры",
   filtersIntro:
-    "Сначала запишите короткую фразу на этой странице. Потом сравните оригинал и звук после фильтров.",
+    "Запишите короткую фразу на этой странице, включите нужные фильтры и сравните две кнопки. По умолчанию включены только лёгкий срез низов и чуть громкости, поэтому разница едва слышна. Чтобы услышать шум и динамику, включите шумоподавление и компрессор. Обе версии для прослушивания выровнены по громкости.",
   recordSample: "Записать образец",
   stopSample: "Стоп",
   recordingSample: "Говорите… затем нажмите Стоп",
@@ -194,7 +194,7 @@ const ru = {
 };
 
 const en = {
-  navHistory: "Recordings",
+  navHistory: "History",
   navGeneral: "General",
   navAudio: "Microphone",
   navFilters: "Filters",
@@ -216,7 +216,7 @@ const en = {
   copied: "Copied",
   filtersTitle: "Filters",
   filtersIntro:
-    "Record a short phrase on this page, then compare the original with the filtered sound.",
+    "Record a short phrase here, enable the filters you want, then compare the two buttons. The default preset is only a light low cut and a little gain, so the difference is subtle. Turn on noise reduction and compressor to hear a clearer change. Both listen versions are loudness-matched.",
   recordSample: "Record sample",
   stopSample: "Stop",
   recordingSample: "Speak… then press Stop",

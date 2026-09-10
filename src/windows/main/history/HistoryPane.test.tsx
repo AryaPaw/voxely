@@ -52,7 +52,7 @@ describe("HistoryPane", () => {
         copy={messagesFor("ru")}
       />,
     );
-    expect(screen.getByLabelText("Поиск по расшифровкам")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "История" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Удалить" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Копировать" }));
   });
