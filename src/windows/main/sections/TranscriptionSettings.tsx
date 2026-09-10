@@ -28,15 +28,14 @@ export function TranscriptionSettings({
     <div>
       <PageHeader icon={SECTION_ICONS.transcription} title={copy.navTranscription} />
       <p className="mb-3 text-sm text-muted-foreground">
-        Ключ хранится в Windows Credential Manager. В интерфейсе видно только:{" "}
-        {keyConfigured ? "ключ сохранён" : "ключа нет"}.
+        {copy.apiKeyHint} {keyConfigured ? copy.keySaved : copy.keyMissing}.
       </p>
-      <SettingsField label="API-ключ">
+      <SettingsField label={copy.apiKey}>
         <Input
           type="password"
           value={keyDraft}
           autoComplete="off"
-          placeholder={keyConfigured ? "Заменить ключ" : "sk-or-…"}
+          placeholder={keyConfigured ? copy.replaceKey : "sk-or-…"}
           onChange={(event) => setKeyDraft(event.target.value)}
         />
       </SettingsField>
@@ -47,13 +46,13 @@ export function TranscriptionSettings({
               await api.storeKey(keyDraft);
               onConfigured(true);
               setKeyDraft("");
-              toast.success("Ключ сохранён");
+              toast.success(copy.keySavedToast);
             } catch (error) {
-              toast.error(error instanceof Error ? error.message : "Ключ не сохранён");
+              toast.error(error instanceof Error ? error.message : copy.keyNotSaved);
             }
           }}
         >
-          {keyConfigured ? "Заменить ключ" : "Сохранить ключ"}
+          {keyConfigured ? copy.replaceKey : copy.saveKey}
         </Button>
         <Button
           variant="outline"
@@ -61,40 +60,40 @@ export function TranscriptionSettings({
             try {
               toast.success(await api.testConnection());
             } catch (error) {
-              toast.error(error instanceof Error ? error.message : "Нет соединения");
+              toast.error(error instanceof Error ? error.message : copy.noConnection);
             }
           }}
         >
-          Проверить соединение
+          {copy.testConnection}
         </Button>
       </div>
-      <p className="mb-3 max-w-lg text-sm text-muted-foreground">
-        Таймаут одного запроса растёт вместе с длительностью записи, до 15 минут. Общий лимит
-        покрывает длинные диктовки и повторы.
-      </p>
-      <SettingsField label="Модель">
-        <Input value={settings.model} onChange={(event) => onChange({ model: event.target.value })} />
+      <p className="mb-3 max-w-lg text-sm text-muted-foreground">{copy.timeoutHint}</p>
+      <SettingsField label={copy.modelLabel}>
+        <Input
+          value={settings.model}
+          onChange={(event) => onChange({ model: event.target.value })}
+        />
       </SettingsField>
-      <SettingsField label="Язык">
+      <SettingsField label={copy.language}>
         <SimpleSelect
-          aria-label="Язык"
+          aria-label={copy.language}
           value={settings.language}
           onValueChange={(language) => onChange({ language })}
           options={[
-            { value: "auto", label: "Авто" },
-            { value: "ru", label: "Русский" },
-            { value: "en", label: "English" },
+            { value: "auto", label: copy.insertAuto },
+            { value: "ru", label: copy.uiRu },
+            { value: "en", label: copy.uiEn },
           ]}
         />
       </SettingsField>
       <SettingsSwitchRow
-        label="Автоматические повторы"
+        label={copy.autoRetries}
         checked={settings.retry.automaticRetries}
         onCheckedChange={(automaticRetries) =>
           onChange({ retry: { ...settings.retry, automaticRetries } })
         }
       />
-      <SettingsField label="Дополнительные попытки (1 запрос + столько повторов)">
+      <SettingsField label={copy.extraAttempts}>
         <Input
           type="number"
           min={0}
@@ -107,7 +106,7 @@ export function TranscriptionSettings({
           }
         />
       </SettingsField>
-      <SettingsField label="Таймаут соединения (мс)">
+      <SettingsField label={copy.connectTimeout}>
         <Input
           type="number"
           value={settings.retry.connectTimeoutMs}
@@ -118,7 +117,7 @@ export function TranscriptionSettings({
           }
         />
       </SettingsField>
-      <SettingsField label="Таймаут запроса (мс)">
+      <SettingsField label={copy.requestTimeout}>
         <Input
           type="number"
           value={settings.retry.requestTimeoutMs}
@@ -129,7 +128,7 @@ export function TranscriptionSettings({
           }
         />
       </SettingsField>
-      <SettingsField label="Начальная пауза (мс)">
+      <SettingsField label={copy.initialDelay}>
         <Input
           type="number"
           value={settings.retry.initialRetryDelayMs}
@@ -140,7 +139,7 @@ export function TranscriptionSettings({
           }
         />
       </SettingsField>
-      <SettingsField label="Максимальная пауза (мс)">
+      <SettingsField label={copy.maxDelay}>
         <Input
           type="number"
           value={settings.retry.maxRetryDelayMs}
@@ -151,7 +150,7 @@ export function TranscriptionSettings({
           }
         />
       </SettingsField>
-      <SettingsField label="Общий лимит операции (мс)">
+      <SettingsField label={copy.totalLimit}>
         <Input
           type="number"
           value={settings.retry.totalOperationTimeoutMs}

@@ -5,9 +5,11 @@ import { Button } from "../ui/button";
 
 export function HotkeyCapture({
   value,
+  prompt,
   onChange,
 }: {
   value: string;
+  prompt: string;
   onChange: (value: string) => void;
 }) {
   const [listening, setListening] = useState(false);
@@ -46,7 +48,7 @@ export function HotkeyCapture({
       className="w-full justify-start font-normal"
       onClick={() => setListening((current) => !current)}
     >
-      {listening ? "Нажмите сочетание… Esc отмена" : value}
+      {listening ? prompt : value}
     </Button>
   );
 }

@@ -28,6 +28,12 @@ describe("overlayLabel", () => {
   it.each(cases)("%j", (state, label) => {
     expect(overlayLabel(state)).toBe(label);
   });
+
+  it("maps error codes on failed overlay labels", () => {
+    expect(overlayLabel({ kind: "failed", message: "legacy", code: "InvalidApiKey" })).toBe(
+      "Нет API-ключа OpenRouter",
+    );
+  });
 });
 
 describe("overlayIsBusy", () => {

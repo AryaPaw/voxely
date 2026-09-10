@@ -7,9 +7,9 @@ export function formatDuration(ms: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-export function formatTime(iso: string): string {
+export function formatTime(iso: string, locale = "ru-RU"): string {
   const date = new Date(iso);
-  return new Intl.DateTimeFormat("ru-RU", {
+  return new Intl.DateTimeFormat(locale, {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(date);

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { api, type AppSettings, type Recording, type SessionState } from "../../lib/api";
-import { messagesFor, resolveUiLocale } from "../../lib/i18n";
+import { formatInvokeError, messagesFor, resolveUiLocale } from "../../lib/i18n";
 import { applyTheme } from "../../lib/theme";
 import { Button } from "../../components/ui/button";
 import { HistoryPane } from "./history/HistoryPane";
@@ -36,14 +36,18 @@ export function MainApp() {
       applyTheme(nextSettings.theme);
       setLoadError("");
     } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "settings");
+      setLoadError(
+        formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
+      );
     }
   }
 
   useEffect(() => {
     void loadSettings();
     void refreshHistory().catch((error: unknown) => {
-      toast.error(error instanceof Error ? error.message : "history");
+      toast.error(
+        formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
+      );
     });
     const unlisten = listen<SessionState>("session://state", () => {
       void refreshHistory();
@@ -67,7 +71,9 @@ export function MainApp() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-sm">
         <p>{loadError}</p>
-        <Button onClick={() => void loadSettings()}>Повторить</Button>
+        <Button onClick={() => void loadSettings()}>
+          {messagesFor(resolveUiLocale("auto", navigator.language)).retryAction}
+        </Button>
       </div>
     );
   }
@@ -75,7 +81,7 @@ export function MainApp() {
   if (!settings) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        Загрузка…
+        {messagesFor(resolveUiLocale("auto", navigator.language)).loading}
       </div>
     );
   }
@@ -93,7 +99,7 @@ export function MainApp() {
     } catch (error) {
       setSettings(currentSettings);
       applyTheme(currentSettings.theme);
-      toast.error(error instanceof Error ? error.message : "settings");
+      toast.error(formatInvokeError(error, copy));
     }
   }
 
@@ -142,7 +148,9 @@ export function MainApp() {
                 copy={copy}
                 keyConfigured={keyConfigured}
                 onConfigured={setKeyConfigured}
-                onChange={(patch) => void persist({ ...settings, ...patch, firstRunComplete: true })}
+                onChange={(patch) =>
+                  void persist({ ...settings, ...patch, firstRunComplete: true })
+                }
               />
             ) : null}
             {section === "historySettings" ? (

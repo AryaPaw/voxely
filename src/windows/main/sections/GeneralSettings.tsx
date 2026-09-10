@@ -18,8 +18,12 @@ export function GeneralSettings({
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.general} title={copy.navGeneral} />
-      <SettingsField label="Глобальный хоткей">
-        <HotkeyCapture value={settings.hotkey} onChange={(hotkey) => onChange({ hotkey })} />
+      <SettingsField label={copy.globalHotkey}>
+        <HotkeyCapture
+          value={settings.hotkey}
+          prompt={copy.hotkeyPrompt}
+          onChange={(hotkey) => onChange({ hotkey })}
+        />
       </SettingsField>
       <SettingsSwitchRow
         label={copy.startWithWindows}

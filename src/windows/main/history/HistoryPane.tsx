@@ -46,9 +46,9 @@ export function HistoryPane({
     <div className="flex min-h-0 flex-1 flex-col bg-bg">
       {!keyConfigured ? (
         <div className="flex items-center justify-between gap-3 border-b border-border bg-surface px-6 py-2 text-sm">
-          <span>Нет API-ключа OpenRouter. Запись сохранится, расшифровка не отправится.</span>
+          <span>{copy.missingApiKeyBanner}</span>
           <Button size="sm" onClick={onOpenKey}>
-            Добавить ключ
+            {copy.addApiKey}
           </Button>
         </div>
       ) : null}
@@ -145,9 +145,9 @@ function HistoryCard({
     <article className="history-card">
       <div className="flex items-start justify-between gap-3">
         <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-          {formatTime(item.createdAt)}
+          {formatTime(item.createdAt, copy.dateLocale)}
           <span className="mx-2 opacity-50">|</span>
-          {Math.max(0, Math.round(item.durationMs / 1000))} с
+          {Math.max(0, Math.round(item.durationMs / 1000))} {copy.secondsAbbrev}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {item.transcript ? (
@@ -185,14 +185,20 @@ function HistoryCard({
               <RotateCcw className={`h-4 w-4${retrying ? " history-spin" : ""}`} />
             </Button>
           )}
-          <Button type="button" size="icon" variant="ghost" aria-label="Сведения" onClick={onToggleDetails}>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            aria-label={copy.details}
+            onClick={onToggleDetails}
+          >
             <Info className="h-4 w-4" />
           </Button>
           <Button
             type="button"
             size="icon"
             variant="ghost"
-            aria-label="Удалить"
+            aria-label={copy.delete}
             onClick={async () => {
               await api.deleteItem(item.id);
               await onRefresh();
@@ -205,7 +211,7 @@ function HistoryCard({
       <p className="mt-2 text-sm leading-6">
         {failed ? (
           <>
-            Расшифровка недоступна.{" "}
+            {copy.transcriptUnavailable}{" "}
             <button
               type="button"
               className="text-sky-400 underline-offset-2 hover:underline"
@@ -239,7 +245,7 @@ function HistoryCard({
         <button
           type="button"
           className="history-play"
-          aria-label={playing ? "Пауза" : "Слушать"}
+          aria-label={playing ? copy.pause : copy.listen}
           disabled={!audioSrc}
           onClick={togglePlay}
         >
@@ -271,10 +277,18 @@ function HistoryCard({
       ) : null}
       {detailsOpen ? (
         <dl className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
-          <div>Модель: {item.model}</div>
-          <div>Задержка: {item.latencyMs ?? "—"} мс</div>
-          <div>Стоимость: {item.cost ?? "—"}</div>
-          <div>Ошибка: {item.lastErrorCode ?? "—"}</div>
+          <div>
+            {copy.modelLabel}: {item.model}
+          </div>
+          <div>
+            {copy.latencyLabel}: {item.latencyMs ?? "—"} ms
+          </div>
+          <div>
+            {copy.costLabel}: {item.cost ?? "—"}
+          </div>
+          <div>
+            {copy.errorLabel}: {item.lastErrorCode ?? "—"}
+          </div>
         </dl>
       ) : null}
     </article>

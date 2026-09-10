@@ -20,24 +20,21 @@ export function AdvancedSettings({
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.advanced} title={copy.navAdvanced} />
-      <SettingsField label="Вставка текста">
+      <SettingsField label={copy.insertMode}>
         <SimpleSelect
-          aria-label="Вставка текста"
+          aria-label={copy.insertMode}
           value={settings.insertionMode}
           onValueChange={(insertionMode) => onChange({ insertionMode })}
           options={[
-            { value: "auto", label: "Авто" },
-            { value: "sendinput", label: "SendInput" },
-            { value: "clipboard", label: "Буфер обмена" },
+            { value: "auto", label: copy.insertAuto },
+            { value: "sendinput", label: copy.insertSendInput },
+            { value: "clipboard", label: copy.insertClipboard },
           ]}
         />
       </SettingsField>
-      <p className="mb-4 max-w-lg text-xs text-muted-foreground">
-        Авто — рекомендуемый режим: вставка в то окно, где вы говорили. Буфер обмена надёжнее в
-        части приложений, но затирает то, что уже скопировано.
-      </p>
+      <p className="mb-4 max-w-lg text-xs text-muted-foreground">{copy.insertHint}</p>
       <SettingsSwitchRow
-        label="Отладочные логи"
+        label={copy.debugLogs}
         checked={settings.debugLogging}
         onCheckedChange={(debugLogging) => onChange({ debugLogging })}
       />
@@ -45,11 +42,11 @@ export function AdvancedSettings({
         variant="outline"
         onClick={() => {
           void api.openLogs().catch((error: unknown) => {
-            toast.error(error instanceof Error ? error.message : "logs");
+            toast.error(error instanceof Error ? error.message : copy.openLogs);
           });
         }}
       >
-        Открыть логи
+        {copy.openLogs}
       </Button>
     </div>
   );

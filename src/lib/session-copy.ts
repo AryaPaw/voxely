@@ -1,25 +1,26 @@
 import type { SessionState } from "./api";
+import { localizedError, messagesFor, type Messages } from "./i18n";
 
-export function overlayLabel(state: SessionState): string {
+export function overlayLabel(state: SessionState, copy: Messages = messagesFor("ru")): string {
   switch (state.kind) {
     case "idle":
-      return "Готово";
+      return copy.overlayReady;
     case "startingRecording":
     case "recording":
-      return "Запись";
+      return copy.overlayRecording;
     case "stoppingRecording":
     case "saving":
-      return "Сохранение";
+      return copy.overlaySaving;
     case "processingAudio":
-      return "Обработка";
+      return copy.overlayProcessing;
     case "transcribing":
-      return "Расшифровка";
+      return copy.overlayTranscribing;
     case "retryWaiting":
-      return `Повтор ${state.attempt}`;
+      return copy.overlayRetry.replace("{attempt}", String(state.attempt));
     case "completed":
-      return "Готово";
+      return copy.overlayReady;
     case "failed":
-      return state.message;
+      return localizedError(state.code, copy, state.message);
     default: {
       const _never: never = state;
       return _never;
@@ -27,24 +28,27 @@ export function overlayLabel(state: SessionState): string {
   }
 }
 
-export function sessionStatusLabel(state: SessionState): string {
+export function sessionStatusLabel(
+  state: SessionState,
+  copy: Messages = messagesFor("ru"),
+): string {
   switch (state.kind) {
     case "idle":
-      return "Ожидание";
+      return copy.overlayWaiting;
     case "startingRecording":
     case "recording":
-      return "Запись";
+      return copy.overlayRecording;
     case "stoppingRecording":
     case "saving":
     case "processingAudio":
-      return "Обработка";
+      return copy.overlayProcessing;
     case "transcribing":
     case "retryWaiting":
-      return "Расшифровка";
+      return copy.overlayTranscribing;
     case "completed":
-      return "Готово";
+      return copy.overlayReady;
     case "failed":
-      return "Ошибка";
+      return copy.overlayError;
     default: {
       const _never: never = state;
       return _never;
@@ -73,14 +77,14 @@ export function overlayIsBusy(state: SessionState): boolean {
   }
 }
 
-export function historyStatusLabel(status: string): string {
+export function historyStatusLabel(status: string, copy: Messages = messagesFor("ru")): string {
   switch (status) {
     case "processing":
-      return "Обработка";
+      return copy.overlayProcessing;
     case "completed":
-      return "Готово";
+      return copy.overlayReady;
     case "failed":
-      return "Ошибка";
+      return copy.overlayError;
     default:
       return status;
   }

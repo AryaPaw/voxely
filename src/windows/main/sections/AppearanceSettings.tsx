@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { toast } from "sonner";
 import { api, type AppSettings } from "../../../lib/api";
-import type { Messages } from "../../../lib/i18n";
+import { formatInvokeError, updateToast, type Messages } from "../../../lib/i18n";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { SettingsField } from "../../../components/settings/SettingsField";
 import { SettingsSwitchRow } from "../../../components/settings/SettingsSwitchRow";
@@ -22,15 +22,15 @@ export function AppearanceSettings({
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.appearance} title={copy.navAppearance} />
-      <SettingsField label="Тема">
+      <SettingsField label={copy.theme}>
         <SimpleSelect
-          aria-label="Тема"
+          aria-label={copy.theme}
           value={settings.theme}
           onValueChange={(theme) => onChange({ theme })}
           options={[
-            { value: "system", label: "Системная" },
-            { value: "light", label: "Светлая" },
-            { value: "dark", label: "Тёмная" },
+            { value: "system", label: copy.themeSystem },
+            { value: "light", label: copy.themeLight },
+            { value: "dark", label: copy.themeDark },
           ]}
         />
       </SettingsField>
@@ -57,9 +57,10 @@ export function AppearanceSettings({
         onClick={async () => {
           setChecking(true);
           try {
-            toast.success(await api.checkForUpdates());
+            const code = await api.checkForUpdates();
+            toast.success(updateToast(code, copy));
           } catch (error) {
-            toast.error(error instanceof Error ? error.message : copy.checkUpdates);
+            toast.error(formatInvokeError(error, copy));
           } finally {
             setChecking(false);
           }

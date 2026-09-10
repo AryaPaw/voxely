@@ -38,13 +38,13 @@ export function AudioSettings({
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.audio} title={copy.navAudio} />
-      <SettingsField label="Устройство ввода">
+      <SettingsField label={copy.inputDevice}>
         <SimpleSelect
-          aria-label="Устройство ввода"
+          aria-label={copy.inputDevice}
           value={settings.inputDevice}
           onValueChange={(inputDevice) => onChange({ inputDevice })}
           options={[
-            { value: "default", label: "Системное по умолчанию" },
+            { value: "default", label: copy.defaultMic },
             ...devices.map((device) => ({ value: device.id, label: device.name })),
           ]}
         />

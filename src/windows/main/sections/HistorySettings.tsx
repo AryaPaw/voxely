@@ -32,52 +32,52 @@ export function HistorySettings({
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.historySettings} title={copy.navStorage} />
-      <SettingsField label="Хранить записи">
+      <SettingsField label={copy.keepRecordings}>
         <SimpleSelect
-          aria-label="Хранить записи"
+          aria-label={copy.keepRecordings}
           value={settings.retention}
           onValueChange={(retention) => onChange({ retention })}
           options={[
-            { value: "1d", label: "1 день" },
-            { value: "3d", label: "3 дня" },
-            { value: "7d", label: "7 дней" },
-            { value: "30d", label: "30 дней" },
-            { value: "90d", label: "90 дней" },
-            { value: "forever", label: "Всегда" },
+            { value: "1d", label: copy.retain1d },
+            { value: "3d", label: copy.retain3d },
+            { value: "7d", label: copy.retain7d },
+            { value: "30d", label: copy.retain30d },
+            { value: "90d", label: copy.retain90d },
+            { value: "forever", label: copy.retainForever },
           ]}
         />
       </SettingsField>
-      <SettingsField label="Лимит места">
+      <SettingsField label={copy.storageLimit}>
         <SimpleSelect
-          aria-label="Лимит места"
+          aria-label={copy.storageLimit}
           value={settings.storageLimit}
           onValueChange={(storageLimit) => onChange({ storageLimit })}
           options={[
-            { value: "500mb", label: "500 МБ" },
-            { value: "1gb", label: "1 ГБ" },
-            { value: "5gb", label: "5 ГБ" },
-            { value: "unlimited", label: "Без лимита" },
+            { value: "500mb", label: copy.limit500mb },
+            { value: "1gb", label: copy.limit1gb },
+            { value: "5gb", label: copy.limit5gb },
+            { value: "unlimited", label: copy.limitUnlimited },
           ]}
         />
       </SettingsField>
       <SettingsSwitchRow
-        label="Хранить исходные записи (лучше для прослушивания)"
+        label={copy.keepOriginals}
         checked={settings.keepOriginalRecordings}
         onCheckedChange={(keepOriginalRecordings) => onChange({ keepOriginalRecordings })}
       />
       <AlertDialog>
         <AlertDialogTrigger asChild>
-          <Button variant="destructive">Удалить всю историю</Button>
+          <Button variant="destructive">{copy.deleteAllHistory}</Button>
         </AlertDialogTrigger>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Удалить всю историю?</AlertDialogTitle>
-            <AlertDialogDescription>Это нельзя отменить.</AlertDialogDescription>
+            <AlertDialogTitle>{copy.deleteAllConfirm}</AlertDialogTitle>
+            <AlertDialogDescription>{copy.deleteAllCannotUndo}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogCancel>{copy.cancel}</AlertDialogCancel>
             <AlertDialogAction variant="destructive" onClick={onDeleteAll}>
-              Удалить
+              {copy.delete}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

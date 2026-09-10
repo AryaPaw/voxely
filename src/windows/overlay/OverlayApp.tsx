@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, type SessionState } from "../../lib/api";
 import { playDictationCue } from "../../lib/overlay-cue";
+import { messagesFor, resolveUiLocale } from "../../lib/i18n";
 import { overlayIsBusy, overlayLabel } from "../../lib/session-copy";
 import { applyTheme } from "../../lib/theme";
 import { OverlayWave } from "./OverlayWave";
@@ -11,6 +12,7 @@ export function OverlayApp() {
   const [elapsed, setElapsed] = useState(0);
   const [hovered, setCancelHover] = useState(false);
   const [notify, setNotify] = useState(true);
+  const [copy, setCopy] = useState(() => messagesFor("ru"));
   const recording = state.kind === "recording" || state.kind === "startingRecording";
   const busy = overlayIsBusy(state);
   const cancelReady = busy && hovered;
@@ -19,6 +21,7 @@ export function OverlayApp() {
     void api.settings().then((settings) => {
       applyTheme(settings.theme);
       setNotify(settings.notifications);
+      setCopy(messagesFor(resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language)));
     });
     void api.session().then(setState);
     const unlisten = listen<SessionState>("session://state", (event) => setState(event.payload));
@@ -73,7 +76,7 @@ export function OverlayApp() {
   }
 
   const centered = cancelReady || (busy && !recording);
-  const status = cancelReady ? "Отменить запись" : overlayLabel(state);
+  const status = cancelReady ? copy.overlayCancel : overlayLabel(state, copy);
   const showDots = busy && !cancelReady;
   const clock = recording && !cancelReady ? formatClock(elapsed) : "";
 
@@ -89,7 +92,7 @@ export function OverlayApp() {
           }
         }}
         onMouseLeave={() => setCancelHover(false)}
-        aria-label={busy ? "Наведите, чтобы отменить запись" : status}
+        aria-label={busy ? copy.overlayCancelAria : status}
       >
         {centered ? (
           <span className="overlay-center">
