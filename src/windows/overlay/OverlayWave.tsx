@@ -12,9 +12,20 @@ export function OverlayWave({ active }: { active: boolean }) {
   const levelsRef = useRef<number[]>([]);
   const barsRef = useRef<number[]>([]);
   const lastFrameRef = useRef<number | null>(null);
-  const reducedMotion = useRef(
-    typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-  );
+  const reducedMotion = useRef(false);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") {
+      return;
+    }
+    const media = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const sync = () => {
+      reducedMotion.current = media.matches;
+    };
+    sync();
+    media.addEventListener("change", sync);
+    return () => media.removeEventListener("change", sync);
+  }, []);
 
   useEffect(() => {
     if (!active) {
@@ -42,7 +53,7 @@ export function OverlayWave({ active }: { active: boolean }) {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) {
+    if (!canvas || !active) {
       return;
     }
     const ctx = canvas.getContext("2d");
@@ -65,14 +76,15 @@ export function OverlayWave({ active }: { active: boolean }) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       const next = overlayBarHeights(
         levelsRef.current,
-        active,
+        true,
         barsRef.current,
         OVERLAY_BAR_COUNT,
         dt,
         reducedMotion.current,
       );
       barsRef.current = next;
-      drawOverlayWave(ctx, width, height, active ? next : []);
+      const fill = getComputedStyle(canvas).getPropertyValue("color").trim() || "#88c8e0";
+      drawOverlayWave(ctx, width, height, next, fill);
       frame = window.requestAnimationFrame(draw);
     };
     frame = window.requestAnimationFrame(draw);

@@ -5,8 +5,8 @@ pub struct WorkArea {
     pub bottom: i32,
 }
 
-pub const OVERLAY_WIDTH: f64 = 360.0;
-pub const OVERLAY_HEIGHT: f64 = 48.0;
+pub const OVERLAY_WIDTH: f64 = 420.0;
+pub const OVERLAY_HEIGHT: f64 = 72.0;
 pub const OVERLAY_GAP_PX: i32 = 48;
 
 pub fn overlay_physical_position(work: WorkArea, width: u32, height: u32, gap: i32) -> (i32, i32) {
@@ -36,8 +36,8 @@ mod tests {
         );
         assert_eq!(x, (1920 - OVERLAY_WIDTH as i32) / 2);
         assert_eq!(y, 1040 - OVERLAY_HEIGHT as i32 - OVERLAY_GAP_PX);
-        assert_eq!(OVERLAY_WIDTH, 360.0);
-        assert_eq!(OVERLAY_HEIGHT, 48.0);
+        assert_eq!(OVERLAY_WIDTH, 420.0);
+        assert_eq!(OVERLAY_HEIGHT, 72.0);
     }
 
     #[test]

@@ -33,6 +33,7 @@ export function drawOverlayWave(
   width: number,
   height: number,
   bars: number[],
+  fillStyle = "currentColor",
 ): void {
   ctx.clearRect(0, 0, width, height);
   if (bars.length === 0 || width <= 0 || height <= 0) {
@@ -41,10 +42,13 @@ export function drawOverlayWave(
   const gap = 1.5;
   const barWidth = Math.max(2, (width - gap * (bars.length - 1)) / bars.length);
   const radius = Math.min(2.5, barWidth / 2);
-  ctx.fillStyle = "#d5dbe6";
+  ctx.fillStyle = fillStyle;
   bars.forEach((value, index) => {
-    const amplitude = Math.min(1, Math.max(0.08, value));
-    const barHeight = Math.max(2, amplitude * height);
+    const amplitude = Math.min(1, Math.max(0, value));
+    const barHeight = amplitude * height;
+    if (barHeight < 0.5) {
+      return;
+    }
     const x = index * (barWidth + gap);
     const y = (height - barHeight) / 2;
     roundedBar(ctx, x, y, barWidth, barHeight, radius);

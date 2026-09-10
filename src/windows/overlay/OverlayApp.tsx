@@ -1,34 +1,45 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { api, type SessionState } from "../../lib/api";
-import { playDictationCue } from "../../lib/overlay-cue";
-import { messagesFor, resolveUiLocale } from "../../lib/i18n";
+import { api, type AppSettings, type SessionState } from "../../lib/api";
+import { applyUiLocale, messagesFor, resolveUiLocale } from "../../lib/i18n";
 import { overlayIsBusy, overlayLabel } from "../../lib/session-copy";
-import { applyTheme } from "../../lib/theme";
+import { applyTheme, watchSystemTheme } from "../../lib/theme";
 import { OverlayWave } from "./OverlayWave";
 
 export function OverlayApp() {
   const [state, setState] = useState<SessionState>({ kind: "idle" });
   const [elapsed, setElapsed] = useState(0);
   const [hovered, setCancelHover] = useState(false);
-  const [notify, setNotify] = useState(true);
   const [copy, setCopy] = useState(() => messagesFor("ru"));
+  const [theme, setTheme] = useState("dark");
   const recording = state.kind === "recording" || state.kind === "startingRecording";
   const busy = overlayIsBusy(state);
   const cancelReady = busy && hovered;
 
+  function applySettings(settings: AppSettings) {
+    setTheme(settings.theme);
+    applyTheme(settings.theme);
+    const locale = resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language);
+    applyUiLocale(locale);
+    setCopy(messagesFor(locale));
+  }
+
   useEffect(() => {
-    void api.settings().then((settings) => {
-      applyTheme(settings.theme);
-      setNotify(settings.notifications);
-      setCopy(messagesFor(resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language)));
-    });
+    void api.settings().then(applySettings);
     void api.session().then(setState);
-    const unlisten = listen<SessionState>("session://state", (event) => setState(event.payload));
+    const unlistenState = listen<SessionState>("session://state", (event) =>
+      setState(event.payload),
+    );
+    const unlistenSettings = listen<AppSettings>("settings://changed", (event) =>
+      applySettings(event.payload),
+    );
     return () => {
-      void unlisten.then((fn) => fn());
+      void unlistenState.then((fn) => fn());
+      void unlistenSettings.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => watchSystemTheme(theme), [theme]);
 
   useEffect(() => {
     if (!busy) {
@@ -36,19 +47,11 @@ export function OverlayApp() {
     }
   }, [busy]);
 
-  const wasRecording = useRef(false);
   useEffect(() => {
-    if (recording && !wasRecording.current) {
+    if (recording) {
       setElapsed(0);
-      if (notify) {
-        playDictationCue("start");
-      }
     }
-    if (!recording && wasRecording.current && notify) {
-      playDictationCue("stop");
-    }
-    wasRecording.current = recording;
-  }, [notify, recording]);
+  }, [recording]);
 
   useEffect(() => {
     if (!recording) {
@@ -79,6 +82,7 @@ export function OverlayApp() {
   const status = cancelReady ? copy.overlayCancel : overlayLabel(state, copy);
   const showDots = busy && !cancelReady;
   const clock = recording && !cancelReady ? formatClock(elapsed) : "";
+  const cancelHint = busy ? copy.overlayCancel : status;
 
   return (
     <div className="overlay-shell">
@@ -92,7 +96,7 @@ export function OverlayApp() {
           }
         }}
         onMouseLeave={() => setCancelHover(false)}
-        aria-label={busy ? copy.overlayCancelAria : status}
+        aria-label={cancelHint}
       >
         {centered ? (
           <span className="overlay-center">

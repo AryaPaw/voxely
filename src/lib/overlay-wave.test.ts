@@ -66,4 +66,18 @@ describe("drawOverlayWave", () => {
     expect(ops).toContain("roundRect");
     expect(ops).not.toContain("lineTo");
   });
+
+  it("keeps silent bars at zero height", () => {
+    const ops: string[] = [];
+    const ctx = {
+      clearRect: () => undefined,
+      fill: () => ops.push("fill"),
+      beginPath: () => ops.push("begin"),
+      roundRect: () => ops.push("roundRect"),
+      rect: () => ops.push("rect"),
+      fillStyle: "",
+    };
+    drawOverlayWave(ctx as unknown as CanvasRenderingContext2D, 120, 16, [0, 0, 0]);
+    expect(ops).not.toContain("roundRect");
+  });
 });
