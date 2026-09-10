@@ -3,7 +3,7 @@
     <MappedFolder>
       <HostFolder>__HOST_BUNDLE__</HostFolder>
       <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\VoxelyBundle</SandboxFolder>
-      <ReadOnly>true</ReadOnly>
+      <ReadOnly>false</ReadOnly>
     </MappedFolder>
   </MappedFolders>
   <LogonCommand>

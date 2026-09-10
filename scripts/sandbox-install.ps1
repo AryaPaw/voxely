@@ -1,12 +1,13 @@
 $ErrorActionPreference = "Stop"
-$log = Join-Path $env:TEMP "voxely-sandbox.log"
+$bundle = "C:\Users\WDAGUtilityAccount\Desktop\VoxelyBundle"
+$log = Join-Path $bundle "sandbox-run.log"
 function Write-Log([string]$Message) {
   Add-Content -Path $log -Value ("{0} {1}" -f (Get-Date -Format o), $Message)
 }
 Write-Log "start"
-$setup = Get-ChildItem "C:\Users\WDAGUtilityAccount\Desktop\VoxelyBundle" -Filter "*setup*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+$setup = Get-ChildItem $bundle -Filter "*setup*.exe" | Select-Object -First 1
 if (-not $setup) {
-  $setup = Get-ChildItem "C:\Users\WDAGUtilityAccount\Desktop\VoxelyBundle" -Filter "*.exe" | Select-Object -First 1
+  $setup = Get-ChildItem $bundle -Filter "*.exe" | Select-Object -First 1
 }
 if (-not $setup) { throw "NSIS installer not mapped into the Sandbox" }
 Write-Log "install $($setup.FullName)"
