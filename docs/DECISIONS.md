@@ -24,3 +24,11 @@ Unbounded reqwest default timeouts: rejected.
 TCP-level connectivity ping loops: rejected; the STT request is the source of truth.
 
 Idempotency-Key: not documented by OpenRouter for STT, so retries remain bounded and may double-bill if the server succeeded and the response was lost.
+
+## Installer and updates
+
+Official Tauri NSIS + signed updater. Inno Setup and the custom GitHub-asset updater were removed. Authenticode is deferred. Version SSOT is `package.json`, `Cargo.toml`, and `tauri.conf.json`.
+
+## UI foundation
+
+Official shadcn CLI with Radix. Product strings live in `src/lib/i18n.ts`.

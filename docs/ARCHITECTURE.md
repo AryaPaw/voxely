@@ -9,6 +9,10 @@ Voxely is a Windows-first Tauri 2 desktop app. The WebView is only UI. Recording
 3. After stop, a DSP worker reads raw audio, writes processed WAV, then OpenRouter multipart STT runs with a bounded retry scheduler.
 4. Processed WAV is the retry source of truth.
 5. Text insertion uses the HWND captured at record start. If the foreground window changed, History is updated and nothing is typed into a new app.
+6. Session generation invalidates late STT results after cancel or a new start.
+7. Updates use the official Tauri updater. Install is deferred while dictation is cancellable.
+
+## Domains
 
 ## Domains
 
@@ -18,8 +22,11 @@ Voxely is a Windows-first Tauri 2 desktop app. The WebView is only UI. Recording
 - `transcription`: OpenRouter client + retry policy
 - `history`: SQLite + retention
 - `windows_int`: credentials, injector
+- `updates`: Tauri updater coordinator and version policy
 - `obs`: local scene collection import
 
 ## Overlay
 
-Created as a frameless always-on-top window that is not focused. Meter events are RMS/peak only, about 30 FPS.
+Created as a frameless always-on-top window that is not focused. Size is 360x48 logical. Overlay IPC is limited to session state, cancel, meter, and settings.
+
+Main UI is split by screen: `MainApp` shell, `sectionNav`, `sections/*`, `history/*`. Strings live in `src/lib/i18n.ts`.
