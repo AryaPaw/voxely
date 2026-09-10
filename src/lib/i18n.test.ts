@@ -20,8 +20,9 @@ describe("resolveUiLocale", () => {
 });
 
 describe("messagesFor", () => {
-  it("returns English copy", () => {
-    expect(messagesFor("en").checkUpdates).toBe("Check for updates");
+  it("keeps insert copy free of SendInput", () => {
+    expect(messagesFor("en").insertHint).not.toMatch(/SendInput/);
+    expect(messagesFor("ru").insertHint).not.toMatch(/SendInput/);
   });
 
   it("keeps the same keys in RU and EN", () => {

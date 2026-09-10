@@ -173,6 +173,9 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     show_overlay(app);
     ctx.emit_state(app);
     let settings = ctx.settings.lock().clone();
+    if settings.notifications {
+        crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Start);
+    }
     let id = uuid::Uuid::new_v4().to_string();
     let dest = audio_dir(&ctx.data_dir).join(format!("{id}.raw.wav"));
     let device = if settings.input_device == "default" {
@@ -236,6 +239,9 @@ fn stop_recording(app: &AppHandle) -> Result<(), AppError> {
     };
     ctx.transition(SessionEvent::StopRequested)?;
     ctx.emit_state(app);
+    if ctx.settings.lock().notifications {
+        crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Stop);
+    }
     let app_handle = app.clone();
     thread::spawn(move || match session.stop() {
         Ok(result) => {
@@ -439,10 +445,19 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
                 ) {
                     return;
                 }
+                let insert_result = insert_transcript_now(&mode, captured, &text);
                 hide_overlay_now(&app_clone);
                 let _ = ctx.transition(SessionEvent::Dismiss);
                 ctx.emit_state(&app_clone);
-                insert_transcript_now(&mode, captured, &text);
+                match insert_result {
+                    Ok("copied") => {
+                        let _ = app_clone.emit("session://insert", "copied");
+                    }
+                    Ok(_) => {}
+                    Err(err) => {
+                        let _ = app_clone.emit("session://insert", err.code());
+                    }
+                }
             });
             Ok(())
         }
@@ -458,31 +473,22 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
     }
 }
 
-fn insert_transcript_now(mode: &str, captured: Option<NativeHwnd>, text: &str) {
+fn insert_transcript_now(
+    mode: &str,
+    captured: Option<NativeHwnd>,
+    text: &str,
+) -> Result<&'static str, AppError> {
     std::thread::sleep(std::time::Duration::from_millis(30));
     match mode {
         "clipboard" => {
-            if let Err(err) = native::clipboard_paste(text) {
-                tracing::warn!(error = %err, "clipboard paste failed");
-            }
-        }
-        "sendinput" => {
-            let Some(hwnd) = captured else {
-                tracing::warn!("no captured window for insert");
-                return;
-            };
-            if let Err(err) = native::insert_unicode(hwnd, text) {
-                tracing::warn!(error = %err, "unicode insert failed");
-            }
+            native::clipboard_copy(text)?;
+            Ok("copied")
         }
         _ => {
-            let Some(hwnd) = captured else {
-                tracing::warn!("no captured window for insert");
-                return;
-            };
-            if let Err(err) = native::insert_into_window(hwnd, text) {
-                tracing::warn!(error = %err, "insert into captured window failed");
-            }
+            let hwnd = captured
+                .ok_or_else(|| AppError::TextInsertionFailed("no captured window".into()))?;
+            native::insert_unicode(hwnd, text)?;
+            Ok("inserted")
         }
     }
 }
@@ -595,7 +601,11 @@ fn recover_stale_processing(
             rec.last_error_message = Some(AppError::Interrupted.user_message());
         } else {
             rec.status = RecordingStatus::Failed;
-            rec.last_error_code = Some(AppError::StorageFailed("audio missing".into()).code().into());
+            rec.last_error_code = Some(
+                AppError::StorageFailed("audio missing".into())
+                    .code()
+                    .into(),
+            );
             rec.last_error_message =
                 Some(AppError::StorageFailed("audio missing".into()).user_message());
         }

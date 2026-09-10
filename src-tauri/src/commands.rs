@@ -5,8 +5,7 @@ use crate::audio::capture::{read_pcm16_wav, write_pcm16_wav, CaptureSession};
 use crate::audio::devices::InputDeviceInfo;
 use crate::dsp::metrics::SAMPLE_RATE;
 use crate::dsp::obs_mapping::{parse_scene_collection, preset_from_preview, ObsImportPreview};
-use crate::dsp::pipeline::prepare_listen;
-use crate::dsp::pipeline::DspPreset;
+use crate::dsp::pipeline::{prepare_listen_preview, DspPreset};
 use crate::error::AppError;
 use crate::history::repository::Recording;
 use crate::history::retention::delete_recording;
@@ -18,7 +17,7 @@ use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
 #[tauri::command]
@@ -41,6 +40,7 @@ pub fn save_settings(
     settings.mic_tune.validate()?;
     settings.save(&ctx.settings_path)?;
     *ctx.settings.lock() = settings.clone();
+    let _ = app.emit("settings://changed", settings.clone());
     let _ = crate::app::session::apply_configured_retention(ctx.as_ref());
     if let Err(e) = crate::app::shortcuts::sync_shortcuts(&app) {
         tracing::error!(error = %e, "hotkey register failed");
@@ -122,7 +122,7 @@ fn wav_data_url(path: &Path) -> Result<String, AppError> {
 fn preview_from_original(ctx: &AppContext, original: &Path) -> Result<DspPreview, AppError> {
     let samples = read_pcm16_wav(original)?;
     let preset = ctx.settings.lock().active_preset();
-    let (processed, metrics) = prepare_listen(preset, samples)?;
+    let (processed, metrics, _) = prepare_listen_preview(preset, samples)?;
     let audio_root = crate::history::repository::audio_dir(&ctx.data_dir);
     let processed_path = audio_root.join("filter-preview.wav");
     write_pcm16_wav(&processed_path, SAMPLE_RATE, &processed)?;
@@ -145,20 +145,10 @@ fn preview_from_original(ctx: &AppContext, original: &Path) -> Result<DspPreview
 #[tauri::command]
 pub fn preview_dsp(ctx: State<'_, Arc<AppContext>>) -> Result<DspPreview, AppError> {
     ctx.settings.lock().mic_tune.validate()?;
-    let rec = ctx
-        .history
-        .lock()
-        .list(20)?
-        .into_iter()
-        .find(|item| item.raw_audio_path.is_some())
-        .ok_or_else(|| AppError::StorageFailed("no recording to preview".into()))?;
-    let raw_name = rec
-        .raw_audio_path
-        .ok_or_else(|| AppError::StorageFailed("raw missing".into()))?;
     let audio_root = crate::history::repository::audio_dir(&ctx.data_dir);
-    let original = audio_root.join(raw_name);
+    let original = audio_root.join("filter-sample.wav");
     if !original.exists() {
-        return Err(AppError::StorageFailed("no recording to preview".into()));
+        return Err(AppError::StorageFailed("no filter sample".into()));
     }
     preview_from_original(ctx.inner(), &original)
 }
@@ -218,10 +208,10 @@ pub fn store_api_key(key: String) -> Result<bool, AppError> {
 }
 
 #[tauri::command]
-pub async fn test_openrouter(ctx: State<'_, Arc<AppContext>>) -> Result<String, AppError> {
+pub async fn test_openrouter(ctx: State<'_, Arc<AppContext>>) -> Result<u32, AppError> {
     let key = crate::windows_int::credentials::get_api_key()?.ok_or(AppError::InvalidApiKey)?;
     let models = list_transcription_models(&ctx.client, &key).await?;
-    Ok(format!("{} models", models.len()))
+    Ok(models.len() as u32)
 }
 
 #[tauri::command]
@@ -306,15 +296,20 @@ pub fn insert_transcript(app: AppHandle, text: String) -> Result<(), AppError> {
     let mode = ctx.settings.lock().insertion_mode.clone();
     let captured = *ctx.captured_hwnd.lock();
     match mode.as_str() {
-        "clipboard" => native::clipboard_paste(&text).map(|_| ()),
-        "sendinput" => captured
-            .or_else(native::foreground_hwnd)
-            .ok_or_else(|| AppError::TextInsertionFailed("no window".into()))
-            .and_then(|hwnd| native::insert_unicode(hwnd, &text)),
+        "clipboard" => native::clipboard_copy(&text),
         _ => captured
             .ok_or_else(|| AppError::TextInsertionFailed("no captured window".into()))
-            .and_then(|hwnd| native::insert_into_window(hwnd, &text)),
+            .and_then(|hwnd| native::insert_unicode(hwnd, &text)),
     }
+}
+
+#[tauri::command]
+pub fn open_github() -> Result<(), AppError> {
+    tauri_plugin_opener::open_url(
+        crate::windows_int::text_injector::GITHUB_REPO_URL,
+        None::<&str>,
+    )
+    .map_err(|e| AppError::StorageFailed(e.to_string()))
 }
 
 #[tauri::command]

@@ -26,8 +26,7 @@ export function AdvancedSettings({
           value={settings.insertionMode}
           onValueChange={(insertionMode) => onChange({ insertionMode })}
           options={[
-            { value: "auto", label: copy.insertAuto },
-            { value: "sendinput", label: copy.insertSendInput },
+            { value: "unicode", label: copy.insertUnicode },
             { value: "clipboard", label: copy.insertClipboard },
           ]}
         />

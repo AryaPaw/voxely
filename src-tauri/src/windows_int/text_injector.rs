@@ -49,6 +49,17 @@ pub fn should_post_paste(captured_root: usize, focus_root: Option<usize>) -> boo
     matches!(focus_root, Some(root) if root == captured_root)
 }
 
+pub fn utf16_code_units(text: &str) -> Vec<u16> {
+    text.encode_utf16().collect()
+}
+
+pub fn unicode_send_count(text: &str) -> u32 {
+    let units = utf16_code_units(text).len() as u32;
+    units.saturating_mul(2).saturating_add(8)
+}
+
+pub const GITHUB_REPO_URL: &str = "https://github.com/AryaPaw/voxely";
+
 #[cfg(windows)]
 pub mod native {
     use super::{
@@ -62,7 +73,9 @@ pub mod native {
     };
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, VK_CONTROL, VK_V,
+        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
+        VIRTUAL_KEY, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT,
+        VK_RWIN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
@@ -108,8 +121,9 @@ pub mod native {
             if !IsWindow(target).as_bool() {
                 return Err(AppError::TextInsertionFailed("window gone".into()));
             }
-            let previous = snapshot_clipboard();
-            clipboard_copy(text)?;
+            if text.is_empty() {
+                return Ok(());
+            }
             let captured_root_hwnd = root_hwnd(target);
             let captured_root = captured_root_hwnd.0 as usize;
             let mut last_reason = "focus left captured window";
@@ -124,16 +138,10 @@ pub mod native {
                 }
                 let focus_root = hwnd_root_value(thread_focus_hwnd(target).unwrap_or(target));
                 if should_send_key_paste(captured_root, foreground_root, focus_root) {
-                    let inputs = [
-                        key(VK_CONTROL.0, false),
-                        key(VK_V.0, false),
-                        key(VK_V.0, true),
-                        key(VK_CONTROL.0, true),
-                    ];
+                    let inputs = unicode_inputs(text);
+                    let expected = inputs.len() as u32;
                     let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                    if insert_delivered(sent, true) {
-                        std::thread::sleep(std::time::Duration::from_millis(40));
-                        restore_clipboard_if_unchanged(text, previous.as_deref());
+                    if insert_delivered(sent, true) && sent == expected {
                         return Ok(());
                     }
                     last_reason = "SendInput delivered no events";
@@ -143,8 +151,44 @@ pub mod native {
                     last_reason = "focus left captured window";
                 }
             }
-            restore_clipboard_if_unchanged(text, previous.as_deref());
             Err(AppError::TextInsertionFailed(last_reason.into()))
+        }
+    }
+
+    fn unicode_inputs(text: &str) -> Vec<INPUT> {
+        let mut inputs = vec![
+            key(VK_LCONTROL.0, true),
+            key(VK_RCONTROL.0, true),
+            key(VK_LMENU.0, true),
+            key(VK_RMENU.0, true),
+            key(VK_LSHIFT.0, true),
+            key(VK_RSHIFT.0, true),
+            key(VK_LWIN.0, true),
+            key(VK_RWIN.0, true),
+        ];
+        for unit in super::utf16_code_units(text) {
+            inputs.push(unicode_key(unit, false));
+            inputs.push(unicode_key(unit, true));
+        }
+        inputs
+    }
+
+    fn unicode_key(unit: u16, up: bool) -> INPUT {
+        let mut flags = KEYEVENTF_UNICODE;
+        if up {
+            flags |= KEYEVENTF_KEYUP;
+        }
+        INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: unit,
+                    dwFlags: flags,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
         }
     }
 
@@ -238,26 +282,8 @@ pub mod native {
     }
 
     pub fn clipboard_paste(text: &str) -> Result<Option<String>, AppError> {
-        unsafe {
-            let previous = snapshot_clipboard();
-            clipboard_copy(text)?;
-            let inputs = [
-                key(VK_CONTROL.0, false),
-                key(VK_V.0, false),
-                key(VK_V.0, true),
-                key(VK_CONTROL.0, true),
-            ];
-            let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-            if !insert_delivered(sent, true) {
-                restore_clipboard_if_unchanged(text, previous.as_deref());
-                return Err(AppError::TextInsertionFailed(
-                    "SendInput delivered no events".into(),
-                ));
-            }
-            std::thread::sleep(std::time::Duration::from_millis(40));
-            restore_clipboard_if_unchanged(text, previous.as_deref());
-            Ok(previous)
-        }
+        clipboard_copy(text)?;
+        Ok(None)
     }
 
     pub fn clipboard_copy(text: &str) -> Result<(), AppError> {
@@ -464,5 +490,14 @@ mod tests {
         assert!(should_restore_clipboard("voxely", Some("voxely")));
         assert!(!should_restore_clipboard("voxely", Some("user copied")));
         assert!(!should_restore_clipboard("voxely", None));
+    }
+
+    #[test]
+    fn unicode_send_count_covers_surrogates_and_modifiers() {
+        assert_eq!(utf16_code_units("A").len(), 1);
+        assert_eq!(utf16_code_units("😀").len(), 2);
+        assert_eq!(unicode_send_count("A"), 10);
+        assert_eq!(unicode_send_count("😀"), 12);
+        assert_eq!(GITHUB_REPO_URL, "https://github.com/AryaPaw/voxely");
     }
 }
