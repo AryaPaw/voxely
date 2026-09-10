@@ -121,7 +121,8 @@ pub fn run() {
             check_for_updates,
             recording_audio_url,
             cancel_dictation,
-            set_hotkey_capture
+            set_hotkey_capture,
+            open_github
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|err| {

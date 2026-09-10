@@ -52,6 +52,7 @@
     "allow-recording-audio-url",
     "allow-cancel-dictation",
     "allow-set-hotkey-capture",
+    "allow-open-github",
     "updater:default",
     "process:allow-restart"
   ]

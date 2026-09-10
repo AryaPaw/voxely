@@ -2,11 +2,19 @@ import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { api, type AppSettings, type Recording, type SessionState } from "../../lib/api";
-import { formatInvokeError, messagesFor, resolveUiLocale } from "../../lib/i18n";
-import { applyTheme } from "../../lib/theme";
+import { applyTheme, resolvedTheme, watchSystemTheme } from "../../lib/theme";
+import {
+  applyUiLocale,
+  formatInvokeError,
+  localizedError,
+  messagesFor,
+  resolveUiLocale,
+} from "../../lib/i18n";
+import { Toaster } from "../../components/ui/sonner";
 import { Button } from "../../components/ui/button";
 import { HistoryPane } from "./history/HistoryPane";
 import { SectionNav, type Section } from "./sectionNav";
+import { AboutSettings } from "./sections/AboutSettings";
 import { AdvancedSettings } from "./sections/AdvancedSettings";
 import { AppearanceSettings } from "./sections/AppearanceSettings";
 import { AudioSettings } from "./sections/AudioSettings";
@@ -34,6 +42,7 @@ export function MainApp() {
       const nextSettings = await api.settings();
       setSettings(nextSettings);
       applyTheme(nextSettings.theme);
+      applyUiLocale(resolveUiLocale(nextSettings.uiLanguage ?? "auto", navigator.language));
       setLoadError("");
     } catch (error) {
       setLoadError(
@@ -52,10 +61,29 @@ export function MainApp() {
     const unlisten = listen<SessionState>("session://state", () => {
       void refreshHistory();
     });
+    const unlistenInsert = listen<string>("session://insert", (event) => {
+      const locale = resolveUiLocale("auto", navigator.language);
+      const nextCopy = messagesFor(locale);
+      if (event.payload === "copied") {
+        toast.success(nextCopy.copiedInsert);
+      } else {
+        toast.error(localizedError(event.payload, nextCopy));
+      }
+    });
     return () => {
       void unlisten.then((fn) => fn());
+      void unlistenInsert.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    if (!settings) {
+      return;
+    }
+    applyTheme(settings.theme);
+    applyUiLocale(resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language));
+    return watchSystemTheme(settings.theme);
+  }, [settings]);
 
   const filtered = useMemo(
     () =>
@@ -104,83 +132,87 @@ export function MainApp() {
   }
 
   return (
-    <div className="flex h-full">
-      <SectionNav current={section} copy={copy} onSelect={setSection} />
-      <main className="flex min-w-0 flex-1 flex-col">
-        {section === "history" ? (
-          <HistoryPane
-            items={filtered}
-            query={query}
-            keyConfigured={keyConfigured}
-            hotkey={settings.hotkey}
-            onQuery={setQuery}
-            onRefresh={refreshHistory}
-            onOpenKey={() => setSection("transcription")}
-            onOpenSettings={() => setSection("general")}
-            copy={copy}
-          />
-        ) : (
-          <div className="overflow-auto p-6">
-            {section === "general" ? (
-              <GeneralSettings
-                settings={settings}
-                copy={copy}
-                onChange={(patch) => void persist({ ...settings, ...patch })}
-              />
-            ) : null}
-            {section === "audio" ? (
-              <AudioSettings
-                settings={settings}
-                copy={copy}
-                onChange={(patch) => void persist({ ...settings, ...patch })}
-              />
-            ) : null}
-            {section === "filters" ? (
-              <FilterSettings
-                settings={settings}
-                copy={copy}
-                onChange={(patch) => void persist({ ...settings, ...patch })}
-              />
-            ) : null}
-            {section === "transcription" ? (
-              <TranscriptionSettings
-                settings={settings}
-                copy={copy}
-                keyConfigured={keyConfigured}
-                onConfigured={setKeyConfigured}
-                onChange={(patch) =>
-                  void persist({ ...settings, ...patch, firstRunComplete: true })
-                }
-              />
-            ) : null}
-            {section === "historySettings" ? (
-              <HistorySettings
-                settings={settings}
-                copy={copy}
-                onChange={(patch) => void persist({ ...settings, ...patch })}
-                onDeleteAll={async () => {
-                  await api.deleteAll();
-                  await refreshHistory();
-                }}
-              />
-            ) : null}
-            {section === "appearance" ? (
-              <AppearanceSettings
-                settings={settings}
-                copy={copy}
-                onChange={(patch) => void persist({ ...settings, ...patch })}
-              />
-            ) : null}
-            {section === "advanced" ? (
-              <AdvancedSettings
-                settings={settings}
-                copy={copy}
-                onChange={(patch) => void persist({ ...settings, ...patch })}
-              />
-            ) : null}
-          </div>
-        )}
-      </main>
-    </div>
+    <>
+      <div className="flex h-full">
+        <SectionNav current={section} copy={copy} onSelect={setSection} />
+        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {section === "history" ? (
+            <HistoryPane
+              items={filtered}
+              query={query}
+              keyConfigured={keyConfigured}
+              hotkey={settings.hotkey}
+              onQuery={setQuery}
+              onRefresh={refreshHistory}
+              onOpenKey={() => setSection("transcription")}
+              onOpenSettings={() => setSection("general")}
+              copy={copy}
+            />
+          ) : (
+            <div className="min-h-0 flex-1 overflow-auto p-6">
+              {section === "general" ? (
+                <GeneralSettings
+                  settings={settings}
+                  copy={copy}
+                  onChange={(patch) => void persist({ ...settings, ...patch })}
+                />
+              ) : null}
+              {section === "audio" ? (
+                <AudioSettings
+                  settings={settings}
+                  copy={copy}
+                  onChange={(patch) => void persist({ ...settings, ...patch })}
+                />
+              ) : null}
+              {section === "filters" ? (
+                <FilterSettings
+                  settings={settings}
+                  copy={copy}
+                  onChange={(patch) => void persist({ ...settings, ...patch })}
+                />
+              ) : null}
+              {section === "transcription" ? (
+                <TranscriptionSettings
+                  settings={settings}
+                  copy={copy}
+                  keyConfigured={keyConfigured}
+                  onConfigured={setKeyConfigured}
+                  onChange={(patch) =>
+                    void persist({ ...settings, ...patch, firstRunComplete: true })
+                  }
+                />
+              ) : null}
+              {section === "historySettings" ? (
+                <HistorySettings
+                  settings={settings}
+                  copy={copy}
+                  onChange={(patch) => void persist({ ...settings, ...patch })}
+                  onDeleteAll={async () => {
+                    await api.deleteAll();
+                    await refreshHistory();
+                  }}
+                />
+              ) : null}
+              {section === "appearance" ? (
+                <AppearanceSettings
+                  settings={settings}
+                  copy={copy}
+                  onChange={(patch) => void persist({ ...settings, ...patch })}
+                />
+              ) : null}
+              {section === "advanced" ? (
+                <AdvancedSettings
+                  settings={settings}
+                  copy={copy}
+                  onChange={(patch) => void persist({ ...settings, ...patch })}
+                />
+              ) : null}
+              {section === "about" ? <AboutSettings copy={copy} /> : null}
+            </div>
+          )}
+        </main>
+      </div>
+      <Toaster theme={resolvedTheme(settings.theme)} />
+    </>
   );
 }

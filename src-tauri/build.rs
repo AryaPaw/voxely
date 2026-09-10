@@ -32,6 +32,7 @@ fn main() {
             "recording_audio_url",
             "cancel_dictation",
             "set_hotkey_capture",
+            "open_github",
         ]),
     ))
     .expect("tauri build");

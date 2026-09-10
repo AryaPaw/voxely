@@ -208,7 +208,10 @@ async fn one_attempt(
     let request = client
         .post(url)
         .bearer_auth(api_key)
-        .header("HTTP-Referer", "https://github.com/voxely/voxely")
+        .header(
+            "HTTP-Referer",
+            crate::windows_int::text_injector::GITHUB_REPO_URL,
+        )
         .header("X-Title", "Voxely")
         .multipart(form)
         .timeout(timeout)
@@ -278,6 +281,11 @@ pub async fn list_transcription_models(
             "{DEFAULT_BASE}/models?output_modalities=transcription"
         ))
         .bearer_auth(api_key)
+        .header(
+            "HTTP-Referer",
+            crate::windows_int::text_injector::GITHUB_REPO_URL,
+        )
+        .header("X-Title", "Voxely")
         .timeout(Duration::from_secs(8))
         .send()
         .await
