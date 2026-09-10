@@ -30,13 +30,31 @@ pub fn should_send_key_paste(
         && should_post_paste(captured_root, focus_root)
 }
 
+pub fn overlay_blocks_insert(overlay_root: Option<usize>, foreground_root: Option<usize>) -> bool {
+    matches!(
+        (overlay_root, foreground_root),
+        (Some(overlay), Some(foreground)) if overlay == foreground
+    )
+}
+
+pub fn insert_delivered(events_sent: u32, used_key_paste: bool) -> bool {
+    used_key_paste && events_sent > 0
+}
+
+pub fn should_restore_clipboard(ours: &str, current: Option<&str>) -> bool {
+    current == Some(ours)
+}
+
 pub fn should_post_paste(captured_root: usize, focus_root: Option<usize>) -> bool {
     matches!(focus_root, Some(root) if root == captured_root)
 }
 
 #[cfg(windows)]
 pub mod native {
-    use super::{should_post_paste, should_send_key_paste, NativeHwnd};
+    use super::{
+        insert_delivered, overlay_blocks_insert, should_restore_clipboard, should_send_key_paste,
+        NativeHwnd,
+    };
     use crate::error::AppError;
     use windows::Win32::Foundation::{HANDLE, HWND};
     use windows::Win32::System::DataExchange::{
@@ -53,13 +71,32 @@ pub mod native {
     pub fn foreground_hwnd() -> Option<NativeHwnd> {
         unsafe {
             let hwnd = GetForegroundWindow();
-            if hwnd.is_invalid() {
-                None
-            } else {
-                Some(NativeHwnd {
-                    value: hwnd.0 as usize,
-                })
+            hwnd_to_native(hwnd)
+        }
+    }
+
+    pub fn capture_target() -> Option<NativeHwnd> {
+        unsafe {
+            let foreground = GetForegroundWindow();
+            if hwnd_to_native(foreground).is_none() {
+                return None;
             }
+            if let Some(focus) = thread_focus_hwnd(foreground) {
+                if hwnd_root_value(focus) == hwnd_root_value(foreground) {
+                    return hwnd_to_native(focus);
+                }
+            }
+            hwnd_to_native(foreground)
+        }
+    }
+
+    unsafe fn hwnd_to_native(hwnd: HWND) -> Option<NativeHwnd> {
+        if hwnd.is_invalid() {
+            None
+        } else {
+            Some(NativeHwnd {
+                value: hwnd.0 as usize,
+            })
         }
     }
 
@@ -73,33 +110,81 @@ pub mod native {
             if !IsWindow(target).as_bool() {
                 return Err(AppError::TextInsertionFailed("window gone".into()));
             }
+            let previous = snapshot_clipboard();
             clipboard_copy(text)?;
             let captured_root_hwnd = root_hwnd(target);
             let captured_root = captured_root_hwnd.0 as usize;
-            let in_tree = in_tree_paste_hwnd(target).unwrap_or(target);
-            focus_window(target);
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            let mut foreground_root = hwnd_root_value(GetForegroundWindow());
-            let mut focus_root = hwnd_root_value(thread_focus_hwnd(target).unwrap_or(in_tree));
-            if !should_send_key_paste(captured_root, foreground_root, focus_root) {
-                focus_window(target);
-                std::thread::sleep(std::time::Duration::from_millis(30));
-                foreground_root = hwnd_root_value(GetForegroundWindow());
-                focus_root = hwnd_root_value(thread_focus_hwnd(target).unwrap_or(in_tree));
+            let mut last_reason = "focus left captured window";
+            for _ in 0..3 {
+                let _guard = attach_input(target);
+                let restored = SetForegroundWindow(target).as_bool();
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                let foreground_root = hwnd_root_value(GetForegroundWindow());
+                if overlay_blocks_insert(None, foreground_root) {
+                    last_reason = "overlay still foreground";
+                    continue;
+                }
+                let focus_root = hwnd_root_value(thread_focus_hwnd(target).unwrap_or(target));
+                if should_send_key_paste(captured_root, foreground_root, focus_root) {
+                    let inputs = [
+                        key(VK_CONTROL.0, false),
+                        key(VK_V.0, false),
+                        key(VK_V.0, true),
+                        key(VK_CONTROL.0, true),
+                    ];
+                    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                    if insert_delivered(sent, true) {
+                        std::thread::sleep(std::time::Duration::from_millis(40));
+                        restore_clipboard_if_unchanged(text, previous.as_deref());
+                        return Ok(());
+                    }
+                    last_reason = "SendInput delivered no events";
+                } else if !restored {
+                    last_reason = "could not restore target window";
+                } else {
+                    last_reason = "focus left captured window";
+                }
             }
-            if should_send_key_paste(captured_root, foreground_root, focus_root) {
-                let inputs = [
-                    key(VK_CONTROL.0, false),
-                    key(VK_V.0, false),
-                    key(VK_V.0, true),
-                    key(VK_CONTROL.0, true),
-                ];
-                let _ = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-            } else if should_post_paste(captured_root, hwnd_root_value(in_tree)) {
-                post_paste(in_tree);
-            }
-            Ok(())
+            restore_clipboard_if_unchanged(text, previous.as_deref());
+            Err(AppError::TextInsertionFailed(last_reason.into()))
         }
+    }
+
+    struct ThreadAttachGuard {
+        pairs: Vec<(u32, u32)>,
+    }
+
+    impl Drop for ThreadAttachGuard {
+        fn drop(&mut self) {
+            for (from, to) in &self.pairs {
+                attach_thread_input(*from, *to, false);
+            }
+        }
+    }
+
+    unsafe fn attach_input(target: HWND) -> ThreadAttachGuard {
+        use windows::Win32::System::Threading::GetCurrentThreadId;
+        use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
+
+        let _ = AllowSetForegroundWindow(u32::MAX);
+        let our_tid = GetCurrentThreadId();
+        let foreground = GetForegroundWindow();
+        let target_tid = window_thread_id(target);
+        let fg_tid = if foreground.is_invalid() {
+            0
+        } else {
+            window_thread_id(foreground)
+        };
+        let mut pairs = Vec::new();
+        if fg_tid != 0 && fg_tid != our_tid {
+            attach_thread_input(our_tid, fg_tid, true);
+            pairs.push((our_tid, fg_tid));
+        }
+        if target_tid != 0 && target_tid != our_tid && target_tid != fg_tid {
+            attach_thread_input(our_tid, target_tid, true);
+            pairs.push((our_tid, target_tid));
+        }
+        ThreadAttachGuard { pairs }
     }
 
     unsafe fn root_hwnd(hwnd: HWND) -> HWND {
@@ -144,50 +229,6 @@ pub mod native {
         }
     }
 
-    unsafe fn in_tree_paste_hwnd(captured: HWND) -> Option<HWND> {
-        if let Some(focus) = thread_focus_hwnd(captured) {
-            if hwnd_root_value(focus) == hwnd_root_value(captured) {
-                return Some(focus);
-            }
-        }
-        Some(root_hwnd(captured))
-    }
-
-    unsafe fn post_paste(target: HWND) {
-        use windows::Win32::Foundation::{LPARAM, WPARAM};
-        use windows::Win32::UI::WindowsAndMessaging::PostMessageW;
-        const WM_PASTE: u32 = 0x0302;
-        let _ = PostMessageW(target, WM_PASTE, WPARAM(0), LPARAM(0));
-    }
-
-    unsafe fn focus_window(target: HWND) {
-        use windows::Win32::System::Threading::GetCurrentThreadId;
-        use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
-
-        let _ = AllowSetForegroundWindow(u32::MAX);
-        let foreground = GetForegroundWindow();
-        let target_tid = window_thread_id(target);
-        let our_tid = GetCurrentThreadId();
-        let fg_tid = if foreground.is_invalid() {
-            0
-        } else {
-            window_thread_id(foreground)
-        };
-        if fg_tid != 0 && fg_tid != our_tid {
-            attach_thread_input(our_tid, fg_tid, true);
-        }
-        if target_tid != 0 && target_tid != our_tid {
-            attach_thread_input(our_tid, target_tid, true);
-        }
-        let _ = SetForegroundWindow(target);
-        if fg_tid != 0 && fg_tid != our_tid {
-            attach_thread_input(our_tid, fg_tid, false);
-        }
-        if target_tid != 0 && target_tid != our_tid {
-            attach_thread_input(our_tid, target_tid, false);
-        }
-    }
-
     fn attach_thread_input(from: u32, to: u32, attach: bool) {
         #[link(name = "user32")]
         extern "system" {
@@ -200,20 +241,23 @@ pub mod native {
 
     pub fn clipboard_paste(text: &str) -> Result<Option<String>, AppError> {
         unsafe {
-            open_clipboard()?;
-            let previous = read_unicode_clipboard();
-            if let Err(err) = write_clipboard(text) {
-                CloseClipboard().ok();
-                return Err(err);
-            }
-            CloseClipboard().map_err(|e| AppError::TextInsertionFailed(e.to_string()))?;
+            let previous = snapshot_clipboard();
+            clipboard_copy(text)?;
             let inputs = [
                 key(VK_CONTROL.0, false),
                 key(VK_V.0, false),
                 key(VK_V.0, true),
                 key(VK_CONTROL.0, true),
             ];
-            SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+            if !insert_delivered(sent, true) {
+                restore_clipboard_if_unchanged(text, previous.as_deref());
+                return Err(AppError::TextInsertionFailed(
+                    "SendInput delivered no events".into(),
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(40));
+            restore_clipboard_if_unchanged(text, previous.as_deref());
             Ok(previous)
         }
     }
@@ -227,6 +271,43 @@ pub mod native {
             }
             CloseClipboard().map_err(|e| AppError::TextInsertionFailed(e.to_string()))?;
             Ok(())
+        }
+    }
+
+    unsafe fn snapshot_clipboard() -> Option<String> {
+        if open_clipboard().is_err() {
+            return None;
+        }
+        let previous = read_unicode_clipboard();
+        CloseClipboard().ok();
+        previous
+    }
+
+    fn restore_clipboard_if_unchanged(ours: &str, previous: Option<&str>) {
+        unsafe {
+            if open_clipboard().is_err() {
+                return;
+            }
+            let current = read_unicode_clipboard();
+            CloseClipboard().ok();
+            if !should_restore_clipboard(ours, current.as_deref()) {
+                return;
+            }
+            restore_clipboard(previous);
+        }
+    }
+
+    pub fn restore_clipboard(previous: Option<&str>) {
+        match previous {
+            Some(text) => {
+                let _ = clipboard_copy(text);
+            }
+            None => unsafe {
+                if open_clipboard().is_ok() {
+                    EmptyClipboard().ok();
+                    CloseClipboard().ok();
+                }
+            },
         }
     }
 
@@ -298,12 +379,6 @@ pub mod native {
         Some(text)
     }
 
-    pub fn restore_clipboard(previous: Option<&str>) {
-        if previous.is_none() {
-            return;
-        }
-        let _ = previous;
-    }
 }
 
 #[cfg(not(windows))]
@@ -312,6 +387,10 @@ pub mod native {
     use crate::error::AppError;
 
     pub fn foreground_hwnd() -> Option<NativeHwnd> {
+        None
+    }
+
+    pub fn capture_target() -> Option<NativeHwnd> {
         None
     }
 
@@ -362,5 +441,31 @@ mod tests {
         assert!(should_post_paste(10, Some(10)));
         assert!(!should_post_paste(10, Some(11)));
         assert!(!should_post_paste(10, None));
+    }
+
+    #[test]
+    fn two_cursor_roots_do_not_cross_paste() {
+        let agents = 100;
+        let ide = 200;
+        let overlay = 300;
+        assert!(!should_send_key_paste(agents, Some(overlay), Some(ide)));
+        assert!(!should_send_key_paste(agents, Some(ide), Some(ide)));
+        assert!(should_send_key_paste(agents, Some(agents), Some(agents)));
+        assert!(overlay_blocks_insert(Some(overlay), Some(overlay)));
+        assert!(!overlay_blocks_insert(Some(overlay), Some(agents)));
+    }
+
+    #[test]
+    fn no_success_without_delivery() {
+        assert!(!insert_delivered(0, true));
+        assert!(!insert_delivered(4, false));
+        assert!(insert_delivered(4, true));
+    }
+
+    #[test]
+    fn clipboard_user_change_skips_restore() {
+        assert!(should_restore_clipboard("voxely", Some("voxely")));
+        assert!(!should_restore_clipboard("voxely", Some("user copied")));
+        assert!(!should_restore_clipboard("voxely", None));
     }
 }

@@ -166,7 +166,7 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     let (tx, _) = tokio::sync::watch::channel(false);
     *ctx.cancel_tx.lock() = Some(tx);
     ctx.transition(SessionEvent::StartRequested)?;
-    *ctx.captured_hwnd.lock() = native::foreground_hwnd();
+    *ctx.captured_hwnd.lock() = native::capture_target();
     *ctx.overlay_shown_at.lock() = Some(Instant::now());
     show_overlay(app);
     ctx.emit_state(app);
@@ -457,20 +457,29 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
 }
 
 fn insert_transcript_now(mode: &str, captured: Option<NativeHwnd>, text: &str) {
+    std::thread::sleep(std::time::Duration::from_millis(30));
     match mode {
         "clipboard" => {
-            let _ = native::clipboard_paste(text);
+            if let Err(err) = native::clipboard_paste(text) {
+                tracing::warn!(error = %err, "clipboard paste failed");
+            }
         }
         "sendinput" => {
-            if let Some(hwnd) = captured.or_else(native::foreground_hwnd) {
-                let _ = native::insert_unicode(hwnd, text);
+            let Some(hwnd) = captured else {
+                tracing::warn!("no captured window for insert");
+                return;
+            };
+            if let Err(err) = native::insert_unicode(hwnd, text) {
+                tracing::warn!(error = %err, "unicode insert failed");
             }
         }
         _ => {
-            if let Some(hwnd) = captured {
-                if let Err(err) = native::insert_into_window(hwnd, text) {
-                    tracing::warn!(error = %err, "insert into captured window failed");
-                }
+            let Some(hwnd) = captured else {
+                tracing::warn!("no captured window for insert");
+                return;
+            };
+            if let Err(err) = native::insert_into_window(hwnd, text) {
+                tracing::warn!(error = %err, "insert into captured window failed");
             }
         }
     }
@@ -518,7 +527,7 @@ fn show_overlay(app: &AppHandle) {
     .always_on_top(true)
     .skip_taskbar(true)
     .focused(false)
-    .visible(true)
+    .visible(false)
     .resizable(false)
     .transparent(true)
     .shadow(false)
@@ -526,6 +535,7 @@ fn show_overlay(app: &AppHandle) {
     if let Ok(window) = builder.build() {
         position_overlay(&window);
         decorate_overlay(&window);
+        let _ = window.show();
     }
 }
 
