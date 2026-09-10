@@ -1,0 +1,12 @@
+<Configuration>
+  <MappedFolders>
+    <MappedFolder>
+      <HostFolder>__HOST_BUNDLE__</HostFolder>
+      <SandboxFolder>C:\Users\WDAGUtilityAccount\Desktop\VoxelyBundle</SandboxFolder>
+      <ReadOnly>true</ReadOnly>
+    </MappedFolder>
+  </MappedFolders>
+  <LogonCommand>
+    <Command>powershell.exe -ExecutionPolicy Bypass -File C:\Users\WDAGUtilityAccount\Desktop\VoxelyBundle\sandbox-install.ps1</Command>
+  </LogonCommand>
+</Configuration>
