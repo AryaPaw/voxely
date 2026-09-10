@@ -5,8 +5,19 @@ import { api, type AppSettings, type Recording, type SessionState } from "../../
 import { messagesFor, resolveUiLocale, type Messages } from "../../lib/i18n";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
-import { Select } from "../../components/ui/select";
+import { SimpleSelect } from "../../components/ui/simple-select";
 import { Switch } from "../../components/ui/switch";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "../../components/ui/alert-dialog";
 import { hotkeyFromKeyboardEvent } from "../../lib/hotkey";
 import { applyTheme } from "../../lib/theme";
 import { HistoryPane } from "./HistoryList";
@@ -163,10 +174,8 @@ export function MainApp() {
                 settings={settings}
                 onChange={(patch) => void persist({ ...settings, ...patch })}
                 onDeleteAll={async () => {
-                  if (window.confirm("Удалить всю историю? Это нельзя отменить.")) {
-                    await api.deleteAll();
-                    await refreshHistory();
-                  }
+                  await api.deleteAll();
+                  await refreshHistory();
                 }}
               />
             ) : null}
@@ -202,13 +211,14 @@ function NavBtn({
   onClick: (id: Section) => void;
 }) {
   return (
-    <button
+    <Button
       type="button"
+      variant={current === id ? "secondary" : "ghost"}
+      className="w-full justify-start"
       onClick={() => onClick(id)}
-      className={`rounded-md px-2 py-1.5 text-left text-sm ${current === id ? "bg-muted font-medium" : "text-muted-foreground hover:bg-muted/60"}`}
     >
       {label}
-    </button>
+    </Button>
   );
 }
 
@@ -320,17 +330,15 @@ function AudioSettings({
         <Mic className="h-4 w-4" /> Микрофон
       </h1>
       <Field label="Устройство ввода">
-        <Select
+        <SimpleSelect
+          aria-label="Устройство ввода"
           value={settings.inputDevice}
-          onChange={(e) => onChange({ inputDevice: e.target.value })}
-        >
-          <option value="default">Системное по умолчанию</option>
-          {devices.map((device) => (
-            <option key={device.id} value={device.id}>
-              {device.name}
-            </option>
-          ))}
-        </Select>
+          onValueChange={(inputDevice) => onChange({ inputDevice })}
+          options={[
+            { value: "default", label: "Системное по умолчанию" },
+            ...devices.map((device) => ({ value: device.id, label: device.name })),
+          ]}
+        />
       </Field>
     </div>
   );
@@ -404,11 +412,16 @@ function TranscriptionSettings({
         <Input value={settings.model} onChange={(e) => onChange({ model: e.target.value })} />
       </Field>
       <Field label="Язык">
-        <Select value={settings.language} onChange={(e) => onChange({ language: e.target.value })}>
-          <option value="auto">Авто</option>
-          <option value="ru">Русский</option>
-          <option value="en">English</option>
-        </Select>
+        <SimpleSelect
+          aria-label="Язык"
+          value={settings.language}
+          onValueChange={(language) => onChange({ language })}
+          options={[
+            { value: "auto", label: "Авто" },
+            { value: "ru", label: "Русский" },
+            { value: "en", label: "English" },
+          ]}
+        />
       </Field>
       <div className="mb-3 flex items-center justify-between max-w-lg">
         <span className="text-sm">Автоматические повторы</span>
@@ -492,28 +505,32 @@ function HistorySettings({
     <div>
       <h1 className="mb-4 text-lg font-medium">Хранение</h1>
       <Field label="Хранить записи">
-        <Select
+        <SimpleSelect
+          aria-label="Хранить записи"
           value={settings.retention}
-          onChange={(e) => onChange({ retention: e.target.value })}
-        >
-          <option value="1d">1 день</option>
-          <option value="3d">3 дня</option>
-          <option value="7d">7 дней</option>
-          <option value="30d">30 дней</option>
-          <option value="90d">90 дней</option>
-          <option value="forever">Всегда</option>
-        </Select>
+          onValueChange={(retention) => onChange({ retention })}
+          options={[
+            { value: "1d", label: "1 день" },
+            { value: "3d", label: "3 дня" },
+            { value: "7d", label: "7 дней" },
+            { value: "30d", label: "30 дней" },
+            { value: "90d", label: "90 дней" },
+            { value: "forever", label: "Всегда" },
+          ]}
+        />
       </Field>
       <Field label="Лимит места">
-        <Select
+        <SimpleSelect
+          aria-label="Лимит места"
           value={settings.storageLimit}
-          onChange={(e) => onChange({ storageLimit: e.target.value })}
-        >
-          <option value="500mb">500 МБ</option>
-          <option value="1gb">1 ГБ</option>
-          <option value="5gb">5 ГБ</option>
-          <option value="unlimited">Без лимита</option>
-        </Select>
+          onValueChange={(storageLimit) => onChange({ storageLimit })}
+          options={[
+            { value: "500mb", label: "500 МБ" },
+            { value: "1gb", label: "1 ГБ" },
+            { value: "5gb", label: "5 ГБ" },
+            { value: "unlimited", label: "Без лимита" },
+          ]}
+        />
       </Field>
       <div className="mb-4 flex items-center justify-between max-w-lg">
         <span className="text-sm">Хранить исходные записи (лучше для прослушивания)</span>
@@ -522,9 +539,23 @@ function HistorySettings({
           onCheckedChange={(v) => onChange({ keepOriginalRecordings: v })}
         />
       </div>
-      <Button variant="destructive" onClick={onDeleteAll}>
-        Удалить всю историю
-      </Button>
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <Button variant="destructive">Удалить всю историю</Button>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Удалить всю историю?</AlertDialogTitle>
+            <AlertDialogDescription>Это нельзя отменить.</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction variant="destructive" onClick={onDeleteAll}>
+              Удалить
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
@@ -544,21 +575,28 @@ function AppearanceSettings({
     <div>
       <h1 className="mb-4 text-lg font-medium">{copy.navAppearance}</h1>
       <Field label="Тема">
-        <Select value={settings.theme} onChange={(e) => onChange({ theme: e.target.value })}>
-          <option value="system">Системная</option>
-          <option value="light">Светлая</option>
-          <option value="dark">Тёмная</option>
-        </Select>
+        <SimpleSelect
+          aria-label="Тема"
+          value={settings.theme}
+          onValueChange={(theme) => onChange({ theme })}
+          options={[
+            { value: "system", label: "Системная" },
+            { value: "light", label: "Светлая" },
+            { value: "dark", label: "Тёмная" },
+          ]}
+        />
       </Field>
       <Field label={copy.uiLanguage}>
-        <Select
+        <SimpleSelect
+          aria-label={copy.uiLanguage}
           value={settings.uiLanguage ?? "auto"}
-          onChange={(e) => onChange({ uiLanguage: e.target.value })}
-        >
-          <option value="auto">{copy.uiAuto}</option>
-          <option value="ru">{copy.uiRu}</option>
-          <option value="en">{copy.uiEn}</option>
-        </Select>
+          onValueChange={(uiLanguage) => onChange({ uiLanguage })}
+          options={[
+            { value: "auto", label: copy.uiAuto },
+            { value: "ru", label: copy.uiRu },
+            { value: "en", label: copy.uiEn },
+          ]}
+        />
       </Field>
       <div className="mb-3 flex items-center justify-between max-w-lg">
         <span className="text-sm">{copy.autoUpdate}</span>
@@ -601,14 +639,16 @@ function AdvancedSettings({
         <SettingsIcon className="h-4 w-4" /> Дополнительно
       </h1>
       <Field label="Вставка текста">
-        <Select
+        <SimpleSelect
+          aria-label="Вставка текста"
           value={settings.insertionMode}
-          onChange={(e) => onChange({ insertionMode: e.target.value })}
-        >
-          <option value="auto">Авто</option>
-          <option value="sendinput">SendInput</option>
-          <option value="clipboard">Буфер обмена</option>
-        </Select>
+          onValueChange={(insertionMode) => onChange({ insertionMode })}
+          options={[
+            { value: "auto", label: "Авто" },
+            { value: "sendinput", label: "SendInput" },
+            { value: "clipboard", label: "Буфер обмена" },
+          ]}
+        />
       </Field>
       <p className="mb-4 max-w-lg text-xs text-muted-foreground">
         Авто — рекомендуемый режим: вставка в то окно, где вы говорили. Буфер обмена надёжнее в

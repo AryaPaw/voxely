@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-preview-dsp"
+description = "Enables the preview_dsp command without any pre-configured scope."
+commands.allow = ["preview_dsp"]
+
+[[permission]]
+identifier = "deny-preview-dsp"
+description = "Denies the preview_dsp command without any pre-configured scope."
+commands.deny = ["preview_dsp"]

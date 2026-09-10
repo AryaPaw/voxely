@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   Check,
@@ -149,9 +149,11 @@ function HistoryCard({
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {item.transcript ? (
-            <IconBtn
-              label={copied ? copy.copied : copy.copy}
-              done={copied}
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label={copied ? copy.copied : copy.copy}
               onClick={() => {
                 void api.copy(item.transcript ?? "").then(() => {
                   setCopied(true);
@@ -160,11 +162,14 @@ function HistoryCard({
               }}
             >
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
-            </IconBtn>
+            </Button>
           ) : (
-            <IconBtn
-              label={copy.retry}
-              busy={retrying}
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label={copy.retry}
+              disabled={retrying}
               onClick={async () => {
                 setRetrying(true);
                 try {
@@ -176,20 +181,23 @@ function HistoryCard({
               }}
             >
               <RotateCcw className={`h-4 w-4${retrying ? " history-spin" : ""}`} />
-            </IconBtn>
+            </Button>
           )}
-          <IconBtn label="Сведения" onClick={onToggleDetails}>
+          <Button type="button" size="icon" variant="ghost" aria-label="Сведения" onClick={onToggleDetails}>
             <Info className="h-4 w-4" />
-          </IconBtn>
-          <IconBtn
-            label="Удалить"
+          </Button>
+          <Button
+            type="button"
+            size="icon"
+            variant="ghost"
+            aria-label="Удалить"
             onClick={async () => {
               await api.deleteItem(item.id);
               await onRefresh();
             }}
           >
             <Trash2 className="h-4 w-4" />
-          </IconBtn>
+          </Button>
         </div>
       </div>
       <p className="mt-2 text-sm leading-6">
@@ -268,32 +276,5 @@ function HistoryCard({
         </dl>
       ) : null}
     </article>
-  );
-}
-
-function IconBtn({
-  label,
-  onClick,
-  children,
-  done = false,
-  busy = false,
-}: {
-  label: string;
-  onClick: () => void;
-  children: ReactNode;
-  done?: boolean;
-  busy?: boolean;
-}) {
-  return (
-    <button
-      type="button"
-      aria-label={label}
-      title={label}
-      className={`history-icon${done ? " history-icon-done" : ""}`}
-      disabled={busy}
-      onClick={onClick}
-    >
-      {children}
-    </button>
   );
 }

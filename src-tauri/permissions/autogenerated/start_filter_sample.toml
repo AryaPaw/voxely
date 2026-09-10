@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-filter-sample"
+description = "Enables the start_filter_sample command without any pre-configured scope."
+commands.allow = ["start_filter_sample"]
+
+[[permission]]
+identifier = "deny-start-filter-sample"
+description = "Denies the start_filter_sample command without any pre-configured scope."
+commands.deny = ["start_filter_sample"]

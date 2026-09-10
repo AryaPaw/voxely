@@ -2,7 +2,8 @@ import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { Button } from "./button";
 import { Input } from "./input";
-import { Select } from "./select";
+import { Label } from "./label";
+import { SimpleSelect } from "./simple-select";
 import { Switch } from "./switch";
 
 afterEach(() => cleanup());
@@ -20,16 +21,20 @@ describe("ui primitives", () => {
     expect(screen.getByRole("switch", { name: "Off" })).toHaveAttribute("aria-checked", "false");
   });
 
-  it("renders form controls", () => {
+  it("pairs an accessible label with input and select", () => {
     render(
       <>
-        <Input aria-label="Hotkey" />
-        <Select aria-label="Theme">
-          <option>System</option>
-        </Select>
+        <Label htmlFor="hotkey">Hotkey</Label>
+        <Input id="hotkey" />
+        <SimpleSelect
+          aria-label="Theme"
+          value="system"
+          onValueChange={() => undefined}
+          options={[{ value: "system", label: "System" }]}
+        />
       </>,
     );
     expect(screen.getByLabelText("Hotkey")).toBeInTheDocument();
-    expect(screen.getByLabelText("Theme")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Theme" })).toBeInTheDocument();
   });
 });

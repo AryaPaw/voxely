@@ -1,9 +1,4 @@
-import { clsx, type ClassValue } from "clsx";
-import { twMerge } from "tailwind-merge";
-
-export function cn(...inputs: ClassValue[]): string {
-  return twMerge(clsx(inputs));
-}
+export { cn } from "cn";
 
 export function formatDuration(ms: number): string {
   const total = Math.max(0, Math.round(ms / 1000));

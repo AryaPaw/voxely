@@ -9,7 +9,10 @@ import {
 } from "../../lib/api";
 import type { Messages } from "../../lib/i18n";
 import { Button } from "../../components/ui/button";
-import { Select } from "../../components/ui/select";
+import { Label } from "../../components/ui/label";
+import { Progress } from "../../components/ui/progress";
+import { SimpleSelect } from "../../components/ui/simple-select";
+import { Slider } from "../../components/ui/slider";
 
 export function FilterSettings({
   settings,
@@ -88,19 +91,15 @@ export function FilterSettings({
       </ol>
       <label className="mb-4 block max-w-lg">
         <div className="mb-1 text-sm">Активный пресет</div>
-        <Select
+        <SimpleSelect
+          aria-label="Активный пресет"
           value={settings.activePresetId}
-          onChange={(e) => onChange({ activePresetId: e.target.value })}
-        >
-          {settings.presets.map((preset) => (
-            <option key={preset.id} value={preset.id}>
-              {preset.name}
-            </option>
-          ))}
-        </Select>
+          onValueChange={(activePresetId) => onChange({ activePresetId })}
+          options={settings.presets.map((preset) => ({ value: preset.id, label: preset.name }))}
+        />
       </label>
       <MicLevelMeter live={recording} />
-      <Slider
+      <TuneSlider
         label={`Громкость ${tune.gainDb.toFixed(1)} дБ`}
         min={-12}
         max={18}
@@ -108,7 +107,7 @@ export function FilterSettings({
         value={tune.gainDb}
         onChange={(gainDb) => setTune({ ...tune, gainDb })}
       />
-      <Slider
+      <TuneSlider
         label={`Срез низов ${Math.round(tune.highpassHz)} Гц`}
         min={20}
         max={200}
@@ -116,7 +115,7 @@ export function FilterSettings({
         value={tune.highpassHz}
         onChange={(highpassHz) => setTune({ ...tune, highpassHz })}
       />
-      <Slider
+      <TuneSlider
         label={`Шумодав ${tune.denoise}%`}
         min={0}
         max={100}
@@ -124,7 +123,7 @@ export function FilterSettings({
         value={tune.denoise}
         onChange={(denoise) => setTune({ ...tune, denoise })}
       />
-      <Slider
+      <TuneSlider
         label={`Компрессия ${tune.punch}%`}
         min={0}
         max={100}
@@ -196,10 +195,8 @@ function MicLevelMeter({ live }: { live: boolean }) {
   }, []);
   return (
     <div className="mb-5 max-w-lg">
-      <div className="mb-1 text-sm">Уровень микрофона</div>
-      <div className="h-2 overflow-hidden rounded-full bg-muted">
-        <div className="h-full rounded-full bg-accent" style={{ width: `${level * 100}%` }} />
-      </div>
+      <Label className="mb-1 text-sm">Уровень микрофона</Label>
+      <Progress value={level * 100} className="h-2" />
       <p className="mt-1 text-xs text-muted-foreground">
         {live ? "Сейчас слышно этот микрофон." : "Полоска оживёт, когда начнёте запись образца."}
       </p>
@@ -254,7 +251,7 @@ function convertFallback(path: string): string {
   return convertFileSrc(path.replace(/\\/g, "/"));
 }
 
-function Slider({
+function TuneSlider({
   label,
   min,
   max,
@@ -270,17 +267,20 @@ function Slider({
   onChange: (value: number) => void;
 }) {
   return (
-    <label className="mb-4 block max-w-lg">
-      <div className="mb-1 text-sm">{label}</div>
-      <input
-        type="range"
-        className="mic-slider"
+    <div className="mb-4 max-w-lg">
+      <Label className="mb-1 text-sm">{label}</Label>
+      <Slider
         min={min}
         max={max}
         step={step}
-        value={value}
-        onChange={(event) => onChange(Number(event.target.value))}
+        value={[value]}
+        onValueChange={(next) => {
+          const first = next[0];
+          if (typeof first === "number") {
+            onChange(first);
+          }
+        }}
       />
-    </label>
+    </div>
   );
 }

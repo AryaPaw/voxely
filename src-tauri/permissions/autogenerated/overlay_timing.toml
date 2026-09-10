@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-overlay-timing"
+description = "Enables the overlay_timing command without any pre-configured scope."
+commands.allow = ["overlay_timing"]
+
+[[permission]]
+identifier = "deny-overlay-timing"
+description = "Denies the overlay_timing command without any pre-configured scope."
+commands.deny = ["overlay_timing"]
