@@ -183,47 +183,51 @@ html:has(.overlay-shell) #root {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 12px;
+  padding: 22px 20px 28px;
   background: transparent;
   overflow: visible;
 }
 
 .overlay-pill {
+  appearance: none;
   position: relative;
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  height: 100%;
+  height: 52px;
   border-radius: 9999px;
-  border: 1px solid var(--overlay-border);
+  border: 2px solid var(--overlay-border);
   background: var(--overlay-bg);
   padding: 0 18px;
-  box-shadow: 0 8px 18px var(--overlay-shadow);
+  box-shadow:
+    0 10px 24px var(--overlay-shadow),
+    0 0 28px color-mix(in oklch, var(--overlay-glow) 22%, transparent);
   color: var(--overlay-fg);
-  cursor: pointer;
+  cursor: default;
   font: inherit;
   text-align: left;
 }
 
-.overlay-pill:hover {
-  filter: brightness(1.04);
-}
-
+.overlay-pill:hover,
+.overlay-pill:focus,
 .overlay-pill:active {
-  filter: brightness(0.97);
+  background: var(--overlay-bg);
+  filter: none;
 }
 
 .overlay-pill-busy {
-  border-color: var(--overlay-glow);
-  animation: overlay-glow 1.8s ease-in-out infinite;
+  cursor: default;
 }
 
-.overlay-pill-armed {
-  background: color-mix(in oklch, var(--overlay-armed) 18%, var(--overlay-bg));
-  border-color: var(--overlay-armed);
-  color: var(--overlay-armed-fg);
-  animation: overlay-glow-armed 1.8s ease-in-out infinite;
+.overlay-pill-cancel {
+  cursor: pointer;
+  justify-content: center;
+  text-align: center;
+  border-color: color-mix(in oklch, var(--overlay-armed) 70%, var(--overlay-border));
+  box-shadow:
+    0 10px 24px var(--overlay-shadow),
+    0 0 28px color-mix(in oklch, var(--overlay-armed) 18%, transparent);
 }
 
 .overlay-center {
@@ -253,8 +257,14 @@ html:has(.overlay-shell) #root {
   display: block;
   flex: 1;
   min-width: 0;
-  height: 24px;
+  height: 36px;
   color: var(--overlay-wave);
+}
+
+.overlay-cancel {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--overlay-armed-fg);
 }
 
 .overlay-ellipsis {
@@ -297,34 +307,6 @@ html:has(.overlay-shell) #root {
   }
 }
 
-@keyframes overlay-glow {
-  0%,
-  100% {
-    box-shadow:
-      0 0 0 1px color-mix(in oklch, var(--overlay-glow) 35%, transparent),
-      0 6px 14px color-mix(in oklch, var(--overlay-glow) 18%, transparent);
-  }
-  50% {
-    box-shadow:
-      0 0 0 1px color-mix(in oklch, var(--overlay-glow) 75%, transparent),
-      0 6px 16px color-mix(in oklch, var(--overlay-glow) 32%, transparent);
-  }
-}
-
-@keyframes overlay-glow-armed {
-  0%,
-  100% {
-    box-shadow:
-      0 0 0 1px color-mix(in oklch, var(--overlay-armed) 35%, transparent),
-      0 6px 14px color-mix(in oklch, var(--overlay-armed) 16%, transparent);
-  }
-  50% {
-    box-shadow:
-      0 0 0 1px color-mix(in oklch, var(--overlay-armed) 80%, transparent),
-      0 6px 16px color-mix(in oklch, var(--overlay-armed) 28%, transparent);
-  }
-}
-
 .mic-slider {
   width: 100%;
   accent-color: var(--primary);
@@ -354,7 +336,7 @@ html:has(.overlay-shell) #root {
   line-height: 1.2;
 }
 
-.overlay-pill-armed .overlay-hint {
+.overlay-pill-cancel .overlay-hint {
   color: var(--overlay-armed-fg);
 }
 
@@ -422,8 +404,6 @@ html:has(.overlay-shell) #root {
 
   .overlay-dot-live,
   .overlay-ellipsis span,
-  .overlay-pill-busy,
-  .overlay-pill-armed,
   .history-spin {
     animation: none;
     opacity: 1;

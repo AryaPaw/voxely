@@ -3,6 +3,9 @@ import {
   overlayBarHeights,
   drawOverlayWave,
   meterPollAllowed,
+  overlayAmplitude,
+  overlayCancelArmed,
+  overlayHoverFromElement,
   OVERLAY_BAR_COUNT,
 } from "./overlay-wave";
 
@@ -39,6 +42,27 @@ describe("overlayBarHeights", () => {
     const fast = overlayBarHeights(levels, true, zeros, OVERLAY_BAR_COUNT, 0.04);
     expect(fast[0] ?? 0).toBeGreaterThan(slow[0] ?? 0);
   });
+
+  it("maps quiet speech higher than a linear gain of two", () => {
+    expect(overlayAmplitude(0.08)).toBeGreaterThan(0.3);
+    expect(overlayAmplitude(0.08)).toBeGreaterThan(0.08 * 2);
+    expect(overlayAmplitude(1)).toBe(1);
+    expect(overlayAmplitude(0.04)).toBeLessThan(overlayAmplitude(0.4));
+  });
+});
+
+describe("overlayCancelArmed", () => {
+  it("requires hover before a cancel click", () => {
+    expect(overlayCancelArmed(true, false)).toBe(false);
+    expect(overlayCancelArmed(true, true)).toBe(true);
+    expect(overlayCancelArmed(false, true)).toBe(false);
+  });
+
+  it("reads :hover from the element", () => {
+    const node = { matches: () => true } as unknown as Element;
+    expect(overlayHoverFromElement(node)).toBe(true);
+    expect(overlayHoverFromElement(null)).toBe(false);
+  });
 });
 
 describe("meterPollAllowed", () => {
@@ -67,17 +91,48 @@ describe("drawOverlayWave", () => {
     expect(ops).not.toContain("lineTo");
   });
 
-  it("keeps silent bars at zero height", () => {
+  it("falls back to rect when roundRect is missing", () => {
     const ops: string[] = [];
     const ctx = {
       clearRect: () => undefined,
       fill: () => ops.push("fill"),
       beginPath: () => ops.push("begin"),
-      roundRect: () => ops.push("roundRect"),
       rect: () => ops.push("rect"),
       fillStyle: "",
     };
-    drawOverlayWave(ctx as unknown as CanvasRenderingContext2D, 120, 16, [0, 0, 0]);
-    expect(ops).not.toContain("roundRect");
+    drawOverlayWave(ctx as unknown as CanvasRenderingContext2D, 120, 16, [0.5]);
+    expect(ops).toContain("rect");
+  });
+
+  it("skips drawing when the canvas has no size", () => {
+    const ops: string[] = [];
+    const ctx = {
+      clearRect: () => ops.push("clear"),
+      fill: () => ops.push("fill"),
+      fillStyle: "",
+    };
+    drawOverlayWave(ctx as unknown as CanvasRenderingContext2D, 0, 16, [1]);
+    expect(ops).toEqual(["clear"]);
+  });
+
+  it("keeps a center spine on silent bars so the wave grows up and down", () => {
+    const ops: string[] = [];
+    const rects: number[] = [];
+    const ctx = {
+      clearRect: () => undefined,
+      fill: () => ops.push("fill"),
+      beginPath: () => ops.push("begin"),
+      roundRect: (_x: number, y: number, _w: number, h: number) => {
+        ops.push("roundRect");
+        rects.push(y, h);
+      },
+      rect: () => ops.push("rect"),
+      fillStyle: "",
+    };
+    drawOverlayWave(ctx as unknown as CanvasRenderingContext2D, 120, 20, [0, 1, 0]);
+    expect(ops.filter((op) => op === "roundRect")).toHaveLength(3);
+    expect(rects[0] ?? 0).toBeGreaterThan(0);
+    expect(rects[4] ?? 0).toBeCloseTo(rects[0] ?? 0);
+    expect(rects[3] ?? 0).toBe(20);
   });
 });

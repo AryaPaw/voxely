@@ -1,12 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, type AppSettings, type SessionState } from "../../lib/api";
 import { applyUiLocale, messagesFor, resolveUiLocale } from "../../lib/i18n";
 import { overlayIsBusy, overlayLabel } from "../../lib/session-copy";
+import { overlayCancelArmed, overlayHoverFromElement } from "../../lib/overlay-wave";
 import { applyTheme, watchSystemTheme } from "../../lib/theme";
 import { OverlayWave } from "./OverlayWave";
 
 export function OverlayApp() {
+  const pillRef = useRef<HTMLButtonElement>(null);
   const [state, setState] = useState<SessionState>({ kind: "idle" });
   const [elapsed, setElapsed] = useState(0);
   const [hovered, setCancelHover] = useState(false);
@@ -14,7 +16,7 @@ export function OverlayApp() {
   const [theme, setTheme] = useState("dark");
   const recording = state.kind === "recording" || state.kind === "startingRecording";
   const busy = overlayIsBusy(state);
-  const cancelReady = busy && hovered;
+  const cancelReady = overlayCancelArmed(busy, hovered);
 
   function applySettings(settings: AppSettings) {
     setTheme(settings.theme);
@@ -48,6 +50,26 @@ export function OverlayApp() {
   }, [busy]);
 
   useEffect(() => {
+    if (!busy) {
+      return;
+    }
+    const sync = () => {
+      if (overlayHoverFromElement(pillRef.current)) {
+        setCancelHover(true);
+      }
+    };
+    sync();
+    const frame = window.requestAnimationFrame(sync);
+    const timer = window.setTimeout(sync, 40);
+    window.addEventListener("pointermove", sync);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+      window.removeEventListener("pointermove", sync);
+    };
+  }, [busy]);
+
+  useEffect(() => {
     if (recording) {
       setElapsed(0);
     }
@@ -73,22 +95,22 @@ export function OverlayApp() {
   }, []);
 
   function onPillClick() {
-    if (busy) {
+    if (cancelReady) {
       void api.cancel();
     }
   }
 
-  const centered = cancelReady || (busy && !recording);
-  const status = cancelReady ? copy.overlayCancel : overlayLabel(state, copy);
-  const showDots = busy && !cancelReady;
+  const status = overlayLabel(state, copy);
+  const showDots = busy && !cancelReady && !recording;
   const clock = recording && !cancelReady ? formatClock(elapsed) : "";
-  const cancelHint = busy ? copy.overlayCancel : status;
+  const cancelHint = cancelReady ? copy.overlayCancel : busy ? copy.overlayCancelAria : status;
 
   return (
     <div className="overlay-shell">
       <button
+        ref={pillRef}
         type="button"
-        className={`overlay-pill${cancelReady ? " overlay-pill-armed" : ""}${busy && !cancelReady ? " overlay-pill-busy" : ""}`}
+        className={`overlay-pill${cancelReady ? " overlay-pill-cancel" : ""}${busy && !cancelReady ? " overlay-pill-busy" : ""}`}
         onClick={onPillClick}
         onMouseEnter={() => {
           if (busy) {
@@ -98,22 +120,23 @@ export function OverlayApp() {
         onMouseLeave={() => setCancelHover(false)}
         aria-label={cancelHint}
       >
-        {centered ? (
-          <span className="overlay-center">
-            {status}
-            {showDots ? <AnimatedDots /> : null}
-          </span>
+        {cancelReady ? (
+          <span className="overlay-center overlay-cancel">{copy.overlayCancel}</span>
         ) : (
           <>
             <span className={`overlay-dot${recording ? " overlay-dot-live" : ""}`} />
-            <OverlayWave active={recording} />
-            <div className="overlay-meta">
-              <span className="overlay-status">
+            {busy && !showDots ? <OverlayWave active={recording} /> : null}
+            {showDots ? (
+              <span className="overlay-center">
                 {status}
-                {showDots ? <AnimatedDots /> : null}
+                <AnimatedDots />
               </span>
-              {clock ? <span className="overlay-hint">{clock}</span> : null}
-            </div>
+            ) : (
+              <div className="overlay-meta">
+                <span className="overlay-status">{status}</span>
+                {clock ? <span className="overlay-hint">{clock}</span> : null}
+              </div>
+            )}
           </>
         )}
       </button>

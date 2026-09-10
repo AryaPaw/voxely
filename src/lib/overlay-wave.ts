@@ -1,6 +1,11 @@
 export const OVERLAY_BAR_COUNT = 28;
-const GAIN = 2;
-const LERP_TAU_SECONDS = 0.05;
+const LERP_TAU_SECONDS = 0.08;
+const IDLE_HALF_PX = 1.5;
+
+export function overlayAmplitude(sample: number): number {
+  const value = Math.min(1, Math.max(0, sample));
+  return Math.min(1, Math.pow(value, 0.5) * 1.35);
+}
 
 export function overlayBarHeights(
   levels: number[],
@@ -18,7 +23,7 @@ export function overlayBarHeights(
   return Array.from({ length: count }, (_, index) => {
     const sampleIndex = Math.max(0, levels.length - count) + index;
     const sample = Math.max(0, levels[sampleIndex] ?? 0);
-    const target = Math.min(1, sample * GAIN);
+    const target = overlayAmplitude(sample);
     const prior = previous[index] ?? target;
     return Math.min(1, Math.max(0, prior + (target - prior) * alpha));
   });
@@ -26,6 +31,14 @@ export function overlayBarHeights(
 
 export function meterPollAllowed(inFlight: boolean): boolean {
   return !inFlight;
+}
+
+export function overlayHoverFromElement(node: Element | null): boolean {
+  return Boolean(node?.matches(":hover"));
+}
+
+export function overlayCancelArmed(busy: boolean, hovered: boolean): boolean {
+  return busy && hovered;
 }
 
 export function drawOverlayWave(
@@ -42,16 +55,13 @@ export function drawOverlayWave(
   const gap = 1.5;
   const barWidth = Math.max(2, (width - gap * (bars.length - 1)) / bars.length);
   const radius = Math.min(2.5, barWidth / 2);
+  const mid = height / 2;
   ctx.fillStyle = fillStyle;
   bars.forEach((value, index) => {
     const amplitude = Math.min(1, Math.max(0, value));
-    const barHeight = amplitude * height;
-    if (barHeight < 0.5) {
-      return;
-    }
+    const half = Math.max(IDLE_HALF_PX, amplitude * (height / 2));
     const x = index * (barWidth + gap);
-    const y = (height - barHeight) / 2;
-    roundedBar(ctx, x, y, barWidth, barHeight, radius);
+    roundedBar(ctx, x, mid - half, barWidth, half * 2, radius);
     ctx.fill();
   });
 }
