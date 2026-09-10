@@ -44,6 +44,10 @@ pub enum AppError {
     HotkeyFailed(String),
     #[error("Illegal session transition: {0}")]
     IllegalTransition(String),
+    #[error("Transcription is already running")]
+    TranscriptionInProgress,
+    #[error("Recording was interrupted")]
+    Interrupted,
 }
 
 impl AppError {
@@ -69,6 +73,35 @@ impl AppError {
             Self::Cancelled => "Отменено".into(),
             Self::HotkeyFailed(_) => "Не удалось зарегистрировать хоткей".into(),
             Self::IllegalTransition(_) => "Недопустимое состояние сессии".into(),
+            Self::TranscriptionInProgress => "Расшифровка уже идёт".into(),
+            Self::Interrupted => "Запись прервана. Можно повторить расшифровку".into(),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::MicrophoneUnavailable => "MicrophoneUnavailable",
+            Self::AudioCaptureFailed(_) => "AudioCaptureFailed",
+            Self::AudioProcessingFailed(_) => "AudioProcessingFailed",
+            Self::StorageFailed(_) => "StorageFailed",
+            Self::InvalidApiKey => "InvalidApiKey",
+            Self::InvalidModel(_) => "InvalidModel",
+            Self::RequestValidationFailed(_) => "RequestValidationFailed",
+            Self::NetworkUnavailable => "NetworkUnavailable",
+            Self::ConnectionFailed(_) => "ConnectionFailed",
+            Self::RequestTimeout => "RequestTimeout",
+            Self::RateLimited => "RateLimited",
+            Self::ProviderUnavailable => "ProviderUnavailable",
+            Self::OpenRouterServerError => "OpenRouterServerError",
+            Self::ResponseMalformed => "ResponseMalformed",
+            Self::RecordingTooLarge => "RecordingTooLarge",
+            Self::RetryDeadlineExceeded => "RetryDeadlineExceeded",
+            Self::TextInsertionFailed(_) => "TextInsertionFailed",
+            Self::Cancelled => "Cancelled",
+            Self::HotkeyFailed(_) => "HotkeyFailed",
+            Self::IllegalTransition(_) => "IllegalTransition",
+            Self::TranscriptionInProgress => "TranscriptionInProgress",
+            Self::Interrupted => "Interrupted",
         }
     }
 
@@ -82,5 +115,21 @@ impl AppError {
                 | Self::ProviderUnavailable
                 | Self::OpenRouterServerError
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppError;
+
+    #[test]
+    fn code_matches_variant_name() {
+        assert_eq!(AppError::Cancelled.code(), "Cancelled");
+        assert_eq!(
+            AppError::TranscriptionInProgress.code(),
+            "TranscriptionInProgress"
+        );
+        assert_eq!(AppError::Interrupted.code(), "Interrupted");
+        assert_eq!(AppError::RequestTimeout.code(), "RequestTimeout");
     }
 }

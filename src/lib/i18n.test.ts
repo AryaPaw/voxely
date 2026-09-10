@@ -60,6 +60,8 @@ describe("messagesFor", () => {
       "Cancelled",
       "HotkeyFailed",
       "IllegalTransition",
+      "TranscriptionInProgress",
+      "Interrupted",
       "UnknownCode",
     ];
     for (const code of codes) {
@@ -74,6 +76,9 @@ describe("messagesFor", () => {
     );
     expect(updateToast("failed", messagesFor("en"))).toBe("Could not check for updates");
     expect(formatInvokeError("Cancelled", messagesFor("en"))).toBe("Cancelled");
+    expect(formatInvokeError({ code: "TranscriptionInProgress" }, messagesFor("ru"))).toBe(
+      "Расшифровка уже идёт",
+    );
     expect(formatInvokeError({ code: "InvalidApiKey" }, messagesFor("en"))).toBe(
       "OpenRouter API key is missing",
     );

@@ -12,6 +12,7 @@ pub enum RecordingStatus {
     Processing,
     Completed,
     Failed,
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -270,6 +271,7 @@ fn status_str(status: &RecordingStatus) -> &'static str {
         RecordingStatus::Processing => "processing",
         RecordingStatus::Completed => "completed",
         RecordingStatus::Failed => "failed",
+        RecordingStatus::Interrupted => "interrupted",
     }
 }
 
@@ -277,6 +279,7 @@ fn parse_status(value: String) -> RecordingStatus {
     match value.as_str() {
         "completed" => RecordingStatus::Completed,
         "failed" => RecordingStatus::Failed,
+        "interrupted" => RecordingStatus::Interrupted,
         _ => RecordingStatus::Processing,
     }
 }

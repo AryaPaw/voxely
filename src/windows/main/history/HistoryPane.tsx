@@ -11,8 +11,9 @@ import {
   Settings as SettingsIcon,
   Trash2,
 } from "lucide-react";
+import { toast } from "sonner";
 import { api, type Recording } from "../../../lib/api";
-import type { Messages } from "../../../lib/i18n";
+import { formatInvokeError, type Messages } from "../../../lib/i18n";
 import { formatDuration, formatTime } from "../../../lib/utils";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
@@ -114,7 +115,8 @@ function HistoryCard({
   const [copied, setCopied] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const failed = item.status === "failed" && !item.transcript;
+  const failed =
+    (item.status === "failed" || item.status === "interrupted") && !item.transcript;
   const processing = item.status === "processing" && !item.transcript;
 
   useEffect(() => {
@@ -138,6 +140,18 @@ function HistoryCard({
       void node.play();
     } else {
       node.pause();
+    }
+  }
+
+  async function retryTranscription() {
+    setRetrying(true);
+    try {
+      await api.retry(item.id);
+      await onRefresh();
+    } catch (error) {
+      toast.error(formatInvokeError(error, copy));
+    } finally {
+      setRetrying(false);
     }
   }
 
@@ -172,15 +186,7 @@ function HistoryCard({
               variant="ghost"
               aria-label={copy.retry}
               disabled={retrying}
-              onClick={async () => {
-                setRetrying(true);
-                try {
-                  await api.retry(item.id);
-                  await onRefresh();
-                } finally {
-                  setRetrying(false);
-                }
-              }}
+              onClick={() => void retryTranscription()}
             >
               <RotateCcw className={`h-4 w-4${retrying ? " history-spin" : ""}`} />
             </Button>
@@ -215,15 +221,7 @@ function HistoryCard({
             <button
               type="button"
               className="text-sky-400 underline-offset-2 hover:underline"
-              onClick={async () => {
-                setRetrying(true);
-                try {
-                  await api.retry(item.id);
-                  await onRefresh();
-                } finally {
-                  setRetrying(false);
-                }
-              }}
+              onClick={() => void retryTranscription()}
             >
               {copy.retry}
             </button>

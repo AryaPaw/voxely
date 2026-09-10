@@ -79,6 +79,8 @@ const ru = {
   errInsert: "Не удалось вставить текст",
   errHotkey: "Не удалось зарегистрировать хоткей",
   errIllegalTransition: "Недопустимое состояние сессии",
+  errTranscriptionInProgress: "Расшифровка уже идёт",
+  errInterrupted: "Запись прервана. Можно повторить расшифровку",
   errUnknown: "Неизвестная ошибка",
   dateLocale: "ru-RU",
   secondsAbbrev: "с",
@@ -242,6 +244,8 @@ const en = {
   errInsert: "Could not insert text",
   errHotkey: "Could not register the hotkey",
   errIllegalTransition: "Illegal session state",
+  errTranscriptionInProgress: "Transcription is already running",
+  errInterrupted: "Recording was interrupted. You can retry transcription",
   errUnknown: "Unknown error",
   dateLocale: "en-US",
   secondsAbbrev: "s",
@@ -390,6 +394,10 @@ export function localizedError(
       return copy.errHotkey;
     case "IllegalTransition":
       return copy.errIllegalTransition;
+    case "TranscriptionInProgress":
+      return copy.errTranscriptionInProgress;
+    case "Interrupted":
+      return copy.errInterrupted;
     default:
       return fallback?.trim() ? fallback : copy.errUnknown;
   }

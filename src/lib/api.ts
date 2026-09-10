@@ -19,7 +19,7 @@ export interface Recording {
   rawAudioPath: string | null;
   processedAudioPath: string | null;
   transcript: string | null;
-  status: "processing" | "completed" | "failed";
+  status: "processing" | "completed" | "failed" | "interrupted";
   provider: string;
   model: string;
   attemptCount: number;

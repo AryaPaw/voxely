@@ -20,9 +20,9 @@ use crate::audio::devices::list_input_devices;
 use crate::dsp::pipeline::prepare_transcription;
 use crate::error::AppError;
 use crate::history::repository::{audio_dir, new_recording, HistoryRepo, RecordingStatus};
-use crate::history::retention::{apply_retention, cleanup_orphans, delete_recording, Retention};
+use crate::history::retention::{apply_retention, cleanup_orphans, Retention};
 use crate::settings::AppSettings;
-use crate::transcription::openrouter::transcribe_file;
+use crate::transcription::openrouter::{transcribe_file_with_progress, SttProgress};
 use crate::windows_int::credentials::get_api_key;
 use crate::windows_int::overlay::work_area_for_cursor;
 use crate::windows_int::text_injector::{native, NativeHwnd};
@@ -56,6 +56,7 @@ impl AppContext {
         let history = HistoryRepo::open(&data_dir.join("history.sqlite"))?;
         let audio = audio_dir(&data_dir);
         std::fs::create_dir_all(&audio).map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        recover_stale_processing(&history, &audio)?;
         cleanup_orphans(&audio, &history)?;
         apply_retention(
             &history,
@@ -143,13 +144,7 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
         | SessionState::ProcessingAudio
         | SessionState::Transcribing { .. }
         | SessionState::RetryWaiting { .. } => {
-            if let Some(id) = ctx.session_recording_id.lock().clone() {
-                if let Ok(Some(rec)) = ctx.history.lock().get(&id) {
-                    let root = audio_dir(&ctx.data_dir);
-                    let _ = delete_recording(&ctx.history.lock(), &root, &rec);
-                }
-            }
-            *ctx.session_recording_id.lock() = None;
+            fail_active_recording(&ctx, &AppError::Cancelled);
             let _ = ctx.transition(SessionEvent::Cancelled);
             ctx.emit_state(app);
             hide_overlay_later(app.clone(), Duration::from_millis(16));
@@ -294,7 +289,11 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
     tauri::async_runtime::spawn(async move {
         match process_and_transcribe(app_handle.clone(), rec.id.clone()).await {
             Ok(()) => {}
-            Err(AppError::Cancelled) => hide_overlay_now(&app_handle),
+            Err(AppError::Cancelled) => {
+                let ctx = app_handle.state::<Arc<AppContext>>();
+                mark_recording_failed(&ctx, &rec.id, &AppError::Cancelled);
+                hide_overlay_now(&app_handle);
+            }
             Err(err) => {
                 tracing::error!(error = %err, "pipeline failed");
                 let ctx = app_handle.state::<Arc<AppContext>>();
@@ -309,11 +308,7 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
 
 async fn process_and_transcribe(app: AppHandle, recording_id: String) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
-    if !ctx.in_flight.lock().insert(recording_id.clone()) {
-        return Err(AppError::RequestValidationFailed(
-            "transcription already running".into(),
-        ));
-    }
+    begin_transcription(&ctx, &recording_id)?;
     let finish = || {
         ctx.in_flight.lock().remove(&recording_id);
     };
@@ -395,9 +390,9 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
     };
     rec.request_started_at = Some(chrono::Utc::now());
     ctx.history.lock().update(&rec)?;
-    match transcribe_file(
-        &ctx.client,
-        crate::transcription::openrouter::default_base_url(),
+    match run_transcription(
+        app,
+        recording_id,
         &key,
         &settings.model,
         language,
@@ -455,7 +450,7 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
         Err(err) => {
             rec.status = RecordingStatus::Failed;
             rec.last_error_message = Some(err.user_message());
-            rec.last_error_code = Some(format!("{err:?}"));
+            rec.last_error_code = Some(err.code().to_string());
             rec.updated_at = chrono::Utc::now();
             ctx.history.lock().update(&rec)?;
             Err(err)
@@ -581,13 +576,101 @@ fn hide_overlay_later(app: AppHandle, delay: Duration) {
     });
 }
 
+fn recover_stale_processing(
+    history: &HistoryRepo,
+    audio_root: &std::path::Path,
+) -> Result<(), AppError> {
+    for rec in history.list(10_000)? {
+        if rec.status != RecordingStatus::Processing {
+            continue;
+        }
+        let has_audio = [&rec.raw_audio_path, &rec.processed_audio_path]
+            .into_iter()
+            .flatten()
+            .any(|name| audio_root.join(name).is_file());
+        let mut rec = rec;
+        if has_audio {
+            rec.status = RecordingStatus::Interrupted;
+            rec.last_error_code = Some(AppError::Interrupted.code().into());
+            rec.last_error_message = Some(AppError::Interrupted.user_message());
+        } else {
+            rec.status = RecordingStatus::Failed;
+            rec.last_error_code = Some(AppError::StorageFailed("audio missing".into()).code().into());
+            rec.last_error_message =
+                Some(AppError::StorageFailed("audio missing".into()).user_message());
+        }
+        rec.updated_at = chrono::Utc::now();
+        history.update(&rec)?;
+    }
+    Ok(())
+}
+
+fn begin_transcription(ctx: &AppContext, recording_id: &str) -> Result<(), AppError> {
+    if !ctx.in_flight.lock().insert(recording_id.to_string()) {
+        return Err(AppError::TranscriptionInProgress);
+    }
+    Ok(())
+}
+
+fn fail_active_recording(ctx: &AppContext, err: &AppError) {
+    if let Some(id) = ctx.session_recording_id.lock().clone() {
+        mark_recording_failed(ctx, &id, err);
+    }
+    *ctx.session_recording_id.lock() = None;
+}
+
+fn emit_stt_progress(ctx: &AppContext, app: &AppHandle, recording_id: &str, progress: SttProgress) {
+    if ctx.session_recording_id.lock().as_deref() != Some(recording_id) {
+        return;
+    }
+    let event = match progress {
+        SttProgress::Attempt(attempt) => SessionEvent::TranscriptAttemptStarted { attempt },
+        SttProgress::Waiting { attempt, delay } => SessionEvent::RetryScheduled { attempt, delay },
+    };
+    if ctx.transition(event).is_ok() {
+        ctx.emit_state(app);
+    }
+}
+
+async fn run_transcription(
+    app: &AppHandle,
+    recording_id: &str,
+    api_key: &str,
+    model: &str,
+    language: Option<&str>,
+    path: &std::path::Path,
+    policy: crate::transcription::retry::RetryPolicy,
+    audio_duration: Duration,
+    cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<crate::transcription::openrouter::TranscriptionSuccess, AppError> {
+    let ctx = app.state::<Arc<AppContext>>();
+    let recording_id_owned = recording_id.to_string();
+    let app_for_progress = app.clone();
+    transcribe_file_with_progress(
+        &ctx.client,
+        crate::transcription::openrouter::default_base_url(),
+        api_key,
+        model,
+        language,
+        path,
+        policy,
+        audio_duration,
+        cancel,
+        move |progress| {
+            let ctx = app_for_progress.state::<Arc<AppContext>>();
+            emit_stt_progress(&ctx, &app_for_progress, &recording_id_owned, progress);
+        },
+    )
+    .await
+}
+
 fn mark_recording_failed(ctx: &AppContext, recording_id: &str, err: &AppError) {
     let Ok(Some(mut rec)) = ctx.history.lock().get(recording_id) else {
         return;
     };
     rec.status = RecordingStatus::Failed;
     rec.last_error_message = Some(err.user_message());
-    rec.last_error_code = Some(format!("{err:?}"));
+    rec.last_error_code = Some(err.code().to_string());
     rec.updated_at = chrono::Utc::now();
     let _ = ctx.history.lock().update(&rec);
 }
@@ -625,11 +708,7 @@ pub async fn manual_retry(
     recording_id: String,
 ) -> Result<crate::history::repository::Recording, AppError> {
     let ctx = app.state::<Arc<AppContext>>();
-    if !ctx.in_flight.lock().insert(recording_id.clone()) {
-        return Err(AppError::RequestValidationFailed(
-            "transcription already running".into(),
-        ));
-    }
+    begin_transcription(&ctx, &recording_id)?;
     let result = manual_retry_inner(&app, &recording_id).await;
     ctx.in_flight.lock().remove(&recording_id);
     result
@@ -660,9 +739,9 @@ async fn manual_retry_inner(
         Some(settings.language.as_str())
     };
     let (_tx, rx) = tokio::sync::watch::channel(false);
-    match transcribe_file(
-        &ctx.client,
-        crate::transcription::openrouter::default_base_url(),
+    match run_transcription(
+        app,
+        recording_id,
         &key,
         &settings.model,
         language,
@@ -691,10 +770,84 @@ async fn manual_retry_inner(
         Err(err) => {
             rec.status = RecordingStatus::Failed;
             rec.last_error_message = Some(err.user_message());
-            rec.last_error_code = Some(format!("{err:?}"));
+            rec.last_error_code = Some(err.code().to_string());
             rec.updated_at = chrono::Utc::now();
             ctx.history.lock().update(&rec)?;
             Err(err)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history::repository::{new_recording, RecordingStatus};
+
+    #[test]
+    fn second_transcription_claim_is_busy() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        begin_transcription(&ctx, "rec-1").unwrap();
+        assert_eq!(
+            begin_transcription(&ctx, "rec-1").unwrap_err(),
+            AppError::TranscriptionInProgress
+        );
+    }
+
+    #[test]
+    fn cancel_keeps_audio_and_marks_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let mut rec = new_recording("openai/gpt-transcribe".into());
+        rec.processed_audio_path = Some(format!("{}.processed.wav", rec.id));
+        let audio_path = audio_dir(&ctx.data_dir).join(rec.processed_audio_path.as_ref().unwrap());
+        crate::audio::capture::write_pcm16_wav(&audio_path, 16_000, &[0.0; 160]).unwrap();
+        ctx.history.lock().insert(&rec).unwrap();
+        *ctx.session_recording_id.lock() = Some(rec.id.clone());
+        fail_active_recording(&ctx, &AppError::Cancelled);
+        let kept = ctx.history.lock().get(&rec.id).unwrap().unwrap();
+        assert_eq!(kept.status, RecordingStatus::Failed);
+        assert_eq!(kept.last_error_code.as_deref(), Some("Cancelled"));
+        assert!(audio_path.exists());
+        assert!(ctx.session_recording_id.lock().is_none());
+    }
+
+    #[test]
+    fn startup_marks_stale_processing_with_audio_as_interrupted() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let history = HistoryRepo::open(&data.join("history.sqlite")).unwrap();
+        let audio = audio_dir(&data);
+        std::fs::create_dir_all(&audio).unwrap();
+        let mut rec = new_recording("openai/gpt-transcribe".into());
+        rec.raw_audio_path = Some(format!("{}.wav", rec.id));
+        rec.status = RecordingStatus::Processing;
+        let wav = audio.join(rec.raw_audio_path.as_ref().unwrap());
+        crate::audio::capture::write_pcm16_wav(&wav, 16_000, &[0.0; 160]).unwrap();
+        history.insert(&rec).unwrap();
+        drop(history);
+
+        let ctx = AppContext::initialize(data).unwrap();
+        let kept = ctx.history.lock().get(&rec.id).unwrap().unwrap();
+        assert_eq!(kept.status, RecordingStatus::Interrupted);
+        assert_eq!(kept.last_error_code.as_deref(), Some("Interrupted"));
+        assert!(wav.exists());
+    }
+
+    #[test]
+    fn startup_fails_stale_processing_without_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let history = HistoryRepo::open(&data.join("history.sqlite")).unwrap();
+        let mut rec = new_recording("openai/gpt-transcribe".into());
+        rec.status = RecordingStatus::Processing;
+        rec.raw_audio_path = Some("missing.wav".into());
+        history.insert(&rec).unwrap();
+        drop(history);
+
+        let ctx = AppContext::initialize(data).unwrap();
+        let kept = ctx.history.lock().get(&rec.id).unwrap().unwrap();
+        assert_eq!(kept.status, RecordingStatus::Failed);
+        assert_eq!(kept.last_error_code.as_deref(), Some("StorageFailed"));
     }
 }

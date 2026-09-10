@@ -125,11 +125,7 @@ pub fn apply_event(
 fn failed(err: &AppError) -> SessionState {
     SessionState::Failed {
         message: err.user_message(),
-        code: format!("{err:?}")
-            .split('(')
-            .next()
-            .unwrap_or("Failed")
-            .to_string(),
+        code: err.code().to_string(),
     }
 }
 

@@ -27,6 +27,12 @@ pub struct SttModel {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SttProgress {
+    Attempt(u32),
+    Waiting { attempt: u32, delay: Duration },
+}
+
 pub async fn transcribe_file(
     client: &reqwest::Client,
     base_url: &str,
@@ -37,6 +43,33 @@ pub async fn transcribe_file(
     policy: RetryPolicy,
     audio_duration: Duration,
     cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<TranscriptionSuccess, AppError> {
+    transcribe_file_with_progress(
+        client,
+        base_url,
+        api_key,
+        model,
+        language,
+        path,
+        policy,
+        audio_duration,
+        cancel,
+        |_| {},
+    )
+    .await
+}
+
+pub async fn transcribe_file_with_progress(
+    client: &reqwest::Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    language: Option<&str>,
+    path: &Path,
+    policy: RetryPolicy,
+    audio_duration: Duration,
+    cancel: tokio::sync::watch::Receiver<bool>,
+    mut on_progress: impl FnMut(SttProgress) + Send,
 ) -> Result<TranscriptionSuccess, AppError> {
     if !path.exists() {
         return Err(AppError::StorageFailed("processed audio missing".into()));
@@ -53,12 +86,19 @@ pub async fn transcribe_file(
         }
         match scheduler.start_attempt(Instant::now(), audio_duration) {
             AttemptDecision::GiveUp(err) => return Err(err),
-            AttemptDecision::Wait { delay, .. } => {
+            AttemptDecision::Wait { delay, attempt } => {
+                on_progress(SttProgress::Waiting { attempt, delay });
                 if wait_or_cancel(&mut cancel, delay).await {
                     return Err(AppError::Cancelled);
                 }
             }
             AttemptDecision::Run { attempt, timeout } => {
+                on_progress(SttProgress::Attempt(attempt));
+                tracing::info!(
+                    attempt,
+                    timeout_ms = timeout.as_millis() as u64,
+                    "stt attempt"
+                );
                 let started = Instant::now();
                 let outcome = tokio::select! {
                     biased;
@@ -88,13 +128,20 @@ pub async fn transcribe_file(
                     Some(Err(classified)) => {
                         match scheduler.after_failure(&classified, Instant::now(), 0.08) {
                             AttemptDecision::GiveUp(err) => return Err(err),
-                            AttemptDecision::Wait { delay, .. } => {
+                            AttemptDecision::Wait {
+                                delay,
+                                attempt: wait_attempt,
+                            } => {
                                 tracing::warn!(
                                     attempt,
                                     delay_ms = delay.as_millis() as u64,
                                     status = classified.http_status,
                                     "retrying transcription"
                                 );
+                                on_progress(SttProgress::Waiting {
+                                    attempt: wait_attempt,
+                                    delay,
+                                });
                                 if wait_or_cancel(&mut cancel, delay).await {
                                     return Err(AppError::Cancelled);
                                 }
@@ -304,6 +351,37 @@ mod tests {
         .unwrap();
         assert_eq!(result.text, "hello");
         assert_eq!(result.generation_id.as_deref(), Some("gen_1"));
+    }
+
+    #[tokio::test]
+    async fn reports_attempt_progress() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/audio/transcriptions");
+            then.status(200).json_body(serde_json::json!({"text":"ok"}));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = wav_fixture(dir.path());
+        let client = reqwest::Client::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_for_cb = events.clone();
+        transcribe_file_with_progress(
+            &client,
+            &server.base_url(),
+            "test-key",
+            "openai/gpt-transcribe",
+            None,
+            &path,
+            RetryPolicy::default(),
+            Duration::from_secs(1),
+            rx,
+            move |progress| events_for_cb.lock().unwrap().push(progress),
+        )
+        .await
+        .unwrap();
+        let recorded = events.lock().unwrap().clone();
+        assert_eq!(recorded, vec![SttProgress::Attempt(1)]);
     }
 
     #[tokio::test]
