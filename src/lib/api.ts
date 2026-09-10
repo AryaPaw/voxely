@@ -40,6 +40,47 @@ export interface RetrySettings {
   totalOperationTimeoutMs: number;
 }
 
+export type FilterKind =
+  "highPass" | "rnnoise" | "gain" | "compressor" | "expander" | "gate" | "limiter";
+
+export interface FilterSlot {
+  id: string;
+  kind: FilterKind;
+  enabled: boolean;
+}
+
+export interface DspPreset {
+  id: string;
+  name: string;
+  order: FilterSlot[];
+  highPass: { cutoffHz: number; sampleRate: number };
+  gain: { db: number };
+  compressor: {
+    thresholdDb: number;
+    ratio: number;
+    attackMs: number;
+    releaseMs: number;
+    makeupDb: number;
+    sampleRate: number;
+  };
+  expander: {
+    thresholdDb: number;
+    ratio: number;
+    attackMs: number;
+    releaseMs: number;
+    makeupDb: number;
+    sampleRate: number;
+  };
+  gate: {
+    openThresholdDb: number;
+    closeThresholdDb: number;
+    holdMs: number;
+    releaseMs: number;
+    sampleRate: number;
+  };
+  limiter: { thresholdDb: number; releaseMs: number; sampleRate: number };
+}
+
 export interface MicTune {
   gainDb: number;
   highpassHz: number;
@@ -82,7 +123,7 @@ export interface AppSettings {
   debugLogging: boolean;
   retry: RetrySettings;
   activePresetId: string;
-  presets: Array<{ id: string; name: string }>;
+  presets: DspPreset[];
   firstRunComplete: boolean;
   configRevision?: number;
   micTune?: MicTune;
@@ -112,7 +153,7 @@ export const api = {
   checkForUpdates: () => invoke<string>("check_for_updates"),
   keyConfigured: () => invoke<boolean>("api_key_configured"),
   storeKey: (key: string) => invoke<boolean>("store_api_key", { key }),
-  testConnection: () => invoke<string>("test_openrouter"),
+  testConnection: () => invoke<number>("test_openrouter"),
   models: () => invoke<Array<{ id: string; name: string }>>("discover_models"),
   toggle: () => invoke<void>("toggle_dictation"),
   cancel: () => invoke<void>("cancel_dictation"),
@@ -127,4 +168,5 @@ export const api = {
   insert: (text: string) => invoke<void>("insert_transcript", { text }),
   audioPath: (id: string) => invoke<string | null>("recording_audio_url", { id }),
   openAudioDir: () => invoke<void>("open_audio_dir"),
+  openGithub: () => invoke<void>("open_github"),
 };

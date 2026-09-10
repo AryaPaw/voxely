@@ -2,13 +2,15 @@ import { memo, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   api,
-  defaultMicTune,
   type AppSettings,
+  type DspPreset,
   type DspPreview,
-  type MicTune,
+  type FilterKind,
 } from "../../../lib/api";
+import { meterFromPeakDb, peakDbFs, previewWarning } from "../../../lib/dsp-level";
 import { formatInvokeError, type Messages } from "../../../lib/i18n";
 import { PageHeader } from "../../../components/settings/PageHeader";
+import { SettingsSwitchRow } from "../../../components/settings/SettingsSwitchRow";
 import { Button } from "../../../components/ui/button";
 import { Label } from "../../../components/ui/label";
 import { Progress } from "../../../components/ui/progress";
@@ -26,34 +28,37 @@ export function FilterSettings({
   onChange: (patch: Partial<AppSettings>) => void;
 }) {
   const [unsupported, setUnsupported] = useState<string[]>([]);
-  const [tune, setTune] = useState<MicTune>(settings.micTune ?? defaultMicTune);
   const [preview, setPreview] = useState<DspPreview | null>(null);
   const [previewError, setPreviewError] = useState("");
   const [recording, setRecording] = useState(false);
   const [busy, setBusy] = useState(false);
-
-  const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
-
-  useEffect(() => {
-    setTune(settings.micTune ?? defaultMicTune);
-  }, [settings.micTune]);
+  const preset = activePreset(settings);
+  const signature = presetSignature(preset);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      const current = settings.micTune ?? defaultMicTune;
-      if (
-        current.gainDb === tune.gainDb &&
-        current.highpassHz === tune.highpassHz &&
-        current.denoise === tune.denoise &&
-        current.punch === tune.punch
-      ) {
-        return;
-      }
-      onChangeRef.current({ micTune: tune });
-    }, 280);
-    return () => window.clearTimeout(timer);
-  }, [settings.micTune, tune]);
+    if (recording) {
+      return;
+    }
+    let cancelled = false;
+    void api
+      .previewDsp()
+      .then((next) => {
+        if (!cancelled) {
+          setPreview(next);
+          setPreviewError("");
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setPreview(null);
+          setPreviewError(formatInvokeError(error, copy));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+    // copy is display-only for the error string
+  }, [copy, recording, settings.activePresetId, signature]);
 
   async function toggleSample() {
     setPreviewError("");
@@ -81,6 +86,12 @@ export function FilterSettings({
     }
   }
 
+  function patchPreset(next: DspPreset) {
+    onChange({
+      presets: settings.presets.map((item) => (item.id === next.id ? next : item)),
+    });
+  }
+
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.filters} title={copy.filtersTitle} />
@@ -97,42 +108,71 @@ export function FilterSettings({
           aria-label={copy.activePreset}
           value={settings.activePresetId}
           onValueChange={(activePresetId) => onChange({ activePresetId })}
-          options={settings.presets.map((preset) => ({ value: preset.id, label: preset.name }))}
+          options={settings.presets.map((item) => ({ value: item.id, label: item.name }))}
         />
       </label>
       <MicLevelMeter live={recording} copy={copy} />
-      <TuneSlider
-        label={copy.gainDb.replace("{value}", tune.gainDb.toFixed(1))}
-        min={-12}
-        max={18}
-        step={0.5}
-        value={tune.gainDb}
-        onChange={(gainDb) => setTune({ ...tune, gainDb })}
-      />
-      <TuneSlider
-        label={copy.highpass.replace("{value}", String(Math.round(tune.highpassHz)))}
-        min={20}
-        max={200}
-        step={5}
-        value={tune.highpassHz}
-        onChange={(highpassHz) => setTune({ ...tune, highpassHz })}
-      />
-      <TuneSlider
-        label={copy.denoise.replace("{value}", String(tune.denoise))}
-        min={0}
-        max={100}
-        step={1}
-        value={tune.denoise}
-        onChange={(denoise) => setTune({ ...tune, denoise })}
-      />
-      <TuneSlider
-        label={copy.punch.replace("{value}", String(tune.punch))}
-        min={0}
-        max={100}
-        step={1}
-        value={tune.punch}
-        onChange={(punch) => setTune({ ...tune, punch })}
-      />
+      {preset ? (
+        <>
+          <TuneSlider
+            label={copy.gainDb.replace("{value}", preset.gain.db.toFixed(1))}
+            min={-12}
+            max={18}
+            step={0.5}
+            value={preset.gain.db}
+            onChange={(db) => patchPreset({ ...preset, gain: { ...preset.gain, db } })}
+          />
+          <TuneSlider
+            label={copy.highpass.replace("{value}", String(Math.round(preset.highPass.cutoffHz)))}
+            min={20}
+            max={200}
+            step={5}
+            value={preset.highPass.cutoffHz}
+            onChange={(cutoffHz) =>
+              patchPreset({
+                ...preset,
+                highPass: { ...preset.highPass, cutoffHz },
+                order: setSlot(preset.order, "highPass", true),
+              })
+            }
+          />
+          <SettingsSwitchRow
+            label={copy.filterRnnoise}
+            checked={slotEnabled(preset, "rnnoise")}
+            onCheckedChange={(enabled) =>
+              patchPreset({ ...preset, order: setSlot(preset.order, "rnnoise", enabled) })
+            }
+          />
+          <SettingsSwitchRow
+            label={copy.filterCompressor}
+            checked={slotEnabled(preset, "compressor")}
+            onCheckedChange={(enabled) =>
+              patchPreset({ ...preset, order: setSlot(preset.order, "compressor", enabled) })
+            }
+          />
+          <SettingsSwitchRow
+            label={copy.filterExpander}
+            checked={slotEnabled(preset, "expander")}
+            onCheckedChange={(enabled) =>
+              patchPreset({ ...preset, order: setSlot(preset.order, "expander", enabled) })
+            }
+          />
+          <SettingsSwitchRow
+            label={copy.filterGate}
+            checked={slotEnabled(preset, "gate")}
+            onCheckedChange={(enabled) =>
+              patchPreset({ ...preset, order: setSlot(preset.order, "gate", enabled) })
+            }
+          />
+          <SettingsSwitchRow
+            label={copy.filterLimiter}
+            checked={slotEnabled(preset, "limiter")}
+            onCheckedChange={(enabled) =>
+              patchPreset({ ...preset, order: setSlot(preset.order, "limiter", enabled) })
+            }
+          />
+        </>
+      ) : null}
       <div className="mb-4 flex flex-wrap gap-2">
         <Button disabled={busy} onClick={() => void toggleSample()}>
           {recording ? copy.stopSample : copy.recordSample}
@@ -156,7 +196,11 @@ export function FilterSettings({
       {recording ? (
         <p className="mb-3 text-sm text-muted-foreground">{copy.recordingSample}</p>
       ) : null}
-      {previewError ? <p className="mb-3 text-sm text-danger">{previewError}</p> : null}
+      {previewError ? (
+        <p className="mb-3 text-sm text-danger">
+          {previewError.includes("no filter sample") ? copy.noFilterSample : previewError}
+        </p>
+      ) : null}
       {preview ? <FilterPreviewPlayer preview={preview} copy={copy} /> : null}
       {unsupported.length > 0 ? (
         <ul className="mt-3 text-sm text-muted-foreground">
@@ -169,25 +213,55 @@ export function FilterSettings({
   );
 }
 
+function activePreset(settings: AppSettings): DspPreset | undefined {
+  return (
+    settings.presets.find((preset) => preset.id === settings.activePresetId) ?? settings.presets[0]
+  );
+}
+
+function presetSignature(preset: DspPreset | undefined): string {
+  return JSON.stringify(preset ?? null);
+}
+
+function slotEnabled(preset: DspPreset, kind: FilterKind): boolean {
+  return preset.order.some((slot) => slot.kind === kind && slot.enabled);
+}
+
+function setSlot(
+  order: DspPreset["order"],
+  kind: FilterKind,
+  enabled: boolean,
+): DspPreset["order"] {
+  if (order.some((slot) => slot.kind === kind)) {
+    return order.map((slot) => (slot.kind === kind ? { ...slot, enabled } : slot));
+  }
+  return [...order, { id: kind, kind, enabled }];
+}
+
 function MicLevelMeter({ live, copy }: { live: boolean; copy: Messages }) {
   const [level, setLevel] = useState(0);
+  const [warning, setWarning] = useState<string | null>(null);
   useEffect(() => {
     if (!live) {
       setLevel(0);
+      setWarning(null);
       return;
     }
     const timer = window.setInterval(() => {
       void api.meter().then((sample) => {
-        setLevel(Math.min(1, sample.rms * 12 + sample.peak * 0.4));
+        const db = peakDbFs(sample.peak);
+        setLevel(meterFromPeakDb(db));
+        setWarning(previewWarning(sample.peak, 0, copy.tooQuiet, copy.clippingWarning));
       });
     }, 80);
     return () => window.clearInterval(timer);
-  }, [live]);
+  }, [copy.clippingWarning, copy.tooQuiet, live]);
   return (
     <div className="mb-5 max-w-lg">
       <Label className="mb-1 text-sm">{copy.micLevel}</Label>
-      <Progress value={level * 100} className="h-2" />
+      <Progress value={level} className="h-2" />
       <p className="mt-1 text-xs text-muted-foreground">{live ? copy.meterLive : copy.meterIdle}</p>
+      {warning ? <p className="mt-1 text-xs text-danger">{warning}</p> : null}
     </div>
   );
 }
@@ -203,33 +277,43 @@ const FilterPreviewPlayer = memo(function FilterPreviewPlayer({
   const processedRef = useRef<HTMLAudioElement>(null);
   const originalSrc = preview.originalDataUrl ?? convertFallback(preview.originalPath);
   const processedSrc = preview.processedDataUrl ?? convertFallback(preview.processedPath);
+  const peak = peakDbFs(preview.peak);
+  const warning = previewWarning(
+    preview.peak,
+    preview.clipCount,
+    copy.tooQuiet,
+    copy.clippingWarning,
+  );
+
+  function playSide(side: "original" | "processed") {
+    const original = originalRef.current;
+    const processed = processedRef.current;
+    const target = side === "original" ? original : processed;
+    const other = side === "original" ? processed : original;
+    if (!target) {
+      return;
+    }
+    const playing = [original, processed].find((node) => node && !node.paused);
+    const time = playing?.currentTime ?? target.currentTime;
+    other?.pause();
+    target.currentTime = time;
+    void target.play();
+  }
 
   return (
-    <div className="mb-4 max-w-lg rounded-xl border border-border bg-surface p-3 text-sm">
+    <div className="mb-4 max-w-lg rounded-xl border border-border bg-card p-3 text-sm">
       <p className="mb-2 text-muted-foreground">
         {copy.peakRms
-          .replace("{peak}", (preview.peak * 100).toFixed(0))
-          .replace("{rms}", (preview.rms * 100).toFixed(0))}
+          .replace("{peak}", Number.isFinite(peak) ? peak.toFixed(1) : "-inf")
+          .replace("{rms}", preview.rms.toFixed(3))}
         {preview.clipCount > 0 ? copy.clipping.replace("{count}", String(preview.clipCount)) : ""}
       </p>
+      {warning ? <p className="mb-2 text-xs text-danger">{warning}</p> : null}
       <div className="mb-3 flex items-center gap-2">
-        <Button
-          variant="outline"
-          onClick={() => {
-            processedRef.current?.pause();
-            void originalRef.current?.play();
-          }}
-        >
+        <Button variant="outline" onClick={() => playSide("original")}>
           {copy.playOriginal}
         </Button>
-        <Button
-          onClick={() => {
-            originalRef.current?.pause();
-            void processedRef.current?.play();
-          }}
-        >
-          {copy.playProcessed}
-        </Button>
+        <Button onClick={() => playSide("processed")}>{copy.playProcessed}</Button>
       </div>
       <audio ref={originalRef} preload="auto" src={originalSrc} />
       <audio ref={processedRef} preload="auto" src={processedSrc} />
@@ -264,6 +348,7 @@ function TuneSlider({
         max={max}
         step={step}
         value={[value]}
+        aria-label={label}
         onValueChange={(next) => {
           const first = next[0];
           if (typeof first === "number") {

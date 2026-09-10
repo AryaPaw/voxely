@@ -129,7 +129,7 @@ impl Default for AppSettings {
             language: "auto".into(),
             model: "openai/gpt-transcribe".into(),
             custom_model: None,
-            insertion_mode: "auto".into(),
+            insertion_mode: "unicode".into(),
             retention: "3d".into(),
             storage_limit: "1gb".into(),
             debug_logging: false,
@@ -141,7 +141,7 @@ impl Default for AppSettings {
                 DspPreset::obs_imported(),
             ],
             first_run_complete: false,
-            config_revision: 3,
+            config_revision: 4,
             mic_tune: MicTune::default(),
             ui_language: default_ui_language(),
             auto_update_enabled: default_auto_update(),
@@ -159,24 +159,28 @@ impl AppSettings {
         let mut loaded: Self =
             serde_json::from_str(&text).map_err(|e| AppError::StorageFailed(e.to_string()))?;
         let original_revision = loaded.config_revision;
-        if original_revision < 1 {
-            loaded.migrate_factory_defaults();
-        }
-        if original_revision < 2 {
-            loaded.migrate_fast_stt();
-        }
-        if original_revision < 3 {
-            loaded.migrate_long_stt_timeouts();
-            loaded.config_revision = 3;
+        if original_revision < 4 {
+            if path.exists() {
+                let backup = path.with_extension("json.bak");
+                let _ = std::fs::copy(path, backup);
+            }
+            if original_revision < 1 {
+                loaded.migrate_factory_defaults();
+            }
+            if original_revision < 2 {
+                loaded.migrate_fast_stt();
+            }
+            if original_revision < 3 {
+                loaded.migrate_long_stt_timeouts();
+            }
+            loaded.migrate_honest_dsp_and_insert();
+            loaded.config_revision = 4;
             let _ = loaded.save(path);
         }
         Ok(loaded)
     }
 
     pub fn migrate_factory_defaults(&mut self) {
-        if self.theme == "system" {
-            self.theme = "dark".into();
-        }
         if self.retention == "30d" {
             self.retention = "3d".into();
         }
@@ -203,6 +207,19 @@ impl AppSettings {
         }
     }
 
+    pub fn migrate_honest_dsp_and_insert(&mut self) {
+        if let Some(preset) = self
+            .presets
+            .iter_mut()
+            .find(|preset| preset.id == self.active_preset_id)
+        {
+            *preset = preset.apply_mic_tune(&self.mic_tune);
+        }
+        if self.insertion_mode == "auto" || self.insertion_mode == "sendinput" {
+            self.insertion_mode = "unicode".into();
+        }
+    }
+
     pub fn save(&self, path: &Path) -> Result<(), AppError> {
         self.retry.validate()?;
         self.mic_tune.validate()?;
@@ -223,7 +240,6 @@ impl AppSettings {
             .find(|p| p.id == self.active_preset_id)
             .cloned()
             .unwrap_or_else(DspPreset::stt_fast)
-            .apply_mic_tune(&self.mic_tune)
     }
 
     pub fn storage_limit_bytes(&self) -> Option<u64> {
@@ -253,7 +269,7 @@ mod tests {
         assert_eq!(loaded.theme, "dark");
         assert_eq!(loaded.retention, "3d");
         assert_eq!(loaded.active_preset_id, "stt-fast");
-        assert_eq!(loaded.config_revision, 3);
+        assert_eq!(loaded.config_revision, 4);
         assert_eq!(loaded.mic_tune, MicTune::default());
         assert_eq!(loaded.retry.request_timeout_ms, 20_000);
         assert_eq!(loaded.retry.total_operation_timeout_ms, 12 * 60 * 1000);
@@ -269,10 +285,10 @@ mod tests {
         factory.config_revision = 0;
         factory.save(&path).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
-        assert_eq!(loaded.theme, "dark");
+        assert_eq!(loaded.theme, "system");
         assert_eq!(loaded.retention, "3d");
         assert_eq!(loaded.active_preset_id, "stt-fast");
-        assert_eq!(loaded.config_revision, 3);
+        assert_eq!(loaded.config_revision, 4);
     }
 
     #[test]
@@ -301,11 +317,33 @@ mod tests {
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.retry.request_timeout_ms, 20_000);
         assert_eq!(loaded.retry.total_operation_timeout_ms, 12 * 60 * 1000);
-        assert_eq!(loaded.config_revision, 3);
+        assert_eq!(loaded.config_revision, 4);
     }
 
     #[test]
-    fn retry_validation() {
+    fn factory_preset_graphs_differ() {
+        let fast = DspPreset::stt_fast();
+        let quality = DspPreset::stt_optimized();
+        assert_ne!(fast.order, quality.order);
+        let settings = AppSettings::default();
+        assert_eq!(settings.active_preset().order, fast.order);
+    }
+
+    #[test]
+    fn migrates_insert_aliases_to_unicode() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut settings = AppSettings::default();
+        settings.insertion_mode = "sendinput".into();
+        settings.config_revision = 3;
+        std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+        let loaded = AppSettings::load(&path).unwrap();
+        assert_eq!(loaded.insertion_mode, "unicode");
+        assert!(path.with_extension("json.bak").exists());
+    }
+
+    #[test]
+    fn retry_rejects_too_many_attempts() {
         let mut s = RetrySettings::default();
         s.additional_retries = 9;
         assert!(s.validate().is_err());

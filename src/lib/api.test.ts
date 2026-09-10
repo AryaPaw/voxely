@@ -49,7 +49,8 @@ describe("historyStatusLabel", () => {
   it("maps known statuses", () => {
     expect(historyStatusLabel("failed")).toBe("Ошибка");
     expect(historyStatusLabel("completed")).toBe("Готово");
-    expect(historyStatusLabel("processing")).toBe("Обработка");
+    expect(historyStatusLabel("processing")).toBe("Расшифровка");
+    expect(historyStatusLabel("interrupted")).toBe("Запись прервана. Можно повторить расшифровку");
     expect(historyStatusLabel("other")).toBe("other");
   });
 });

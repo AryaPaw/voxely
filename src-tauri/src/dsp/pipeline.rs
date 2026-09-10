@@ -211,6 +211,34 @@ pub fn prepare_listen(
     pipeline.process(samples)
 }
 
+pub fn apply_listen_loudness(samples: &[f32]) -> (Vec<f32>, AudioMetrics) {
+    let peak = samples
+        .iter()
+        .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
+    let target = 10f32.powf(-2.0 / 20.0);
+    let gain = if peak > 1e-6 {
+        (target / peak).min(8.0)
+    } else {
+        1.0
+    };
+    let out: Vec<f32> = samples
+        .iter()
+        .map(|sample| (sample * gain).clamp(-0.999, 1.0))
+        .collect();
+    let stats = metrics(&out);
+    (out, stats)
+}
+
+pub fn prepare_listen_preview(
+    preset: DspPreset,
+    samples: Vec<f32>,
+) -> Result<(Vec<f32>, AudioMetrics, Vec<f32>), AppError> {
+    let (processed, _) = prepare_listen(preset, samples)?;
+    let stt = processed.clone();
+    let (preview, preview_metrics) = apply_listen_loudness(&processed);
+    Ok((preview, preview_metrics, stt))
+}
+
 pub fn prepare_transcription(
     preset: DspPreset,
     samples: Vec<f32>,
@@ -238,8 +266,7 @@ mod tests {
         let sine: Vec<f32> = (0..4800)
             .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
             .collect();
-        let preset =
-            DspPreset::stt_fast().apply_mic_tune(&crate::dsp::mic_tune::MicTune::default());
+        let preset = DspPreset::stt_fast();
         let (out, rate) = prepare_transcription(preset, sine).unwrap();
         assert_eq!(rate, 16_000);
         assert!(out.iter().all(|s| s.is_finite()));
@@ -251,12 +278,50 @@ mod tests {
         let sine: Vec<f32> = (0..4800)
             .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
             .collect();
-        let preset =
-            DspPreset::stt_fast().apply_mic_tune(&crate::dsp::mic_tune::MicTune::default());
+        let preset = DspPreset::stt_fast();
         let (out, metrics) = prepare_listen(preset, sine.clone()).unwrap();
         assert_eq!(out.len(), sine.len());
         assert!(metrics.peak > 0.0);
         assert!(metrics.peak <= 1.0);
+    }
+
+    #[test]
+    fn listen_loudness_does_not_change_stt_buffer() {
+        let sine: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.01)
+            .collect();
+        let (preview, metrics, stt) =
+            prepare_listen_preview(DspPreset::stt_fast(), sine.clone()).unwrap();
+        let (listen, _) = prepare_listen(DspPreset::stt_fast(), sine).unwrap();
+        assert_eq!(stt, listen);
+        let listen_peak = listen.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        assert!(metrics.peak > listen_peak);
+        assert!(preview.iter().all(|s| s.abs() <= 1.0));
+        assert_eq!(metrics.clip_count, 0);
+    }
+
+    fn gain_only(db: f32) -> DspPreset {
+        let mut preset = DspPreset::stt_fast();
+        preset.gain.db = db;
+        for slot in &mut preset.order {
+            slot.enabled = slot.kind == FilterKind::Gain;
+        }
+        preset
+    }
+
+    #[test]
+    fn extra_gain_raises_preview_rms_without_changing_stt_order() {
+        let sine: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.05)
+            .collect();
+        let six = gain_only(6.0);
+        let twelve = gain_only(12.0);
+        assert_eq!(six.order, twelve.order);
+        let (_, six_metrics) = prepare_listen(six.clone(), sine.clone()).unwrap();
+        let (_, twelve_metrics) = prepare_listen(twelve, sine.clone()).unwrap();
+        assert!(twelve_metrics.rms > six_metrics.rms);
+        let (_, stt_rate) = prepare_transcription(six, sine).unwrap();
+        assert_eq!(stt_rate, STT_SAMPLE_RATE);
     }
 
     #[test]
