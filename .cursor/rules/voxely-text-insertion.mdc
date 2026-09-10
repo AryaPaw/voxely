@@ -1,0 +1,12 @@
+---
+description: "Unicode insert is canonical; clipboard mode is copy-only"
+alwaysApply: true
+---
+
+# voxely-text-insertion
+
+Canonical insert is UTF-16 `KEYEVENTF_UNICODE` into the captured window. Do not paste via clipboard restore races.
+
+Insertion modes are only `unicode` and `clipboard`. `clipboard` copies and tells the user to paste; it must not send Ctrl+V.
+
+Do not revive `auto` or `sendinput` aliases. Insertion errors must surface; transcript stays in history.

@@ -1,0 +1,12 @@
+---
+description: "Voxely uses one shadcn semantic token graph; no competing color SSOT"
+alwaysApply: true
+---
+
+# voxely-token-ssot
+
+One token graph: `:root` / `.dark` plus one `@theme inline` in `src/styles.css`.
+
+Do not add a second `--color-*` palette, teal leftovers, Geist without a loaded font, or hardcoded history/overlay hex except overlay semantic tokens that follow the same light/dark theme.
+
+Scrollbar, canvas, buttons, and HUD colors come from semantic tokens. Overlay HUD follows app theme (`light` / `dark` / live `system`).

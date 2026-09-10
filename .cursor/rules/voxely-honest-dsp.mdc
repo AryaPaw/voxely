@@ -1,0 +1,12 @@
+---
+description: "DSP presets must match stored graphs; no MicTune rewrite of filter order"
+alwaysApply: true
+---
+
+# voxely-honest-dsp
+
+`AppSettings::active_preset()` returns the stored `DspPreset` without rewriting `order`.
+
+Preview input is `filter-sample.wav` only. Listen-only loudness belongs on preview playback, not `prepare_transcription`.
+
+Do not keep `MicTune` as a second source of truth.

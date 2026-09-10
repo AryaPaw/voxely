@@ -1,0 +1,12 @@
+---
+description: "Windows runtime proof is required; jsdom is not HWND evidence"
+alwaysApply: true
+---
+
+# voxely-runtime-acceptance
+
+A wave that changes overlay HWND, DPI, tray/taskbar icons, native cues, or text insertion is not done until Windows runtime evidence or an explicit `BLOCKED`.
+
+Vite/Playwright/jsdom does not prove WebView2 clipping, PE icons, or Unicode insertion.
+
+Coverage that excludes the changed surface is not a pass. Do not lower coverage thresholds to go green.
