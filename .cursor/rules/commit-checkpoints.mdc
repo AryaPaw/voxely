@@ -1,0 +1,19 @@
+---
+description: "Commit after each coherent green slice; never leave a finished wave only in the working tree"
+alwaysApply: true
+---
+
+# Commit checkpoints
+
+Before a new implementation wave, inspect `git status` and preserve unrelated dirty work.
+
+After each coherent green slice:
+
+1. Review the diff and scan for secrets.
+2. Run the relevant tests for that slice.
+3. Create a conventional commit (`feat`, `fix`, `refactor`, `test`, `ci`, `docs`, `chore`).
+4. Do not mix independent changes in one commit.
+
+Do not leave a completed wave only in the working tree.
+
+Never `git push`, create tags, publish GitHub Releases, or bump version numbers unless the current user message explicitly asks for that action.
