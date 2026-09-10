@@ -1,0 +1,70 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart("v")
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Install frontend
+        run: bun install --frozen-lockfile
+      - name: Test
+        run: bun run typecheck && bun run test
+      - name: Rust test
+        working-directory: src-tauri
+        run: cargo test --all
+      - name: Build
+        run: bun run tauri build -- --no-bundle
+      - name: Stage publish
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force artifacts/publish | Out-Null
+          Copy-Item src-tauri/target/release/voxely.exe artifacts/publish/voxely.exe
+      - name: Install Inno Setup
+        run: choco install innosetup -y --no-progress
+      - name: Installer
+        shell: pwsh
+        run: |
+          $v = "${{ steps.ver.outputs.version }}"
+          $candidates = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:LOCALAPPDATA\Programs\InnoSetup6\ISCC.exe"
+          )
+          $iscc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "Inno Setup compiler (ISCC.exe) was not found." }
+          & $iscc "/DMyAppVersion=$v" /Oartifacts "/FVoxely-Setup-win-x64-$v" installer/voxely.iss
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/Voxely-Setup-win-x64-*.exe
+          generate_release_notes: false
+          fail_on_unmatched_files: true
+          make_latest: true
+          body: |
+            Download **Voxely-Setup-win-x64-${{ steps.ver.outputs.version }}.exe**. Administrator rights are not required.
+
+            Auto-update downloads this Setup and installs it silently.

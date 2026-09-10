@@ -1,0 +1,118 @@
+#![allow(dead_code)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::field_reassign_with_default)]
+
+mod app;
+mod audio;
+mod commands;
+pub mod dsp;
+mod error;
+mod history;
+mod obs;
+mod settings;
+mod transcription;
+mod updates;
+mod windows_int;
+
+use std::sync::Arc;
+
+use tauri::Manager;
+use tauri_plugin_autostart::MacosLauncher;
+use tracing_subscriber::EnvFilter;
+
+use crate::app::lifecycle::{attach_context, configure_tray, reregister_hotkey, show_main};
+use crate::app::session::AppContext;
+use crate::commands::*;
+
+fn init_logging(debug: bool) {
+    let filter = if debug {
+        "info,voxely_lib=debug"
+    } else {
+        "warn,voxely_lib=info"
+    };
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::new(filter))
+        .try_init();
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    init_logging(false);
+    tauri::Builder::default()
+        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main(app, "/");
+        }))
+        .plugin(tauri_plugin_autostart::init(
+            MacosLauncher::LaunchAgent,
+            Some(vec![]),
+        ))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .setup(|app| {
+            let ctx = attach_context(app.handle())?;
+            let hotkey = ctx.settings.lock().hotkey.clone();
+            let debug = ctx.settings.lock().debug_logging;
+            if debug {
+                init_logging(true);
+            }
+            app.manage(ctx);
+            configure_tray(app.handle())?;
+            crate::updates::spawn_background_loop(app.handle().clone());
+            if let Err(err) = reregister_hotkey(app.handle(), &hotkey) {
+                tracing::error!(error = %err, "hotkey failed");
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                let handle = app.handle().clone();
+                window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        let ctx = handle.state::<Arc<AppContext>>();
+                        if ctx.settings.lock().close_to_tray {
+                            api.prevent_close();
+                            if let Some(w) = handle.get_webview_window("main") {
+                                let _ = w.hide();
+                            }
+                        }
+                    }
+                });
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            get_session_state,
+            get_settings,
+            save_settings,
+            list_history,
+            get_recording,
+            delete_history_item,
+            delete_all_history,
+            list_microphones,
+            get_meter,
+            api_key_configured,
+            store_api_key,
+            test_openrouter,
+            discover_models,
+            toggle_dictation,
+            retry_recording,
+            open_logs,
+            open_audio_dir,
+            preview_obs_import,
+            import_obs_preset,
+            parse_obs_json,
+            copy_transcript,
+            insert_transcript,
+            run_retention,
+            overlay_timing,
+            preview_dsp,
+            start_filter_sample,
+            stop_filter_sample,
+            check_for_updates,
+            recording_audio_url,
+            cancel_dictation,
+            set_hotkey_capture
+        ])
+        .run(tauri::generate_context!())
+        .unwrap_or_else(|err| {
+            tracing::error!(error = %err, "failed to start");
+            std::process::exit(1);
+        });
+}

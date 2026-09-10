@@ -1,0 +1,30 @@
+name: verify
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install frontend
+        run: bun install --frozen-lockfile
+      - name: Frontend checks
+        run: bun run typecheck && bun run lint && bun run format:check && bun run coverage
+      - name: Rust checks
+        working-directory: src-tauri
+        run: |
+          cargo fmt --all --check
+          cargo clippy --all-targets --all-features -- -D warnings
+          cargo test --all
+      - name: Tauri build
+        run: bun run tauri build
