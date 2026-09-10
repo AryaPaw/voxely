@@ -10,6 +10,7 @@ import {
   messagesFor,
   resolveUiLocale,
 } from "../../lib/i18n";
+import { sectionFromSearch } from "../../lib/window-section";
 import { Toaster } from "../../components/ui/sonner";
 import { Button } from "../../components/ui/button";
 import { HistoryPane } from "./history/HistoryPane";
@@ -27,7 +28,7 @@ export function MainApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [loadError, setLoadError] = useState("");
   const [history, setHistory] = useState<Recording[]>([]);
-  const [section, setSection] = useState<Section>("history");
+  const [section, setSection] = useState<Section>(() => sectionFromSearch(window.location.search));
   const [keyConfigured, setKeyConfigured] = useState(false);
   const [query, setQuery] = useState("");
 
