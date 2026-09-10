@@ -80,7 +80,9 @@ export function overlayIsBusy(state: SessionState): boolean {
 export function historyStatusLabel(status: string, copy: Messages = messagesFor("ru")): string {
   switch (status) {
     case "processing":
-      return copy.overlayProcessing;
+      return copy.overlayTranscribing;
+    case "interrupted":
+      return copy.errInterrupted;
     case "completed":
       return copy.overlayReady;
     case "failed":

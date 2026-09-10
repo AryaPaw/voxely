@@ -1,3 +1,4 @@
+import { useId } from "react";
 import { Switch } from "../ui/switch";
 
 export function SettingsSwitchRow({
@@ -9,10 +10,13 @@ export function SettingsSwitchRow({
   checked: boolean;
   onCheckedChange: (value: boolean) => void;
 }) {
+  const id = useId();
   return (
-    <div className="mb-3 flex max-w-lg items-center justify-between">
-      <span className="text-sm">{label}</span>
-      <Switch checked={checked} onCheckedChange={onCheckedChange} />
+    <div className="mb-3 flex max-w-lg items-center justify-between gap-3">
+      <label htmlFor={id} className="text-sm">
+        {label}
+      </label>
+      <Switch id={id} checked={checked} onCheckedChange={onCheckedChange} />
     </div>
   );
 }

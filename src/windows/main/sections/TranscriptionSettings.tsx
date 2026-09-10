@@ -58,7 +58,8 @@ export function TranscriptionSettings({
           variant="outline"
           onClick={async () => {
             try {
-              toast.success(await api.testConnection());
+              const count = await api.testConnection();
+              toast.success(copy.modelsFound.replace("{n}", String(count)));
             } catch (error) {
               toast.error(error instanceof Error ? error.message : copy.noConnection);
             }

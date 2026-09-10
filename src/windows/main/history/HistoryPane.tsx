@@ -13,11 +13,22 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { api, type Recording } from "../../../lib/api";
-import { formatInvokeError, type Messages } from "../../../lib/i18n";
+import { formatInvokeError, localizedError, type Messages } from "../../../lib/i18n";
 import { formatDuration, formatTime } from "../../../lib/utils";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "../../../components/ui/alert-dialog";
 import { SECTION_ICONS } from "../sectionNav";
 
 export function HistoryPane({
@@ -44,9 +55,9 @@ export function HistoryPane({
   const [detailsId, setDetailsId] = useState<string | null>(null);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-bg">
+    <div className="flex min-h-0 flex-1 flex-col bg-background">
       {!keyConfigured ? (
-        <div className="flex items-center justify-between gap-3 border-b border-border bg-surface px-6 py-2 text-sm">
+        <div className="flex items-center justify-between gap-3 border-b border-border bg-muted px-6 py-2 text-sm">
           <span>{copy.missingApiKeyBanner}</span>
           <Button size="sm" onClick={onOpenKey}>
             {copy.addApiKey}
@@ -61,6 +72,7 @@ export function HistoryPane({
             value={query}
             onChange={(e) => onQuery(e.target.value)}
             placeholder={copy.search}
+            aria-label={copy.search}
             className="flex-1"
           />
           <Button variant="outline" onClick={() => void api.openAudioDir()}>
@@ -72,7 +84,7 @@ export function HistoryPane({
         </div>
         <div className="mt-5 min-h-0 flex-1 space-y-3 overflow-auto pb-8">
           {items.length === 0 ? (
-            <div className="rounded-2xl bg-surface px-5 py-10 text-sm text-muted-foreground">
+            <div className="rounded-2xl bg-muted px-5 py-10 text-sm text-muted-foreground">
               {copy.emptyHistory.replace("{hotkey}", hotkey)}
             </div>
           ) : (
@@ -95,7 +107,7 @@ export function HistoryPane({
   );
 }
 
-function HistoryCard({
+export function HistoryCard({
   item,
   copy,
   detailsOpen,
@@ -115,9 +127,9 @@ function HistoryCard({
   const [copied, setCopied] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const failed =
-    (item.status === "failed" || item.status === "interrupted") && !item.transcript;
+  const failed = (item.status === "failed" || item.status === "interrupted") && !item.transcript;
   const processing = item.status === "processing" && !item.transcript;
+  const processingLabel = item.processedAudioPath ? copy.processing : copy.processingAudio;
 
   useEffect(() => {
     let cancelled = false;
@@ -155,13 +167,17 @@ function HistoryCard({
     }
   }
 
+  const errorText = item.lastErrorCode
+    ? localizedError(item.lastErrorCode, copy, item.lastErrorMessage ?? undefined)
+    : (item.lastErrorMessage ?? "—");
+
   return (
     <article className="history-card">
       <div className="flex items-start justify-between gap-3">
-        <div className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
           {formatTime(item.createdAt, copy.dateLocale)}
           <span className="mx-2 opacity-50">|</span>
-          {Math.max(0, Math.round(item.durationMs / 1000))} {copy.secondsAbbrev}
+          {formatDuration(item.durationMs)}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {item.transcript ? (
@@ -188,7 +204,7 @@ function HistoryCard({
               disabled={retrying}
               onClick={() => void retryTranscription()}
             >
-              <RotateCcw className={`h-4 w-4${retrying ? " history-spin" : ""}`} />
+              <RotateCcw className={`h-4 w-4 text-primary${retrying ? " history-spin" : ""}`} />
             </Button>
           )}
           <Button
@@ -196,22 +212,36 @@ function HistoryCard({
             size="icon"
             variant="ghost"
             aria-label={copy.details}
+            aria-expanded={detailsOpen}
             onClick={onToggleDetails}
           >
             <Info className="h-4 w-4" />
           </Button>
-          <Button
-            type="button"
-            size="icon"
-            variant="ghost"
-            aria-label={copy.delete}
-            onClick={async () => {
-              await api.deleteItem(item.id);
-              await onRefresh();
-            }}
-          >
-            <Trash2 className="h-4 w-4" />
-          </Button>
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button type="button" size="icon" variant="ghost" aria-label={copy.delete}>
+                <Trash2 className="h-4 w-4" />
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>{copy.deleteItemConfirm}</AlertDialogTitle>
+                <AlertDialogDescription>{copy.deleteAllCannotUndo}</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>{copy.cancel}</AlertDialogCancel>
+                <AlertDialogAction
+                  variant="destructive"
+                  onClick={async () => {
+                    await api.deleteItem(item.id);
+                    await onRefresh();
+                  }}
+                >
+                  {copy.delete}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
         </div>
       </div>
       <p className="mt-2 text-sm leading-6">
@@ -220,7 +250,7 @@ function HistoryCard({
             {copy.transcriptUnavailable}{" "}
             <button
               type="button"
-              className="text-sky-400 underline-offset-2 hover:underline"
+              className="text-primary underline-offset-2 hover:underline"
               onClick={() => void retryTranscription()}
             >
               {copy.retry}
@@ -228,7 +258,7 @@ function HistoryCard({
           </>
         ) : processing ? (
           <span className="status-live">
-            {copy.processing}
+            {processingLabel}
             <span className="overlay-ellipsis" aria-hidden="true">
               <span>.</span>
               <span>.</span>
@@ -249,9 +279,9 @@ function HistoryCard({
         >
           {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
         </button>
-        <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-white/10">
+        <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
           <div
-            className="h-full rounded-full bg-white/55"
+            className="h-full rounded-full bg-primary/70"
             style={{ width: `${progress * 100}%` }}
           />
         </div>
@@ -276,16 +306,22 @@ function HistoryCard({
       {detailsOpen ? (
         <dl className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
           <div>
-            {copy.modelLabel}: {item.model}
+            <dt className="inline">{copy.modelLabel}: </dt>
+            <dd className="inline">{item.model}</dd>
           </div>
           <div>
-            {copy.latencyLabel}: {item.latencyMs ?? "—"} ms
+            <dt className="inline">{copy.latencyLabel}: </dt>
+            <dd className="inline">
+              {item.latencyMs == null ? "—" : copy.latencyMs.replace("{n}", String(item.latencyMs))}
+            </dd>
           </div>
           <div>
-            {copy.costLabel}: {item.cost ?? "—"}
+            <dt className="inline">{copy.costLabel}: </dt>
+            <dd className="inline">{item.cost ?? "—"}</dd>
           </div>
           <div>
-            {copy.errorLabel}: {item.lastErrorCode ?? "—"}
+            <dt className="inline">{copy.errorLabel}: </dt>
+            <dd className="inline">{errorText}</dd>
           </div>
         </dl>
       ) : null}
