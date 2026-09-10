@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { overlayBarHeights, drawOverlayWave, OVERLAY_BAR_COUNT } from "./overlay-wave";
+import {
+  overlayBarHeights,
+  drawOverlayWave,
+  meterPollAllowed,
+  OVERLAY_BAR_COUNT,
+} from "./overlay-wave";
 
 describe("overlayBarHeights", () => {
   it("follows a scrolling amplitude history", () => {
@@ -26,21 +31,39 @@ describe("overlayBarHeights", () => {
     const later = bars.slice(16, 24).reduce((total, value) => total + value, 0);
     expect(first).toBeGreaterThan(later);
   });
+
+  it("uses measured dt instead of a fixed frame lerp", () => {
+    const levels = Array.from({ length: OVERLAY_BAR_COUNT }, () => 1);
+    const zeros = Array.from({ length: OVERLAY_BAR_COUNT }, () => 0);
+    const slow = overlayBarHeights(levels, true, zeros, OVERLAY_BAR_COUNT, 0.004);
+    const fast = overlayBarHeights(levels, true, zeros, OVERLAY_BAR_COUNT, 0.04);
+    expect(fast[0] ?? 0).toBeGreaterThan(slow[0] ?? 0);
+  });
+});
+
+describe("meterPollAllowed", () => {
+  it("rejects overlapping polls", () => {
+    expect(meterPollAllowed(false)).toBe(true);
+    expect(meterPollAllowed(true)).toBe(false);
+  });
 });
 
 describe("drawOverlayWave", () => {
-  it("does not throw on an empty canvas", () => {
+  it("draws rounded bars instead of a filled polygon", () => {
+    const ops: string[] = [];
     const ctx = {
       clearRect: () => undefined,
-      fill: () => undefined,
-      beginPath: () => undefined,
-      moveTo: () => undefined,
-      lineTo: () => undefined,
-      closePath: () => undefined,
+      fill: () => ops.push("fill"),
+      beginPath: () => ops.push("begin"),
+      roundRect: () => ops.push("roundRect"),
+      rect: () => ops.push("rect"),
+      moveTo: () => ops.push("moveTo"),
+      lineTo: () => ops.push("lineTo"),
+      closePath: () => ops.push("closePath"),
       fillStyle: "",
     };
-    expect(() =>
-      drawOverlayWave(ctx as unknown as CanvasRenderingContext2D, 120, 16, [0.2, 0.5, 0.2]),
-    ).not.toThrow();
+    drawOverlayWave(ctx as unknown as CanvasRenderingContext2D, 120, 16, [0.2, 0.5, 0.2]);
+    expect(ops).toContain("roundRect");
+    expect(ops).not.toContain("lineTo");
   });
 });

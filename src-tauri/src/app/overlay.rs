@@ -5,9 +5,9 @@ pub struct WorkArea {
     pub bottom: i32,
 }
 
-pub const OVERLAY_WIDTH: f64 = 520.0;
-pub const OVERLAY_HEIGHT: f64 = 76.0;
-pub const OVERLAY_GAP_PX: i32 = 56;
+pub const OVERLAY_WIDTH: f64 = 360.0;
+pub const OVERLAY_HEIGHT: f64 = 48.0;
+pub const OVERLAY_GAP_PX: i32 = 48;
 
 pub fn overlay_physical_position(work: WorkArea, width: u32, height: u32, gap: i32) -> (i32, i32) {
     let area_w = (work.right - work.left).max(0);
@@ -36,7 +36,10 @@ mod tests {
         );
         assert_eq!(x, (1920 - OVERLAY_WIDTH as i32) / 2);
         assert_eq!(y, 1040 - OVERLAY_HEIGHT as i32 - OVERLAY_GAP_PX);
-        assert!(y > 500, "must sit near the bottom, not vertically centered");
+        assert!(OVERLAY_WIDTH <= 400.0);
+        assert!(OVERLAY_HEIGHT <= 52.0);
+        assert_eq!(OVERLAY_WIDTH, 360.0);
+        assert_eq!(OVERLAY_HEIGHT, 48.0);
     }
 
     #[test]

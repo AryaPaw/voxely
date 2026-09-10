@@ -54,7 +54,7 @@ html:has(.overlay-shell) #root {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 10px 12px;
+  padding: 4px;
   background: transparent;
   overflow: visible;
 }
@@ -63,13 +63,13 @@ html:has(.overlay-shell) #root {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 0.75rem;
+  gap: 0.5rem;
   width: 100%;
   height: 100%;
   border-radius: 9999px;
   border: 1px solid #2a3140;
   background: #16181e;
-  padding: 0 1.2rem;
+  padding: 0 0.75rem;
   box-shadow: 0 8px 18px rgb(0 0 0 / 0.35);
   color: #e8edf4;
   cursor: pointer;
@@ -94,7 +94,7 @@ html:has(.overlay-shell) #root {
   align-items: center;
   justify-content: center;
   width: 100%;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
   white-space: nowrap;
 }
@@ -116,7 +116,7 @@ html:has(.overlay-shell) #root {
   display: block;
   flex: 1;
   min-width: 0;
-  height: 26px;
+  height: 18px;
 }
 
 .overlay-ellipsis {

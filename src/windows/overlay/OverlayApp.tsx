@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api, type SessionState } from "../../lib/api";
 import { playDictationCue } from "../../lib/overlay-cue";
-import { drawOverlayWave, overlayBarHeights } from "../../lib/overlay-wave";
+import { drawOverlayWave, meterPollAllowed, overlayBarHeights, OVERLAY_BAR_COUNT } from "../../lib/overlay-wave";
 import { overlayIsBusy, overlayLabel } from "../../lib/session-copy";
 import { applyTheme } from "../../lib/theme";
 
@@ -128,6 +128,11 @@ function OverlayWave({ active }: { active: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const levelsRef = useRef<number[]>([]);
   const barsRef = useRef<number[]>([]);
+  const lastFrameRef = useRef<number | null>(null);
+  const reducedMotion = useRef(
+    typeof window !== "undefined" &&
+      window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+  );
 
   useEffect(() => {
     if (!active) {
@@ -135,10 +140,20 @@ function OverlayWave({ active }: { active: boolean }) {
       barsRef.current = [];
       return;
     }
+    let inFlight = false;
     const timer = window.setInterval(() => {
-      void api.meter().then((sample) => {
-        levelsRef.current = sample.levels ?? [];
-      });
+      if (!meterPollAllowed(inFlight)) {
+        return;
+      }
+      inFlight = true;
+      void api
+        .meter()
+        .then((sample) => {
+          levelsRef.current = sample.levels ?? [];
+        })
+        .finally(() => {
+          inFlight = false;
+        });
     }, 50);
     return () => window.clearInterval(timer);
   }, [active]);
@@ -153,7 +168,11 @@ function OverlayWave({ active }: { active: boolean }) {
       return;
     }
     let frame = 0;
-    const draw = () => {
+    lastFrameRef.current = null;
+    const draw = (now: number) => {
+      const previous = lastFrameRef.current;
+      lastFrameRef.current = now;
+      const dt = previous == null ? 1 / 60 : Math.min(0.05, (now - previous) / 1000);
       const dpr = window.devicePixelRatio || 1;
       const width = canvas.clientWidth;
       const height = canvas.clientHeight;
@@ -162,7 +181,14 @@ function OverlayWave({ active }: { active: boolean }) {
         canvas.height = Math.floor(height * dpr);
       }
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      const next = overlayBarHeights(levelsRef.current, active, barsRef.current);
+      const next = overlayBarHeights(
+        levelsRef.current,
+        active,
+        barsRef.current,
+        OVERLAY_BAR_COUNT,
+        dt,
+        reducedMotion.current,
+      );
       barsRef.current = next;
       drawOverlayWave(ctx, width, height, active ? next : []);
       frame = window.requestAnimationFrame(draw);
