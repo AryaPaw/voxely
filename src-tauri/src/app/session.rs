@@ -25,7 +25,7 @@ use crate::settings::AppSettings;
 use crate::transcription::openrouter::{transcribe_file_with_progress, SttProgress};
 use crate::windows_int::credentials::get_api_key;
 use crate::windows_int::overlay::work_area_for_cursor;
-use crate::windows_int::text_injector::{native, NativeHwnd};
+use crate::windows_int::text_injector::{insert_should_abort, native, NativeHwnd};
 
 pub struct AppContext {
     pub settings_path: PathBuf,
@@ -45,6 +45,7 @@ pub struct AppContext {
     pub abort_start: AtomicBool,
     pub session_generation: AtomicU64,
     pub preview_capture: Mutex<Option<CaptureSession>>,
+    pub meter_monitor: Mutex<Option<CaptureSession>>,
     pub update_gate: tokio::sync::Mutex<bool>,
 }
 
@@ -86,6 +87,7 @@ impl AppContext {
             abort_start: AtomicBool::new(false),
             session_generation: AtomicU64::new(0),
             preview_capture: Mutex::new(None),
+            meter_monitor: Mutex::new(None),
             update_gate: tokio::sync::Mutex::new(false),
         })
     }
@@ -165,6 +167,7 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
             }
         });
     }
+    release_meter_monitor(&ctx);
     let (tx, _) = tokio::sync::watch::channel(false);
     *ctx.cancel_tx.lock() = Some(tx);
     ctx.transition(SessionEvent::StartRequested)?;
@@ -445,19 +448,31 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
                 ) {
                     return;
                 }
-                let insert_result = insert_transcript_now(&mode, captured, &text);
                 hide_overlay_now(&app_clone);
                 let _ = ctx.transition(SessionEvent::Dismiss);
                 ctx.emit_state(&app_clone);
-                match insert_result {
-                    Ok("copied") => {
-                        let _ = app_clone.emit("session://insert", "copied");
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        let _ = app_clone.emit("session://insert", err.code());
-                    }
-                }
+                let insert_app = app_clone.clone();
+                thread::spawn(move || {
+                    let abort_app = insert_app.clone();
+                    let result = insert_transcript_now(&mode, captured, &text, move || {
+                        let ctx = abort_app.state::<Arc<AppContext>>();
+                        insert_should_abort(
+                            commit_generation,
+                            ctx.session_generation.load(Ordering::SeqCst),
+                        )
+                    });
+                    let notify = insert_app.clone();
+                    let _ = insert_app.run_on_main_thread(move || match result {
+                        Ok("copied") => {
+                            let _ = notify.emit("session://insert", "copied");
+                        }
+                        Ok(_) => {}
+                        Err(AppError::Cancelled) => {}
+                        Err(err) => {
+                            let _ = notify.emit("session://insert", err.code());
+                        }
+                    });
+                });
             });
             Ok(())
         }
@@ -477,8 +492,15 @@ fn insert_transcript_now(
     mode: &str,
     captured: Option<NativeHwnd>,
     text: &str,
+    abort: impl Fn() -> bool,
 ) -> Result<&'static str, AppError> {
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    if abort() {
+        return Err(AppError::Cancelled);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(40));
+    if abort() {
+        return Err(AppError::Cancelled);
+    }
     match mode {
         "clipboard" => {
             native::clipboard_copy(text)?;
@@ -487,8 +509,14 @@ fn insert_transcript_now(
         _ => {
             let hwnd = captured
                 .ok_or_else(|| AppError::TextInsertionFailed("no captured window".into()))?;
-            native::insert_unicode(hwnd, text)?;
-            Ok("inserted")
+            match native::insert_unicode_while(hwnd, text, abort) {
+                Ok(()) => Ok("inserted"),
+                Err(AppError::Cancelled) => Err(AppError::Cancelled),
+                Err(_) => {
+                    native::clipboard_copy(text)?;
+                    Ok("copied")
+                }
+            }
         }
     }
 }
@@ -700,13 +728,45 @@ pub fn current_meter(app: &AppHandle) -> MeterSample {
     if let Some(sample) = ctx.capture.lock().as_ref().map(CaptureSession::meter) {
         return sample;
     }
-    let preview = ctx
+    if let Some(sample) = ctx
         .preview_capture
         .lock()
         .as_ref()
         .map(CaptureSession::meter)
+    {
+        return sample;
+    }
+    let sample = ctx
+        .meter_monitor
+        .lock()
+        .as_ref()
+        .map(CaptureSession::meter)
         .unwrap_or_else(MeterSample::silent);
-    preview
+    sample
+}
+
+pub fn release_meter_monitor(ctx: &AppContext) {
+    if let Some(session) = ctx.meter_monitor.lock().take() {
+        thread::spawn(move || session.discard());
+    }
+}
+
+pub fn start_meter_monitor(ctx: &AppContext) -> Result<(), AppError> {
+    if ctx.capture.lock().is_some() || ctx.preview_capture.lock().is_some() {
+        return Ok(());
+    }
+    if ctx.meter_monitor.lock().is_some() {
+        return Ok(());
+    }
+    let settings = ctx.settings.lock().clone();
+    let device = if settings.input_device == "default" {
+        None
+    } else {
+        Some(settings.input_device.clone())
+    };
+    let session = CaptureSession::start_monitor(device.as_deref())?;
+    *ctx.meter_monitor.lock() = Some(session);
+    Ok(())
 }
 
 pub fn devices() -> Result<Vec<crate::audio::devices::InputDeviceInfo>, AppError> {

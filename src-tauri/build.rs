@@ -10,6 +10,8 @@ fn main() {
             "delete_all_history",
             "list_microphones",
             "get_meter",
+            "start_input_meter",
+            "stop_input_meter",
             "api_key_configured",
             "store_api_key",
             "test_openrouter",

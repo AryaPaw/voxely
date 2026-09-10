@@ -30,6 +30,8 @@
     "allow-delete-all-history",
     "allow-list-microphones",
     "allow-get-meter",
+    "allow-start-input-meter",
+    "allow-stop-input-meter",
     "allow-api-key-configured",
     "allow-store-api-key",
     "allow-test-openrouter",

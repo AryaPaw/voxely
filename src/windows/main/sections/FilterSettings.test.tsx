@@ -109,9 +109,12 @@ describe("FilterSettings", () => {
     fireEvent.click(screen.getByRole("switch", { name: "Gate" }));
     fireEvent.click(screen.getByRole("switch", { name: "Limiter" }));
     expect(onChange).toHaveBeenCalled();
-    await waitFor(() => {
-      expect(screen.getByRole("button", { name: "Original" })).toBeInTheDocument();
-    });
+    await waitFor(
+      () => {
+        expect(screen.getByRole("button", { name: "Original" })).toBeInTheDocument();
+      },
+      { timeout: 1500 },
+    );
     fireEvent.click(screen.getByRole("button", { name: "Original" }));
     fireEvent.click(screen.getByRole("button", { name: "After filters" }));
   });

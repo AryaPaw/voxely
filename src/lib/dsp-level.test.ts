@@ -14,9 +14,9 @@ describe("dsp-level", () => {
     expect(meterFromPeakDb(Number.NEGATIVE_INFINITY)).toBe(0);
   });
 
-  it("flags too quiet and clipping", () => {
-    expect(previewWarning(0.001, 0, "quiet", "clip")).toBe("quiet");
-    expect(previewWarning(1, 2, "quiet", "clip")).toBe("clip");
-    expect(previewWarning(0.2, 0, "quiet", "clip")).toBeNull();
+  it("flags clipping and ignores a quiet signal", () => {
+    expect(previewWarning(0.001, 0, "clip")).toBeNull();
+    expect(previewWarning(1, 2, "clip")).toBe("clip");
+    expect(previewWarning(0.2, 0, "clip")).toBeNull();
   });
 });

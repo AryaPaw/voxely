@@ -20,7 +20,7 @@ const QUEUE_CAP: usize = 48_000 * 2;
 pub const MAX_WAV_BYTES: u64 = 20 * 1024 * 1024;
 
 pub const METER_BINS: usize = 48;
-const METER_HOPS_PER_SEC: u32 = 50;
+const METER_HOPS_PER_SEC: u32 = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MeterSample {
@@ -63,6 +63,14 @@ pub struct CaptureResult {
 
 impl CaptureSession {
     pub fn start(device_name: Option<&str>, dest: PathBuf) -> Result<Self, AppError> {
+        Self::spawn(device_name, Some(dest))
+    }
+
+    pub fn start_monitor(device_name: Option<&str>) -> Result<Self, AppError> {
+        Self::spawn(device_name, None)
+    }
+
+    fn spawn(device_name: Option<&str>, dest: Option<PathBuf>) -> Result<Self, AppError> {
         let device_name = device_name.map(str::to_string);
         let stop = Arc::new(AtomicBool::new(false));
         let meter = Arc::new(Mutex::new(MeterSample::silent()));
@@ -104,11 +112,15 @@ impl CaptureSession {
             .join()
             .map_err(|_| AppError::AudioCaptureFailed("capture thread panicked".into()))?
     }
+
+    pub fn discard(self) {
+        let _ = self.stop();
+    }
 }
 
 fn start_stream_and_write(
     device_name: Option<&str>,
-    dest: PathBuf,
+    dest: Option<PathBuf>,
     stop: Arc<AtomicBool>,
     meter: Arc<Mutex<MeterSample>>,
     ready_tx: std::sync::mpsc::Sender<Result<(), AppError>>,
@@ -116,7 +128,10 @@ fn start_stream_and_write(
     match start_stream_inner(device_name, meter) {
         Ok(built) => {
             let _ = ready_tx.send(Ok(()));
-            run_capture(built, dest, stop)
+            match dest {
+                Some(path) => run_capture(built, path, stop),
+                None => run_monitor(built, stop),
+            }
         }
         Err(err) => {
             let _ = ready_tx.send(Err(err.clone()));
@@ -211,6 +226,20 @@ fn start_stream_inner(
         consumer,
         input_rate,
         overflow,
+    })
+}
+
+fn run_monitor(mut built: BuiltCapture, stop: Arc<AtomicBool>) -> Result<CaptureResult, AppError> {
+    while !stop.load(Ordering::SeqCst) {
+        let mut dump = Vec::new();
+        drain_consumer(&mut built.consumer, &mut dump)?;
+        thread::sleep(Duration::from_millis(5));
+    }
+    drop(built.stream);
+    Ok(CaptureResult {
+        path: PathBuf::new(),
+        duration_ms: 0,
+        sample_rate: SAMPLE_RATE,
     })
 }
 
@@ -379,7 +408,7 @@ mod tests {
     }
 
     #[test]
-    fn meter_hop_is_about_twenty_milliseconds() {
-        assert_eq!(meter_hop(48_000), 960);
+    fn meter_hop_is_about_sixty_milliseconds() {
+        assert_eq!(meter_hop(48_000), 3_000);
     }
 }

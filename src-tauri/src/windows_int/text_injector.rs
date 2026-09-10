@@ -21,13 +21,17 @@ pub fn decide_insert(captured: Option<NativeHwnd>, _current: Option<NativeHwnd>)
     }
 }
 
+pub fn insert_should_abort(started_generation: u64, current_generation: u64) -> bool {
+    started_generation != current_generation
+}
+
 pub fn should_send_key_paste(
     captured_root: usize,
     foreground_root: Option<usize>,
     focus_root: Option<usize>,
 ) -> bool {
     should_post_paste(captured_root, foreground_root)
-        && should_post_paste(captured_root, focus_root)
+        && (focus_root.is_none() || should_post_paste(captured_root, focus_root))
 }
 
 pub fn overlay_blocks_insert(overlay_root: Option<usize>, foreground_root: Option<usize>) -> bool {
@@ -53,9 +57,40 @@ pub fn utf16_code_units(text: &str) -> Vec<u16> {
     text.encode_utf16().collect()
 }
 
+pub const HOTKEY_MODIFIER_UP_COUNT: u32 = 4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InsertKey {
+    Unicode(u16),
+    VirtualKey(u16),
+}
+
+pub fn plan_insert_units(text: &str) -> Vec<InsertKey> {
+    let units = utf16_code_units(text);
+    let mut out = Vec::with_capacity(units.len());
+    let mut i = 0;
+    while i < units.len() {
+        let unit = units[i];
+        if unit == 0x0D && units.get(i + 1) == Some(&0x0A) {
+            out.push(InsertKey::VirtualKey(0x0D));
+            i += 2;
+            continue;
+        }
+        out.push(match unit {
+            0x09 => InsertKey::VirtualKey(0x09),
+            0x0A | 0x0D => InsertKey::VirtualKey(0x0D),
+            0x20 => InsertKey::VirtualKey(0x20),
+            _ => InsertKey::Unicode(unit),
+        });
+        i += 1;
+    }
+    out
+}
+
 pub fn unicode_send_count(text: &str) -> u32 {
-    let units = utf16_code_units(text).len() as u32;
-    units.saturating_mul(2).saturating_add(8)
+    let keys = plan_insert_units(text).len() as u32;
+    keys.saturating_mul(2)
+        .saturating_add(HOTKEY_MODIFIER_UP_COUNT)
 }
 
 pub const GITHUB_REPO_URL: &str = "https://github.com/AryaPaw/voxely";
@@ -73,12 +108,13 @@ pub mod native {
     };
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE,
-        VIRTUAL_KEY, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL, VK_RMENU, VK_RSHIFT,
-        VK_RWIN,
+        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL,
+        VK_RMENU, VK_RSHIFT, VK_RWIN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsWindow, SetForegroundWindow,
+        AllowSetForegroundWindow, BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
+        IsIconic, IsWindow, SetForegroundWindow, ShowWindow, SW_RESTORE,
     };
 
     pub fn foreground_hwnd() -> Option<NativeHwnd> {
@@ -112,10 +148,22 @@ pub mod native {
     }
 
     pub fn insert_unicode(hwnd: NativeHwnd, text: &str) -> Result<(), AppError> {
-        insert_into_window(hwnd, text)
+        insert_unicode_while(hwnd, text, || false)
     }
 
-    pub fn insert_into_window(hwnd: NativeHwnd, text: &str) -> Result<(), AppError> {
+    pub fn insert_unicode_while(
+        hwnd: NativeHwnd,
+        text: &str,
+        abort: impl Fn() -> bool,
+    ) -> Result<(), AppError> {
+        insert_into_window(hwnd, text, abort)
+    }
+
+    pub fn insert_into_window(
+        hwnd: NativeHwnd,
+        text: &str,
+        abort: impl Fn() -> bool,
+    ) -> Result<(), AppError> {
         unsafe {
             let target = HWND(hwnd.value as *mut _);
             if !IsWindow(target).as_bool() {
@@ -127,10 +175,16 @@ pub mod native {
             let captured_root_hwnd = root_hwnd(target);
             let captured_root = captured_root_hwnd.0 as usize;
             let mut last_reason = "focus left captured window";
-            for _ in 0..3 {
+            for _ in 0..4 {
+                if abort() {
+                    return Err(AppError::Cancelled);
+                }
                 let _guard = attach_input(target);
-                let restored = SetForegroundWindow(target).as_bool();
-                std::thread::sleep(std::time::Duration::from_millis(20));
+                let restored = restore_foreground(target);
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                if abort() {
+                    return Err(AppError::Cancelled);
+                }
                 let foreground_root = hwnd_root_value(GetForegroundWindow());
                 if overlay_blocks_insert(None, foreground_root) {
                     last_reason = "overlay still foreground";
@@ -138,13 +192,11 @@ pub mod native {
                 }
                 let focus_root = hwnd_root_value(thread_focus_hwnd(target).unwrap_or(target));
                 if should_send_key_paste(captured_root, foreground_root, focus_root) {
-                    let inputs = unicode_inputs(text);
-                    let expected = inputs.len() as u32;
-                    let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
-                    if insert_delivered(sent, true) && sent == expected {
-                        return Ok(());
+                    match send_insert_keys(text, &abort) {
+                        Ok(()) => return Ok(()),
+                        Err("aborted") => return Err(AppError::Cancelled),
+                        Err(reason) => last_reason = reason,
                     }
-                    last_reason = "SendInput delivered no events";
                 } else if !restored {
                     last_reason = "could not restore target window";
                 } else {
@@ -155,22 +207,67 @@ pub mod native {
         }
     }
 
-    fn unicode_inputs(text: &str) -> Vec<INPUT> {
-        let mut inputs = vec![
-            key(VK_LCONTROL.0, true),
-            key(VK_RCONTROL.0, true),
-            key(VK_LMENU.0, true),
-            key(VK_RMENU.0, true),
-            key(VK_LSHIFT.0, true),
-            key(VK_RSHIFT.0, true),
-            key(VK_LWIN.0, true),
-            key(VK_RWIN.0, true),
-        ];
-        for unit in super::utf16_code_units(text) {
-            inputs.push(unicode_key(unit, false));
-            inputs.push(unicode_key(unit, true));
+    fn send_insert_keys(text: &str, abort: impl Fn() -> bool) -> Result<(), &'static str> {
+        if abort() {
+            return Err("aborted");
         }
-        inputs
+        let mut prefix = Vec::new();
+        for vk in [
+            VK_LCONTROL.0,
+            VK_RCONTROL.0,
+            VK_LSHIFT.0,
+            VK_RSHIFT.0,
+            VK_LMENU.0,
+            VK_RMENU.0,
+            VK_LWIN.0,
+            VK_RWIN.0,
+        ] {
+            if vk_down(vk) {
+                prefix.push(key(vk, true));
+            }
+        }
+        send_all(&prefix)?;
+        if !prefix.is_empty() {
+            std::thread::sleep(std::time::Duration::from_millis(40));
+        }
+        let planned = super::plan_insert_units(text);
+        for chunk in planned.chunks(8) {
+            if abort() {
+                return Err("aborted");
+            }
+            let mut inputs = Vec::with_capacity(chunk.len() * 2);
+            for key_plan in chunk {
+                match *key_plan {
+                    super::InsertKey::Unicode(unit) => {
+                        inputs.push(unicode_key(unit, false));
+                        inputs.push(unicode_key(unit, true));
+                    }
+                    super::InsertKey::VirtualKey(vk) => {
+                        inputs.push(key(vk, false));
+                        inputs.push(key(vk, true));
+                    }
+                }
+            }
+            send_all(&inputs)?;
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        Ok(())
+    }
+
+    fn send_all(inputs: &[INPUT]) -> Result<(), &'static str> {
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
+        if insert_delivered(sent, true) && sent == inputs.len() as u32 {
+            Ok(())
+        } else {
+            Err("SendInput delivered no events")
+        }
+    }
+
+    fn vk_down(vk: u16) -> bool {
+        unsafe { GetAsyncKeyState(i32::from(vk)) as u16 & 0x8000 != 0 }
     }
 
     fn unicode_key(unit: u16, up: bool) -> INPUT {
@@ -206,7 +303,6 @@ pub mod native {
 
     unsafe fn attach_input(target: HWND) -> ThreadAttachGuard {
         use windows::Win32::System::Threading::GetCurrentThreadId;
-        use windows::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
         let _ = AllowSetForegroundWindow(u32::MAX);
         let our_tid = GetCurrentThreadId();
@@ -227,6 +323,15 @@ pub mod native {
             pairs.push((our_tid, target_tid));
         }
         ThreadAttachGuard { pairs }
+    }
+
+    unsafe fn restore_foreground(target: HWND) -> bool {
+        let _ = AllowSetForegroundWindow(u32::MAX);
+        if IsIconic(target).as_bool() {
+            let _ = ShowWindow(target, SW_RESTORE);
+        }
+        let _ = BringWindowToTop(target);
+        SetForegroundWindow(target).as_bool()
     }
 
     unsafe fn root_hwnd(hwnd: HWND) -> HWND {
@@ -296,15 +401,6 @@ pub mod native {
             CloseClipboard().map_err(|e| AppError::TextInsertionFailed(e.to_string()))?;
             Ok(())
         }
-    }
-
-    unsafe fn snapshot_clipboard() -> Option<String> {
-        if open_clipboard().is_err() {
-            return None;
-        }
-        let previous = read_unicode_clipboard();
-        CloseClipboard().ok();
-        previous
     }
 
     fn restore_clipboard_if_unchanged(ours: &str, previous: Option<&str>) {
@@ -421,8 +517,23 @@ pub mod native {
         Err(AppError::TextInsertionFailed("not windows".into()))
     }
 
-    pub fn insert_into_window(hwnd: NativeHwnd, text: &str) -> Result<(), AppError> {
+    pub fn insert_unicode_while(
+        hwnd: NativeHwnd,
+        text: &str,
+        abort: impl Fn() -> bool,
+    ) -> Result<(), AppError> {
+        if abort() {
+            return Err(AppError::Cancelled);
+        }
         insert_unicode(hwnd, text)
+    }
+
+    pub fn insert_into_window(
+        hwnd: NativeHwnd,
+        text: &str,
+        abort: impl Fn() -> bool,
+    ) -> Result<(), AppError> {
+        insert_unicode_while(hwnd, text, abort)
     }
 
     pub fn clipboard_paste(_text: &str) -> Result<Option<String>, AppError> {
@@ -460,7 +571,7 @@ mod tests {
         assert!(should_send_key_paste(10, Some(10), Some(10)));
         assert!(!should_send_key_paste(10, Some(10), Some(11)));
         assert!(!should_send_key_paste(10, Some(11), Some(10)));
-        assert!(!should_send_key_paste(10, Some(10), None));
+        assert!(should_send_key_paste(10, Some(10), None));
         assert!(should_post_paste(10, Some(10)));
         assert!(!should_post_paste(10, Some(11)));
         assert!(!should_post_paste(10, None));
@@ -493,11 +604,40 @@ mod tests {
     }
 
     #[test]
-    fn unicode_send_count_covers_surrogates_and_modifiers() {
+    fn new_session_aborts_in_flight_insert() {
+        assert!(!insert_should_abort(3, 3));
+        assert!(insert_should_abort(3, 4));
+    }
+
+    #[test]
+    fn unicode_send_count_covers_surrogates_spaces_and_hotkey_modifiers() {
         assert_eq!(utf16_code_units("A").len(), 1);
         assert_eq!(utf16_code_units("😀").len(), 2);
-        assert_eq!(unicode_send_count("A"), 10);
-        assert_eq!(unicode_send_count("😀"), 12);
+        assert_eq!(unicode_send_count("A"), 6);
+        assert_eq!(unicode_send_count("😀"), 8);
+        assert_eq!(unicode_send_count("A B"), 10);
+        assert_eq!(
+            plan_insert_units("hi there"),
+            vec![
+                InsertKey::Unicode(b'h' as u16),
+                InsertKey::Unicode(b'i' as u16),
+                InsertKey::VirtualKey(0x20),
+                InsertKey::Unicode(b't' as u16),
+                InsertKey::Unicode(b'h' as u16),
+                InsertKey::Unicode(b'e' as u16),
+                InsertKey::Unicode(b'r' as u16),
+                InsertKey::Unicode(b'e' as u16),
+            ]
+        );
+        assert_eq!(
+            plan_insert_units("a\r\nb"),
+            vec![
+                InsertKey::Unicode(b'a' as u16),
+                InsertKey::VirtualKey(0x0D),
+                InsertKey::Unicode(b'b' as u16),
+            ]
+        );
+        assert_eq!(HOTKEY_MODIFIER_UP_COUNT, 4);
         assert_eq!(GITHUB_REPO_URL, "https://github.com/AryaPaw/voxely");
     }
 }

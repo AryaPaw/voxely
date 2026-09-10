@@ -16,7 +16,9 @@ import { Label } from "../../../components/ui/label";
 import { Progress } from "../../../components/ui/progress";
 import { SimpleSelect } from "../../../components/ui/simple-select";
 import { Slider } from "../../../components/ui/slider";
-import { SECTION_ICONS } from "../sectionNav";
+import { SECTION_ICONS, sectionLabel } from "../sectionNav";
+
+const DSP_PREVIEW_DEBOUNCE_MS = 400;
 
 export function FilterSettings({
   settings,
@@ -40,22 +42,25 @@ export function FilterSettings({
       return;
     }
     let cancelled = false;
-    void api
-      .previewDsp()
-      .then((next) => {
-        if (!cancelled) {
-          setPreview(next);
-          setPreviewError("");
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setPreview(null);
-          setPreviewError(formatInvokeError(error, copy));
-        }
-      });
+    const timer = window.setTimeout(() => {
+      void api
+        .previewDsp()
+        .then((next) => {
+          if (!cancelled) {
+            setPreview(next);
+            setPreviewError("");
+          }
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) {
+            setPreview(null);
+            setPreviewError(formatInvokeError(error, copy));
+          }
+        });
+    }, DSP_PREVIEW_DEBOUNCE_MS);
     return () => {
       cancelled = true;
+      window.clearTimeout(timer);
     };
     // copy is display-only for the error string
   }, [copy, recording, settings.activePresetId, signature]);
@@ -94,7 +99,7 @@ export function FilterSettings({
 
   return (
     <div>
-      <PageHeader icon={SECTION_ICONS.filters} title={copy.filtersTitle} />
+      <PageHeader icon={SECTION_ICONS.filters} title={sectionLabel(copy, "filters")} />
       <p className="mb-3 max-w-lg text-sm text-muted-foreground">{copy.filtersIntro}</p>
       <ol className="mb-4 max-w-lg list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
         <li>{copy.recordSample}</li>
@@ -251,11 +256,11 @@ function MicLevelMeter({ live, copy }: { live: boolean; copy: Messages }) {
       void api.meter().then((sample) => {
         const db = peakDbFs(sample.peak);
         setLevel(meterFromPeakDb(db));
-        setWarning(previewWarning(sample.peak, 0, copy.tooQuiet, copy.clippingWarning));
+        setWarning(previewWarning(sample.peak, 0, copy.clippingWarning));
       });
     }, 80);
     return () => window.clearInterval(timer);
-  }, [copy.clippingWarning, copy.tooQuiet, live]);
+  }, [copy.clippingWarning, live]);
   return (
     <div className="mb-5 max-w-lg">
       <Label className="mb-1 text-sm">{copy.micLevel}</Label>
@@ -275,15 +280,10 @@ const FilterPreviewPlayer = memo(function FilterPreviewPlayer({
 }) {
   const originalRef = useRef<HTMLAudioElement>(null);
   const processedRef = useRef<HTMLAudioElement>(null);
-  const originalSrc = preview.originalDataUrl ?? convertFallback(preview.originalPath);
-  const processedSrc = preview.processedDataUrl ?? convertFallback(preview.processedPath);
+  const originalSrc = preview.originalDataUrl || convertFallback(preview.originalPath, preview.nonce);
+  const processedSrc = preview.processedDataUrl || convertFallback(preview.processedPath, preview.nonce);
   const peak = peakDbFs(preview.peak);
-  const warning = previewWarning(
-    preview.peak,
-    preview.clipCount,
-    copy.tooQuiet,
-    copy.clippingWarning,
-  );
+  const warning = previewWarning(preview.peak, preview.clipCount, copy.clippingWarning);
 
   function playSide(side: "original" | "processed") {
     const original = originalRef.current;
@@ -321,8 +321,9 @@ const FilterPreviewPlayer = memo(function FilterPreviewPlayer({
   );
 });
 
-function convertFallback(path: string): string {
-  return convertFileSrc(path.replace(/\\/g, "/"));
+function convertFallback(path: string, nonce?: number): string {
+  const src = convertFileSrc(path.replace(/\\/g, "/"));
+  return typeof nonce === "number" ? `${src}?n=${nonce}` : src;
 }
 
 function TuneSlider({

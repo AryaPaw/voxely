@@ -1,3 +1,4 @@
+import { listen } from "@tauri-apps/api/event";
 import { useEffect, useState } from "react";
 import { api, type AppSettings } from "../../../lib/api";
 import { meterFromPeakDb, peakDbFs, previewWarning } from "../../../lib/dsp-level";
@@ -41,14 +42,33 @@ export function AudioSettings({
     };
   }, []);
   useEffect(() => {
+    let cancelled = false;
+    async function startMeter() {
+      try {
+        await api.startInputMeter();
+      } catch (err: unknown) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : "meter");
+        }
+      }
+    }
+    void startMeter();
+    const unlisten = listen("session://state", () => {
+      void startMeter();
+    });
     const timer = window.setInterval(() => {
       void api.meter().then((sample) => {
         setLevel(meterFromPeakDb(peakDbFs(sample.peak)));
-        setWarning(previewWarning(sample.peak, 0, copy.tooQuiet, copy.clippingWarning));
+        setWarning(previewWarning(sample.peak, 0, copy.clippingWarning));
       });
     }, 120);
-    return () => window.clearInterval(timer);
-  }, [copy.clippingWarning, copy.tooQuiet]);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      void unlisten.then((fn) => fn());
+      void api.stopInputMeter();
+    };
+  }, [copy.clippingWarning, settings.inputDevice]);
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.audio} title={copy.navAudio} />

@@ -1,6 +1,8 @@
 use crate::app::lifecycle::configure_tray;
 use crate::app::machine::{is_cancellable, SessionState};
-use crate::app::session::{current_meter, devices, AppContext};
+use crate::app::session::{
+    current_meter, devices, release_meter_monitor, start_meter_monitor, AppContext,
+};
 use crate::audio::capture::{read_pcm16_wav, write_pcm16_wav, CaptureSession};
 use crate::audio::devices::InputDeviceInfo;
 use crate::dsp::metrics::SAMPLE_RATE;
@@ -122,19 +124,21 @@ fn wav_data_url(path: &Path) -> Result<String, AppError> {
 fn preview_from_original(ctx: &AppContext, original: &Path) -> Result<DspPreview, AppError> {
     let samples = read_pcm16_wav(original)?;
     let preset = ctx.settings.lock().active_preset();
-    let (processed, metrics, _) = prepare_listen_preview(preset, samples)?;
+    let (original_listen, processed, metrics, _) = prepare_listen_preview(preset, samples)?;
     let audio_root = crate::history::repository::audio_dir(&ctx.data_dir);
+    let original_preview = audio_root.join("filter-preview-original.wav");
     let processed_path = audio_root.join("filter-preview.wav");
+    write_pcm16_wav(&original_preview, SAMPLE_RATE, &original_listen)?;
     write_pcm16_wav(&processed_path, SAMPLE_RATE, &processed)?;
     let nonce = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|value| value.as_millis() as u64)
         .unwrap_or(0);
     Ok(DspPreview {
-        original_path: original.to_string_lossy().into_owned(),
+        original_path: original_preview.to_string_lossy().into_owned(),
         processed_path: processed_path.to_string_lossy().into_owned(),
-        original_data_url: wav_data_url(original)?,
-        processed_data_url: wav_data_url(&processed_path)?,
+        original_data_url: String::new(),
+        processed_data_url: String::new(),
         peak: metrics.peak,
         rms: metrics.rms,
         clip_count: metrics.clip_count,
@@ -143,14 +147,19 @@ fn preview_from_original(ctx: &AppContext, original: &Path) -> Result<DspPreview
 }
 
 #[tauri::command]
-pub fn preview_dsp(ctx: State<'_, Arc<AppContext>>) -> Result<DspPreview, AppError> {
-    ctx.settings.lock().mic_tune.validate()?;
-    let audio_root = crate::history::repository::audio_dir(&ctx.data_dir);
-    let original = audio_root.join("filter-sample.wav");
-    if !original.exists() {
-        return Err(AppError::StorageFailed("no filter sample".into()));
-    }
-    preview_from_original(ctx.inner(), &original)
+pub async fn preview_dsp(ctx: State<'_, Arc<AppContext>>) -> Result<DspPreview, AppError> {
+    let ctx = ctx.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        ctx.settings.lock().mic_tune.validate()?;
+        let audio_root = crate::history::repository::audio_dir(&ctx.data_dir);
+        let original = audio_root.join("filter-sample.wav");
+        if !original.exists() {
+            return Err(AppError::StorageFailed("no filter sample".into()));
+        }
+        preview_from_original(&ctx, &original)
+    })
+    .await
+    .map_err(|e| AppError::AudioProcessingFailed(e.to_string()))?
 }
 
 #[tauri::command]
@@ -160,6 +169,7 @@ pub fn start_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppErr
             "dictation is already running".into(),
         ));
     }
+    release_meter_monitor(ctx.inner());
     if ctx.preview_capture.lock().is_some() {
         return Ok(());
     }
@@ -185,6 +195,17 @@ pub fn stop_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<DspPreview,
         .ok_or_else(|| AppError::AudioCaptureFailed("sample not started".into()))?;
     let result = session.stop()?;
     preview_from_original(ctx.inner(), &result.path)
+}
+
+#[tauri::command]
+pub fn start_input_meter(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
+    start_meter_monitor(ctx.inner())
+}
+
+#[tauri::command]
+pub fn stop_input_meter(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
+    release_meter_monitor(ctx.inner());
+    Ok(())
 }
 
 #[tauri::command]

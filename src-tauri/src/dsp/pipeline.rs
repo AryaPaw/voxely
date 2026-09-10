@@ -229,14 +229,17 @@ pub fn apply_listen_loudness(samples: &[f32]) -> (Vec<f32>, AudioMetrics) {
     (out, stats)
 }
 
+pub type ListenPreview = (Vec<f32>, Vec<f32>, AudioMetrics, Vec<f32>);
+
 pub fn prepare_listen_preview(
     preset: DspPreset,
     samples: Vec<f32>,
-) -> Result<(Vec<f32>, AudioMetrics, Vec<f32>), AppError> {
-    let (processed, _) = prepare_listen(preset, samples)?;
-    let stt = processed.clone();
-    let (preview, preview_metrics) = apply_listen_loudness(&processed);
-    Ok((preview, preview_metrics, stt))
+) -> Result<ListenPreview, AppError> {
+    let (filtered, _) = prepare_listen(preset, samples.clone())?;
+    let stt = filtered.clone();
+    let (original, _) = apply_listen_loudness(&samples);
+    let (preview, preview_metrics) = apply_listen_loudness(&filtered);
+    Ok((original, preview, preview_metrics, stt))
 }
 
 pub fn prepare_transcription(
@@ -290,14 +293,16 @@ mod tests {
         let sine: Vec<f32> = (0..4800)
             .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.01)
             .collect();
-        let (preview, metrics, stt) =
+        let (original, preview, metrics, stt) =
             prepare_listen_preview(DspPreset::stt_fast(), sine.clone()).unwrap();
         let (listen, _) = prepare_listen(DspPreset::stt_fast(), sine).unwrap();
         assert_eq!(stt, listen);
-        let listen_peak = listen.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        assert!(metrics.peak > listen_peak);
+        let original_peak = original.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        let preview_peak = preview.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        assert!((original_peak - preview_peak).abs() < 0.08);
         assert!(preview.iter().all(|s| s.abs() <= 1.0));
         assert_eq!(metrics.clip_count, 0);
+        assert!(metrics.peak > 0.0);
     }
 
     fn gain_only(db: f32) -> DspPreset {
