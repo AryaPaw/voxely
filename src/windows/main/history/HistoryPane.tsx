@@ -11,11 +11,13 @@ import {
   Settings as SettingsIcon,
   Trash2,
 } from "lucide-react";
-import { api, type Recording } from "../../lib/api";
-import type { Messages } from "../../lib/i18n";
-import { formatDuration, formatTime } from "../../lib/utils";
-import { Button } from "../../components/ui/button";
-import { Input } from "../../components/ui/input";
+import { api, type Recording } from "../../../lib/api";
+import type { Messages } from "../../../lib/i18n";
+import { formatDuration, formatTime } from "../../../lib/utils";
+import { PageHeader } from "../../../components/settings/PageHeader";
+import { Button } from "../../../components/ui/button";
+import { Input } from "../../../components/ui/input";
+import { SECTION_ICONS } from "../sectionNav";
 
 export function HistoryPane({
   items,
@@ -51,7 +53,7 @@ export function HistoryPane({
         </div>
       ) : null}
       <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-6 py-6">
-        <h1 className="text-2xl font-semibold tracking-tight">{copy.historyTitle}</h1>
+        <PageHeader icon={SECTION_ICONS.history} title={copy.historyTitle} />
         <p className="mt-1 text-sm text-muted-foreground">{copy.historyHint}</p>
         <div className="mt-4 flex items-center gap-2">
           <Input

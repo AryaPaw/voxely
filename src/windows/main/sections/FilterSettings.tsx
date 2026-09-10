@@ -6,13 +6,15 @@ import {
   type AppSettings,
   type DspPreview,
   type MicTune,
-} from "../../lib/api";
-import type { Messages } from "../../lib/i18n";
-import { Button } from "../../components/ui/button";
-import { Label } from "../../components/ui/label";
-import { Progress } from "../../components/ui/progress";
-import { SimpleSelect } from "../../components/ui/simple-select";
-import { Slider } from "../../components/ui/slider";
+} from "../../../lib/api";
+import type { Messages } from "../../../lib/i18n";
+import { PageHeader } from "../../../components/settings/PageHeader";
+import { Button } from "../../../components/ui/button";
+import { Label } from "../../../components/ui/label";
+import { Progress } from "../../../components/ui/progress";
+import { SimpleSelect } from "../../../components/ui/simple-select";
+import { Slider } from "../../../components/ui/slider";
+import { SECTION_ICONS } from "../sectionNav";
 
 export function FilterSettings({
   settings,
@@ -81,7 +83,7 @@ export function FilterSettings({
 
   return (
     <div>
-      <h1 className="mb-4 text-lg font-medium">{copy.filtersTitle}</h1>
+      <PageHeader icon={SECTION_ICONS.filters} title={copy.filtersTitle} />
       <p className="mb-3 max-w-lg text-sm text-muted-foreground">{copy.filtersIntro}</p>
       <ol className="mb-4 max-w-lg list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
         <li>{copy.recordSample}</li>
