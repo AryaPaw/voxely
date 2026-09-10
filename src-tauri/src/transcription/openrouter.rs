@@ -46,6 +46,7 @@ pub async fn transcribe_file(
         return Err(AppError::RecordingTooLarge);
     }
     let mut scheduler = RetryScheduler::new(policy.clone(), Instant::now());
+    let mut cancel = cancel;
     loop {
         if *cancel.borrow() {
             return Err(AppError::Cancelled);
@@ -53,29 +54,38 @@ pub async fn transcribe_file(
         match scheduler.start_attempt(Instant::now(), audio_duration) {
             AttemptDecision::GiveUp(err) => return Err(err),
             AttemptDecision::Wait { delay, .. } => {
-                tokio::time::sleep(delay).await;
+                if wait_or_cancel(&mut cancel, delay).await {
+                    return Err(AppError::Cancelled);
+                }
             }
             AttemptDecision::Run { attempt, timeout } => {
                 let started = Instant::now();
-                match one_attempt(
-                    client,
-                    base_url,
-                    api_key,
-                    model,
-                    language,
-                    path,
-                    policy.connect_timeout,
-                    timeout,
-                )
-                .await
-                {
-                    Ok(mut success) => {
+                let outcome = tokio::select! {
+                    biased;
+                    _ = cancelled(&mut cancel) => None,
+                    result = one_attempt(
+                        client,
+                        base_url,
+                        api_key,
+                        model,
+                        language,
+                        path,
+                        policy.connect_timeout,
+                        timeout,
+                    ) => Some(result),
+                };
+                match outcome {
+                    None => return Err(AppError::Cancelled),
+                    Some(Ok(mut success)) => {
+                        if *cancel.borrow() {
+                            return Err(AppError::Cancelled);
+                        }
                         success.attempt = attempt;
                         success.latency_ms = started.elapsed().as_millis();
                         success.model = model.to_string();
                         return Ok(success);
                     }
-                    Err(classified) => {
+                    Some(Err(classified)) => {
                         match scheduler.after_failure(&classified, Instant::now(), 0.08) {
                             AttemptDecision::GiveUp(err) => return Err(err),
                             AttemptDecision::Wait { delay, .. } => {
@@ -85,7 +95,9 @@ pub async fn transcribe_file(
                                     status = classified.http_status,
                                     "retrying transcription"
                                 );
-                                tokio::time::sleep(delay).await;
+                                if wait_or_cancel(&mut cancel, delay).await {
+                                    return Err(AppError::Cancelled);
+                                }
                             }
                             AttemptDecision::Run { .. } => {}
                         }
@@ -93,6 +105,25 @@ pub async fn transcribe_file(
                 }
             }
         }
+    }
+}
+
+async fn cancelled(cancel: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        if *cancel.borrow() {
+            return;
+        }
+        if cancel.changed().await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn wait_or_cancel(cancel: &mut tokio::sync::watch::Receiver<bool>, delay: Duration) -> bool {
+    tokio::select! {
+        biased;
+        _ = cancelled(cancel) => true,
+        _ = tokio::time::sleep(delay) => *cancel.borrow(),
     }
 }
 
@@ -335,6 +366,39 @@ mod tests {
             err,
             AppError::ProviderUnavailable | AppError::RetryDeadlineExceeded
         ));
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_in_flight_http() {
+        let server = MockServer::start();
+        server.mock(|when, then| {
+            when.method(POST).path("/audio/transcriptions");
+            then.status(200)
+                .delay(Duration::from_secs(8))
+                .json_body(serde_json::json!({"text":"late"}));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = wav_fixture(dir.path());
+        let client = reqwest::Client::new();
+        let base = server.base_url();
+        let (tx, rx) = tokio::sync::watch::channel(false);
+        let transcribe = transcribe_file(
+            &client,
+            &base,
+            "k",
+            "openai/gpt-transcribe",
+            None,
+            &path,
+            RetryPolicy::default(),
+            Duration::from_secs(1),
+            rx,
+        );
+        let cancel = async {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            let _ = tx.send(true);
+        };
+        let (result, _) = tokio::join!(transcribe, cancel);
+        assert_eq!(result.unwrap_err(), AppError::Cancelled);
     }
 
     #[tokio::test]

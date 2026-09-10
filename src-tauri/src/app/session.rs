@@ -1,7 +1,7 @@
 use parking_lot::Mutex;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -11,7 +11,7 @@ use tauri::{
     WebviewWindow, WebviewWindowBuilder,
 };
 
-use crate::app::machine::{apply_event, SessionEvent, SessionState};
+use crate::app::machine::{apply_event, may_commit_session, SessionEvent, SessionState};
 use crate::app::overlay::{
     overlay_physical_position, WorkArea, OVERLAY_GAP_PX, OVERLAY_HEIGHT, OVERLAY_WIDTH,
 };
@@ -43,6 +43,7 @@ pub struct AppContext {
     pub session_recording_id: Mutex<Option<String>>,
     pub hotkeys_suspended: Mutex<bool>,
     pub abort_start: AtomicBool,
+    pub session_generation: AtomicU64,
     pub preview_capture: Mutex<Option<CaptureSession>>,
     pub update_gate: tokio::sync::Mutex<bool>,
 }
@@ -82,6 +83,7 @@ impl AppContext {
             session_recording_id: Mutex::new(None),
             hotkeys_suspended: Mutex::new(false),
             abort_start: AtomicBool::new(false),
+            session_generation: AtomicU64::new(0),
             preview_capture: Mutex::new(None),
             update_gate: tokio::sync::Mutex::new(false),
         })
@@ -115,6 +117,7 @@ pub fn toggle_recording(app: &AppHandle) -> Result<(), AppError> {
 
 pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
+    ctx.session_generation.fetch_add(1, Ordering::SeqCst);
     if let Some(tx) = ctx.cancel_tx.lock().as_ref() {
         let _ = tx.send(true);
     }
@@ -132,7 +135,7 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
             *ctx.session_recording_id.lock() = None;
             ctx.abort_start.store(true, Ordering::SeqCst);
             ctx.emit_state(app);
-            hide_overlay_now(app);
+            hide_overlay_later(app.clone(), Duration::from_millis(16));
             Ok(())
         }
         SessionState::StoppingRecording
@@ -149,7 +152,7 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
             *ctx.session_recording_id.lock() = None;
             let _ = ctx.transition(SessionEvent::Cancelled);
             ctx.emit_state(app);
-            hide_overlay_now(app);
+            hide_overlay_later(app.clone(), Duration::from_millis(16));
             Ok(())
         }
         _ => Ok(()),
@@ -159,6 +162,9 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
 fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
     ctx.abort_start.store(false, Ordering::SeqCst);
+    ctx.session_generation.fetch_add(1, Ordering::SeqCst);
+    let (tx, _) = tokio::sync::watch::channel(false);
+    *ctx.cancel_tx.lock() = Some(tx);
     ctx.transition(SessionEvent::StartRequested)?;
     *ctx.captured_hwnd.lock() = native::foreground_hwnd();
     *ctx.overlay_shown_at.lock() = Some(Instant::now());
@@ -251,6 +257,10 @@ fn stop_recording(app: &AppHandle) -> Result<(), AppError> {
 
 fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
     let ctx = app.state::<Arc<AppContext>>();
+    if matches!(*ctx.state.lock(), SessionState::Idle) {
+        let _ = std::fs::remove_file(&result.path);
+        return;
+    }
     if ctx.transition(SessionEvent::Saved).is_err() {
         return;
     }
@@ -307,6 +317,7 @@ async fn process_and_transcribe(app: AppHandle, recording_id: String) -> Result<
 
 async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
+    let started_generation = ctx.session_generation.load(Ordering::SeqCst);
     let settings = ctx.settings.lock().clone();
     let rec = {
         let history = ctx.history.lock();
@@ -322,12 +333,26 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
     let raw_path = audio_root.join(&raw_name);
     let samples = read_pcm16_wav(&raw_path)?;
     let preset = settings.active_preset();
-    let (tx, rx) = tokio::sync::watch::channel(false);
-    *ctx.cancel_tx.lock() = Some(tx);
+    let rx = {
+        let mut slot = ctx.cancel_tx.lock();
+        if let Some(tx) = slot.as_ref() {
+            tx.subscribe()
+        } else {
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            *slot = Some(tx);
+            rx
+        }
+    };
     let processed = tokio::task::spawn_blocking(move || prepare_transcription(preset, samples))
         .await
         .map_err(|e| AppError::AudioProcessingFailed(e.to_string()))??;
-    if *rx.borrow() {
+    if *rx.borrow()
+        || !may_commit_session(
+            started_generation,
+            ctx.session_generation.load(Ordering::SeqCst),
+            false,
+        )
+    {
         return Err(AppError::Cancelled);
     }
     let (processed, rate) = processed;
@@ -372,11 +397,19 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
         &processed_path,
         settings.retry.to_policy(),
         Duration::from_millis(rec.duration_ms as u64),
-        rx,
+        rx.clone(),
     )
     .await
     {
         Ok(success) => {
+            let cancelled = *rx.borrow();
+            if !may_commit_session(
+                started_generation,
+                ctx.session_generation.load(Ordering::SeqCst),
+                cancelled,
+            ) {
+                return Err(AppError::Cancelled);
+            }
             rec.status = RecordingStatus::Completed;
             rec.transcript = Some(success.text.clone());
             rec.attempt_count = success.attempt as i64;
@@ -394,15 +427,24 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
             let captured = *ctx.captured_hwnd.lock();
             let text = success.text.clone();
             let app_clone = app.clone();
+            let commit_generation = started_generation;
             let _ = app.clone().run_on_main_thread(move || {
-                hide_overlay_now(&app_clone);
                 let ctx = app_clone.state::<Arc<AppContext>>();
+                if !may_commit_session(
+                    commit_generation,
+                    ctx.session_generation.load(Ordering::SeqCst),
+                    false,
+                ) {
+                    return;
+                }
+                hide_overlay_now(&app_clone);
                 let _ = ctx.transition(SessionEvent::Dismiss);
                 ctx.emit_state(&app_clone);
                 insert_transcript_now(&mode, captured, &text);
             });
             Ok(())
         }
+        Err(AppError::Cancelled) => Err(AppError::Cancelled),
         Err(err) => {
             rec.status = RecordingStatus::Failed;
             rec.last_error_message = Some(err.user_message());

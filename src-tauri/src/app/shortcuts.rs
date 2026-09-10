@@ -5,7 +5,7 @@ use tauri::AppHandle;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
-use crate::app::machine::is_recording_active;
+use crate::app::machine::is_cancellable;
 use crate::app::session::{cancel_recording, toggle_recording, AppContext};
 use crate::error::AppError;
 
@@ -41,7 +41,7 @@ pub fn sync_shortcuts(app: &AppHandle) -> Result<(), AppError> {
         return Ok(());
     }
     let spec = ctx.settings.lock().hotkey.clone();
-    let recording = is_recording_active(&ctx.state.lock());
+    let cancellable = is_cancellable(&ctx.state.lock());
     let _ = app.global_shortcut().unregister_all();
     let shortcut = parse_hotkey(&spec)?;
     app.global_shortcut()
@@ -52,7 +52,7 @@ pub fn sync_shortcuts(app: &AppHandle) -> Result<(), AppError> {
             }
         })
         .map_err(|e| AppError::HotkeyFailed(e.to_string()))?;
-    if recording {
+    if cancellable {
         let escape = "Escape"
             .parse::<Shortcut>()
             .map_err(|e| AppError::HotkeyFailed(e.to_string()))?;

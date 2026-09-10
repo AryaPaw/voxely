@@ -13,7 +13,7 @@ export function OverlayApp() {
   const [notify, setNotify] = useState(true);
   const recording = state.kind === "recording" || state.kind === "startingRecording";
   const busy = overlayIsBusy(state);
-  const cancelReady = recording && hovered;
+  const cancelReady = busy && hovered;
 
   useEffect(() => {
     void api.settings().then((settings) => {
@@ -28,10 +28,10 @@ export function OverlayApp() {
   }, []);
 
   useEffect(() => {
-    if (!recording) {
+    if (!busy) {
       setCancelHover(false);
     }
-  }, [recording]);
+  }, [busy]);
 
   const wasRecording = useRef(false);
   useEffect(() => {
@@ -67,7 +67,7 @@ export function OverlayApp() {
   }, []);
 
   function onPillClick() {
-    if (recording) {
+    if (busy) {
       void api.cancel();
     }
   }
@@ -84,12 +84,12 @@ export function OverlayApp() {
         className={`overlay-pill${cancelReady ? " overlay-pill-armed" : ""}${busy && !cancelReady ? " overlay-pill-busy" : ""}`}
         onClick={onPillClick}
         onMouseEnter={() => {
-          if (recording) {
+          if (busy) {
             setCancelHover(true);
           }
         }}
         onMouseLeave={() => setCancelHover(false)}
-        aria-label={recording ? "Наведите, чтобы отменить запись" : status}
+        aria-label={busy ? "Наведите, чтобы отменить запись" : status}
       >
         {centered ? (
           <span className="overlay-center">

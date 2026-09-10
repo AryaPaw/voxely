@@ -152,6 +152,27 @@ pub fn is_recording_active(state: &SessionState) -> bool {
     )
 }
 
+pub fn is_cancellable(state: &SessionState) -> bool {
+    matches!(
+        state,
+        SessionState::StartingRecording
+            | SessionState::Recording
+            | SessionState::StoppingRecording
+            | SessionState::Saving
+            | SessionState::ProcessingAudio
+            | SessionState::Transcribing { .. }
+            | SessionState::RetryWaiting { .. }
+    )
+}
+
+pub fn may_commit_session(
+    started_generation: u64,
+    current_generation: u64,
+    cancelled: bool,
+) -> bool {
+    !cancelled && started_generation == current_generation
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -247,6 +268,35 @@ mod tests {
             SessionEvent::Cancelled,
         ]);
         assert_eq!(state, SessionState::Idle);
+    }
+
+    #[test]
+    fn cancel_from_transcribing_returns_idle() {
+        let state = walk(&[
+            SessionEvent::StartRequested,
+            SessionEvent::CaptureReady,
+            SessionEvent::StopRequested,
+            SessionEvent::Saved,
+            SessionEvent::Saved,
+            SessionEvent::Processed,
+            SessionEvent::Cancelled,
+        ]);
+        assert_eq!(state, SessionState::Idle);
+        assert!(!is_cancellable(&state));
+    }
+
+    #[test]
+    fn transcribing_is_cancellable() {
+        assert!(is_cancellable(&SessionState::Transcribing { attempt: 1 }));
+        assert!(is_cancellable(&SessionState::ProcessingAudio));
+        assert!(!is_recording_active(&SessionState::Transcribing { attempt: 1 }));
+    }
+
+    #[test]
+    fn late_success_is_rejected_after_generation_bump() {
+        assert!(may_commit_session(3, 3, false));
+        assert!(!may_commit_session(3, 4, false));
+        assert!(!may_commit_session(3, 3, true));
     }
 
     #[test]
