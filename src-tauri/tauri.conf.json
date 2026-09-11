@@ -54,7 +54,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDIwMDRFMjEwMzQxRDhFODUKUldTRmpoMDBFT0lFSVAzeHJJY2xlQXNXOG5CQXd6ZGthSjA4R0hkM0VROGg5MldCNExqaUpHNG4K",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY4OTc1Q0U2NzJCRjIyRjIKUldUeUlyOXk1bHlYYUF2a1FyajJrNnlVdFFQdHJWc3NDMG9DQ205Qmt3OXlrS1RoQzYyaWo1TmEK",
       "endpoints": [
         "https://github.com/AryaPaw/voxely/releases/latest/download/latest.json"
       ]
