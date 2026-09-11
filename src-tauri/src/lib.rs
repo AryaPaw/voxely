@@ -22,7 +22,8 @@ use tauri_plugin_autostart::MacosLauncher;
 use tracing_subscriber::EnvFilter;
 
 use crate::app::lifecycle::{
-    attach_context, configure_tray, reregister_hotkey, should_hide_on_launch, show_main,
+    attach_context, center_main_window, configure_tray, reregister_hotkey, should_hide_on_launch,
+    show_main,
 };
 use crate::app::session::AppContext;
 use crate::commands::*;
@@ -73,6 +74,8 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
+            } else {
+                center_main_window(app.handle());
             }
             if let Some(window) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
@@ -109,6 +112,8 @@ pub fn run() {
             toggle_dictation,
             retry_recording,
             open_logs,
+            open_settings_dir,
+            reset_settings,
             open_audio_dir,
             preview_obs_import,
             import_obs_preset,

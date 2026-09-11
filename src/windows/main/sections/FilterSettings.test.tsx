@@ -95,6 +95,26 @@ function settings(): AppSettings {
 }
 
 describe("FilterSettings", () => {
+  it("shows factory preset labels in the active UI language", () => {
+    const russianStored = settings();
+    russianStored.presets = [
+      { ...preset(), id: "stt-fast", name: "Быстрая диктовка" },
+      { ...preset(), id: "stt-optimized", name: "Качество (медленнее)" },
+    ];
+    render(
+      <FilterSettings
+        settings={russianStored}
+        copy={messagesFor("en")}
+        onChange={() => undefined}
+      />,
+    );
+    expect(screen.getByRole("combobox", { name: "Active preset" })).toHaveTextContent(
+      "Fast dictation",
+    );
+    expect(screen.queryByText("Быстрая диктовка")).not.toBeInTheDocument();
+    expect(screen.queryByText("Качество (медленнее)")).not.toBeInTheDocument();
+  });
+
   it("edits the stored preset instead of micTune sliders", async () => {
     const onChange = vi.fn();
     render(<FilterSettings settings={settings()} copy={messagesFor("en")} onChange={onChange} />);

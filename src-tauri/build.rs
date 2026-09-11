@@ -19,6 +19,8 @@ fn main() {
             "toggle_dictation",
             "retry_recording",
             "open_logs",
+            "open_settings_dir",
+            "reset_settings",
             "open_audio_dir",
             "preview_obs_import",
             "import_obs_preset",

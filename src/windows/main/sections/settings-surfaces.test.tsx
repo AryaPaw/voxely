@@ -1,9 +1,31 @@
-import { cleanup, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { toast } from "sonner";
+import { api } from "../../../lib/api";
 import { messagesFor } from "../../../lib/i18n";
 import { AdvancedSettings } from "./AdvancedSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import type { AppSettings } from "../../../lib/api";
+
+vi.mock("sonner", () => ({
+  toast: {
+    error: vi.fn(),
+    success: vi.fn(),
+  },
+}));
+
+vi.mock("../../../lib/api", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../../lib/api")>();
+  return {
+    ...actual,
+    api: {
+      ...actual.api,
+      openLogs: vi.fn(),
+      openSettingsDir: vi.fn(),
+      resetSettings: vi.fn(),
+    },
+  };
+});
 
 afterEach(() => cleanup());
 
@@ -61,10 +83,44 @@ describe("AdvancedSettings", () => {
         settings={settings()}
         copy={messagesFor("en")}
         onChange={() => undefined}
+        onSettingsReplaced={() => undefined}
       />,
     );
     expect(screen.getByRole("combobox", { name: "Text insertion" })).toBeInTheDocument();
     expect(screen.getByText(/Unicode inserts/)).toBeInTheDocument();
     expect(screen.queryByText("SendInput")).not.toBeInTheDocument();
+  });
+
+  it("offers settings folder and two reset actions", () => {
+    render(
+      <AdvancedSettings
+        settings={settings()}
+        copy={messagesFor("en")}
+        onChange={() => undefined}
+        onSettingsReplaced={() => undefined}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Open settings folder" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset settings" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Reset everything" })).toBeInTheDocument();
+  });
+
+  it("prefixes folder-open failures as errors", async () => {
+    vi.mocked(api.openSettingsDir).mockRejectedValueOnce({
+      code: "StorageFailed",
+      message: "opener failed",
+    });
+    render(
+      <AdvancedSettings
+        settings={settings()}
+        copy={messagesFor("en")}
+        onChange={() => undefined}
+        onSettingsReplaced={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open settings folder" }));
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith("Error: Could not open the settings folder");
+    });
   });
 });

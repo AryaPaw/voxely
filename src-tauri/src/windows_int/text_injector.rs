@@ -94,6 +94,14 @@ pub fn unicode_send_count(text: &str) -> u32 {
 }
 
 pub const GITHUB_REPO_URL: &str = "https://github.com/AryaPaw/voxely";
+pub const GITHUB_ISSUES_URL: &str = "https://github.com/AryaPaw/voxely/issues";
+
+pub fn github_page_url(page: Option<&str>) -> &'static str {
+    match page {
+        Some("issues") => GITHUB_ISSUES_URL,
+        _ => GITHUB_REPO_URL,
+    }
+}
 
 #[cfg(windows)]
 pub mod native {
@@ -638,6 +646,16 @@ mod tests {
             ]
         );
         assert_eq!(HOTKEY_MODIFIER_UP_COUNT, 4);
+    }
+
+    #[test]
+    fn github_urls_cover_repo_and_issues() {
         assert_eq!(GITHUB_REPO_URL, "https://github.com/AryaPaw/voxely");
+        assert_eq!(
+            GITHUB_ISSUES_URL,
+            "https://github.com/AryaPaw/voxely/issues"
+        );
+        assert_eq!(github_page_url(Some("issues")), GITHUB_ISSUES_URL);
+        assert_eq!(github_page_url(None), GITHUB_REPO_URL);
     }
 }

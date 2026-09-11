@@ -99,6 +99,7 @@ const ru = {
   latencyLabel: "Задержка",
   costLabel: "Стоимость",
   errorLabel: "Ошибка",
+  successLabel: "Успех",
   globalHotkey: "Глобальный хоткей",
   hotkeyPrompt: "Нажмите сочетание… Esc отмена",
   inputDevice: "Устройство ввода",
@@ -116,6 +117,9 @@ const ru = {
   copiedInsert: "Скопировано, вставьте сами",
   debugLogs: "Отладочные логи",
   openLogs: "Открыть логи",
+  openSettingsFolder: "Открыть папку настроек",
+  openLogsFailed: "Не удалось открыть папку логов",
+  openSettingsFailed: "Не удалось открыть папку настроек",
   keepRecordings: "Хранить записи",
   retain1d: "1 день",
   retain3d: "3 дня",
@@ -146,7 +150,10 @@ const ru = {
   noConnection: "Нет соединения",
   timeoutHint:
     "Таймаут одного запроса растёт вместе с длительностью записи, до 15 минут. Общий лимит покрывает длинные диктовки и повторы.",
-  language: "Язык",
+  language: "Язык речи",
+  speechLanguageAuto: "Автоопределение",
+  speechLanguageHint:
+    "Язык того, что вы говорите в микрофон. Автоопределение обычно достаточно. Зафиксируйте язык, если почти всегда диктуете на одном.",
   autoRetries: "Автоматические повторы",
   extraAttempts: "Дополнительные попытки (1 запрос + столько повторов)",
   connectTimeout: "Таймаут соединения (мс)",
@@ -176,12 +183,24 @@ const ru = {
   filterExpander: "Экспандер",
   filterGate: "Гейт",
   filterLimiter: "Лимитер",
+  presetSttFast: "Быстрая диктовка",
+  presetSttOptimized: "Качество (медленнее)",
+  presetObsImported: "Импорт из OBS",
+  resetSettings: "Сбросить настройки",
+  resetSettingsConfirm: "Сбросить настройки?",
+  resetSettingsHint: "Вернутся значения по умолчанию. API-ключ не трогаем. История не удаляется.",
+  resetAll: "Полный сброс",
+  resetAllConfirm: "Полностью сбросить приложение?",
+  resetAllHint: "Сбросятся все настройки и API-ключ. История не удаляется.",
+  resetDone: "Настройки сброшены",
+  resetAllDone: "Настройки и API-ключ сброшены",
   aboutTitle: "О программе",
   aboutAuthor: "Автор",
   aboutVersion: "Версия",
   aboutGithub: "GitHub",
   authorName: "AryaPaw",
   githubRepo: "AryaPaw/voxely",
+  githubIssues: "Issues",
   loadFailed: "Не удалось загрузить настройки",
   historyFailed: "Не удалось загрузить историю",
   settingsFailed: "Не удалось сохранить настройки",
@@ -286,6 +305,7 @@ const en = {
   latencyLabel: "Latency",
   costLabel: "Cost",
   errorLabel: "Error",
+  successLabel: "Success",
   globalHotkey: "Global hotkey",
   hotkeyPrompt: "Press a shortcut… Esc cancels",
   inputDevice: "Input device",
@@ -303,6 +323,9 @@ const en = {
   copiedInsert: "Copied, paste it yourself",
   debugLogs: "Debug logs",
   openLogs: "Open logs",
+  openSettingsFolder: "Open settings folder",
+  openLogsFailed: "Could not open the logs folder",
+  openSettingsFailed: "Could not open the settings folder",
   keepRecordings: "Keep recordings",
   retain1d: "1 day",
   retain3d: "3 days",
@@ -333,7 +356,10 @@ const en = {
   noConnection: "No connection",
   timeoutHint:
     "A single request timeout grows with recording duration, up to 15 minutes. The overall limit covers long dictations and retries.",
-  language: "Language",
+  language: "Speech language",
+  speechLanguageAuto: "Auto-detect",
+  speechLanguageHint:
+    "Language of what you speak into the microphone. Auto-detect is usually enough. Pin a language if you almost always dictate in one.",
   autoRetries: "Automatic retries",
   extraAttempts: "Extra attempts (1 request plus this many retries)",
   connectTimeout: "Connect timeout (ms)",
@@ -363,12 +389,25 @@ const en = {
   filterExpander: "Expander",
   filterGate: "Gate",
   filterLimiter: "Limiter",
+  presetSttFast: "Fast dictation",
+  presetSttOptimized: "Quality (slower)",
+  presetObsImported: "OBS imported",
+  resetSettings: "Reset settings",
+  resetSettingsConfirm: "Reset settings?",
+  resetSettingsHint:
+    "Factory defaults will be restored. The API key stays. History is not deleted.",
+  resetAll: "Reset everything",
+  resetAllConfirm: "Reset the whole app?",
+  resetAllHint: "All settings and the API key will be cleared. History is not deleted.",
+  resetDone: "Settings were reset",
+  resetAllDone: "Settings and API key were reset",
   aboutTitle: "About",
   aboutAuthor: "Author",
   aboutVersion: "Version",
   aboutGithub: "GitHub",
   authorName: "AryaPaw",
   githubRepo: "AryaPaw/voxely",
+  githubIssues: "Issues",
   loadFailed: "Could not load settings",
   historyFailed: "Could not load history",
   settingsFailed: "Could not save settings",
@@ -385,6 +424,19 @@ export function applyUiLocale(locale: UiLocale): void {
 }
 
 export type Messages = typeof ru;
+
+export function factoryPresetLabel(preset: { id: string; name: string }, copy: Messages): string {
+  switch (preset.id) {
+    case "stt-fast":
+      return copy.presetSttFast;
+    case "stt-optimized":
+      return copy.presetSttOptimized;
+    case "obs-imported":
+      return copy.presetObsImported;
+    default:
+      return preset.name;
+  }
+}
 
 export function messagesFor(locale: UiLocale): Messages {
   return locale === "en" ? en : ru;
@@ -447,6 +499,10 @@ export function localizedError(
     default:
       return fallback?.trim() ? fallback : copy.errUnknown;
   }
+}
+
+export function statusToast(kind: "error" | "success", copy: Messages, message: string): string {
+  return `${kind === "error" ? copy.errorLabel : copy.successLabel}: ${message}`;
 }
 
 export function formatInvokeError(error: unknown, copy: Messages): string {

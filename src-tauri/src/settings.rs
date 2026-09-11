@@ -150,6 +150,12 @@ impl Default for AppSettings {
 }
 
 impl AppSettings {
+    pub fn reset_user_settings(keep_first_run_complete: bool) -> Self {
+        let mut settings = Self::default();
+        settings.first_run_complete = keep_first_run_complete;
+        settings
+    }
+
     pub fn load(path: &Path) -> Result<Self, AppError> {
         if !path.exists() {
             return Ok(Self::default());
@@ -347,5 +353,17 @@ mod tests {
         let mut s = RetrySettings::default();
         s.additional_retries = 9;
         assert!(s.validate().is_err());
+    }
+
+    #[test]
+    fn reset_user_settings_restores_factory_and_keeps_first_run() {
+        let reset = AppSettings::reset_user_settings(true);
+        assert_eq!(reset.hotkey, AppSettings::default().hotkey);
+        assert_eq!(reset.theme, AppSettings::default().theme);
+        assert_eq!(reset.active_preset_id, "stt-fast");
+        assert_eq!(reset.presets.len(), 3);
+        assert!(reset.first_run_complete);
+        let full = AppSettings::reset_user_settings(false);
+        assert!(!full.first_run_complete);
     }
 }

@@ -39,6 +39,8 @@
     "allow-toggle-dictation",
     "allow-retry-recording",
     "allow-open-logs",
+    "allow-open-settings-dir",
+    "allow-reset-settings",
     "allow-open-audio-dir",
     "allow-preview-obs-import",
     "allow-import-obs-preset",

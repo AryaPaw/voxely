@@ -138,6 +138,9 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
             *ctx.session_recording_id.lock() = None;
             ctx.abort_start.store(true, Ordering::SeqCst);
             ctx.emit_state(app);
+            if ctx.settings.lock().notifications {
+                crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Cancel);
+            }
             hide_overlay_later(app.clone(), Duration::from_millis(16));
             Ok(())
         }
@@ -149,6 +152,9 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
             fail_active_recording(&ctx, &AppError::Cancelled);
             let _ = ctx.transition(SessionEvent::Cancelled);
             ctx.emit_state(app);
+            if ctx.settings.lock().notifications {
+                crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Cancel);
+            }
             hide_overlay_later(app.clone(), Duration::from_millis(16));
             Ok(())
         }

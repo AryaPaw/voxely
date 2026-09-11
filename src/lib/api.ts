@@ -162,6 +162,8 @@ export const api = {
   setHotkeyCapture: (capturing: boolean) => invoke<void>("set_hotkey_capture", { capturing }),
   retry: (id: string) => invoke<Recording>("retry_recording", { id }),
   openLogs: () => invoke<void>("open_logs"),
+  openSettingsDir: () => invoke<void>("open_settings_dir"),
+  resetSettings: (wipeApiKey: boolean) => invoke<AppSettings>("reset_settings", { wipeApiKey }),
   obsPreview: () =>
     invoke<Array<{ sourceName: string; unsupported: string[] }>>("preview_obs_import"),
   importObs: (sourceName: string, presetName: string) =>
@@ -170,5 +172,5 @@ export const api = {
   insert: (text: string) => invoke<void>("insert_transcript", { text }),
   audioPath: (id: string) => invoke<string | null>("recording_audio_url", { id }),
   openAudioDir: () => invoke<void>("open_audio_dir"),
-  openGithub: () => invoke<void>("open_github"),
+  openGithub: (page?: string) => invoke<void>("open_github", { page }),
 };

@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   formatInvokeError,
   localizedError,
+  factoryPresetLabel,
   messagesFor,
   resolveUiLocale,
+  statusToast,
   updateToast,
 } from "./i18n";
 
@@ -34,6 +36,21 @@ describe("messagesFor", () => {
   it("keeps insert copy free of SendInput", () => {
     expect(messagesFor("en").insertHint).not.toMatch(/SendInput/);
     expect(messagesFor("ru").insertHint).not.toMatch(/SendInput/);
+  });
+
+  it("localizes factory DSP preset names by id", () => {
+    expect(
+      factoryPresetLabel({ id: "stt-fast", name: "Быстрая диктовка" }, messagesFor("en")),
+    ).toBe("Fast dictation");
+    expect(
+      factoryPresetLabel({ id: "stt-optimized", name: "Качество (медленнее)" }, messagesFor("en")),
+    ).toBe("Quality (slower)");
+    expect(
+      factoryPresetLabel({ id: "obs-imported", name: "OBS Imported" }, messagesFor("ru")),
+    ).toBe("Импорт из OBS");
+    expect(factoryPresetLabel({ id: "custom-1", name: "OBS Mic" }, messagesFor("en"))).toBe(
+      "OBS Mic",
+    );
   });
 
   it("keeps the same keys in RU and EN", () => {
@@ -93,6 +110,12 @@ describe("messagesFor", () => {
     );
     expect(formatInvokeError({ code: "InvalidApiKey" }, messagesFor("en"))).toBe(
       "OpenRouter API key is missing",
+    );
+    expect(statusToast("error", messagesFor("en"), messagesFor("en").openSettingsFailed)).toBe(
+      "Error: Could not open the settings folder",
+    );
+    expect(statusToast("success", messagesFor("ru"), messagesFor("ru").resetDone)).toBe(
+      "Успех: Настройки сброшены",
     );
   });
 });

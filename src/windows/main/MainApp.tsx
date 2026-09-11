@@ -206,6 +206,13 @@ export function MainApp() {
                   settings={settings}
                   copy={copy}
                   onChange={(patch) => void persist({ ...settings, ...patch })}
+                  onSettingsReplaced={(next, wipeApiKey) => {
+                    setSettings(next);
+                    applyTheme(next.theme);
+                    if (wipeApiKey) {
+                      setKeyConfigured(false);
+                    }
+                  }}
                 />
               ) : null}
               {section === "about" ? <AboutSettings copy={copy} /> : null}

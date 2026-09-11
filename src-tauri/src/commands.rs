@@ -13,7 +13,7 @@ use crate::history::repository::Recording;
 use crate::history::retention::delete_recording;
 use crate::settings::AppSettings;
 use crate::transcription::openrouter::{list_transcription_models, SttModel};
-use crate::windows_int::credentials::{has_api_key, set_api_key};
+use crate::windows_int::credentials::{delete_api_key, has_api_key, set_api_key};
 use crate::windows_int::text_injector::native;
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
@@ -38,13 +38,21 @@ pub fn save_settings(
     ctx: State<'_, Arc<AppContext>>,
     settings: AppSettings,
 ) -> Result<AppSettings, AppError> {
+    persist_settings(&app, ctx.inner().as_ref(), settings)
+}
+
+fn persist_settings(
+    app: &AppHandle,
+    ctx: &AppContext,
+    settings: AppSettings,
+) -> Result<AppSettings, AppError> {
     settings.retry.validate()?;
     settings.mic_tune.validate()?;
     settings.save(&ctx.settings_path)?;
     *ctx.settings.lock() = settings.clone();
     let _ = app.emit("settings://changed", settings.clone());
-    let _ = crate::app::session::apply_configured_retention(ctx.as_ref());
-    if let Err(e) = crate::app::shortcuts::sync_shortcuts(&app) {
+    let _ = crate::app::session::apply_configured_retention(ctx);
+    if let Err(e) = crate::app::shortcuts::sync_shortcuts(app) {
         tracing::error!(error = %e, "hotkey register failed");
     }
     let autostart = app.autolaunch();
@@ -53,7 +61,7 @@ pub fn save_settings(
     } else {
         let _ = autostart.disable();
     }
-    let _ = configure_tray(&app);
+    let _ = configure_tray(app);
     Ok(settings)
 }
 
@@ -270,6 +278,35 @@ pub fn open_logs(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
 }
 
 #[tauri::command]
+pub fn open_settings_dir(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
+    let dir = ctx
+        .settings_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| ctx.data_dir.clone());
+    std::fs::create_dir_all(&dir).map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    tauri_plugin_opener::open_path(dir, None::<&str>)
+        .map_err(|e| AppError::StorageFailed(e.to_string()))
+}
+
+#[tauri::command]
+pub fn reset_settings(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppContext>>,
+    wipe_api_key: bool,
+) -> Result<AppSettings, AppError> {
+    if wipe_api_key {
+        delete_api_key()?;
+    }
+    let keep_first_run = !wipe_api_key && ctx.settings.lock().first_run_complete;
+    persist_settings(
+        &app,
+        ctx.inner().as_ref(),
+        AppSettings::reset_user_settings(keep_first_run),
+    )
+}
+
+#[tauri::command]
 pub fn open_audio_dir(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
     let dir = crate::history::repository::audio_dir(&ctx.data_dir);
     std::fs::create_dir_all(&dir).map_err(|e| AppError::StorageFailed(e.to_string()))?;
@@ -325,9 +362,9 @@ pub fn insert_transcript(app: AppHandle, text: String) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-pub fn open_github() -> Result<(), AppError> {
+pub fn open_github(page: Option<String>) -> Result<(), AppError> {
     tauri_plugin_opener::open_url(
-        crate::windows_int::text_injector::GITHUB_REPO_URL,
+        crate::windows_int::text_injector::github_page_url(page.as_deref()),
         None::<&str>,
     )
     .map_err(|e| AppError::StorageFailed(e.to_string()))

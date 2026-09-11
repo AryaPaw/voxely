@@ -3,11 +3,13 @@ use std::sync::Arc;
 
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Manager, PhysicalPosition, Position};
 
+use crate::app::overlay::{center_physical_position, WorkArea};
 use crate::app::session::AppContext;
 use crate::app::shortcuts::sync_shortcuts;
 use crate::error::AppError;
+use crate::windows_int::overlay::work_area_for_cursor;
 
 pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
     let locale = {
@@ -80,6 +82,24 @@ pub fn show_main(app: &AppHandle, _route: &str) {
         let _ = window.show();
         let _ = window.set_focus();
     }
+}
+
+pub fn center_main_window(app: &AppHandle) {
+    let Some(window) = app.get_webview_window("main") else {
+        return;
+    };
+    let work = work_area_for_cursor().unwrap_or(WorkArea {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1080,
+    });
+    if let Ok(size) = window.outer_size() {
+        let (x, y) = center_physical_position(work, size.width, size.height);
+        let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
+        return;
+    }
+    let _ = window.center();
 }
 
 pub fn reregister_hotkey(app: &AppHandle, _spec: &str) -> Result<(), AppError> {

@@ -20,6 +20,7 @@
   --accent: oklch(0.94 0.01 250);
   --accent-foreground: oklch(0.25 0.02 250);
   --destructive: oklch(0.58 0.2 25);
+  --success: oklch(0.52 0.14 155);
   --border: oklch(0.9 0.01 250);
   --input: oklch(0.9 0.01 250);
   --ring: oklch(0.62 0.11 220);
@@ -66,6 +67,7 @@
   --accent: oklch(0.26 0.02 250);
   --accent-foreground: oklch(0.93 0.01 250);
   --destructive: oklch(0.7 0.18 25);
+  --success: oklch(0.74 0.14 155);
   --border: oklch(1 0 0 / 12%);
   --input: oklch(1 0 0 / 14%);
   --ring: oklch(0.72 0.11 210);
@@ -118,6 +120,7 @@
   --color-input: var(--input);
   --color-border: var(--border);
   --color-destructive: var(--destructive);
+  --color-success: var(--success);
   --color-accent-foreground: var(--accent-foreground);
   --color-accent: var(--accent);
   --color-muted-foreground: var(--muted-foreground);
@@ -139,6 +142,22 @@
   --radius-2xl: calc(var(--radius) * 1.8);
   --radius-3xl: calc(var(--radius) * 2.2);
   --radius-4xl: calc(var(--radius) * 2.6);
+}
+
+[data-sonner-toast][data-type="success"] [data-icon] {
+  color: var(--success);
+}
+
+[data-sonner-toast][data-type="error"] [data-icon] {
+  color: var(--destructive);
+}
+
+[data-sonner-toast][data-type="warning"] [data-icon] {
+  color: var(--overlay-armed);
+}
+
+[data-sonner-toast][data-type="info"] [data-icon] {
+  color: var(--primary);
 }
 
 @layer base {

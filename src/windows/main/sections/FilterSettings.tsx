@@ -8,7 +8,7 @@ import {
   type FilterKind,
 } from "../../../lib/api";
 import { meterFromPeakDb, peakDbFs, previewWarning } from "../../../lib/dsp-level";
-import { formatInvokeError, type Messages } from "../../../lib/i18n";
+import { formatInvokeError, factoryPresetLabel, type Messages } from "../../../lib/i18n";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { SettingsSwitchRow } from "../../../components/settings/SettingsSwitchRow";
 import { Button } from "../../../components/ui/button";
@@ -113,7 +113,10 @@ export function FilterSettings({
           aria-label={copy.activePreset}
           value={settings.activePresetId}
           onValueChange={(activePresetId) => onChange({ activePresetId })}
-          options={settings.presets.map((item) => ({ value: item.id, label: item.name }))}
+          options={settings.presets.map((item) => ({
+            value: item.id,
+            label: factoryPresetLabel(item, copy),
+          }))}
         />
       </label>
       <MicLevelMeter live={recording} copy={copy} />

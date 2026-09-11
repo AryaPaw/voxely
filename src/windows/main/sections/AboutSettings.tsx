@@ -3,9 +3,34 @@ import { getVersion } from "@tauri-apps/api/app";
 import { toast } from "sonner";
 import { api } from "../../../lib/api";
 import { formatInvokeError, updateToast, type Messages } from "../../../lib/i18n";
+import { APP_RELEASED_ON, versionWithReleaseDate } from "../../../lib/release-meta";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
 import { SECTION_ICONS, sectionLabel } from "../sectionNav";
+
+function GithubLink({
+  label,
+  onOpen,
+  copy,
+}: {
+  label: string;
+  onOpen: () => Promise<void>;
+  copy: Messages;
+}) {
+  return (
+    <button
+      type="button"
+      className="text-primary underline-offset-2 hover:underline"
+      onClick={() => {
+        void onOpen().catch((error: unknown) => {
+          toast.error(formatInvokeError(error, copy));
+        });
+      }}
+    >
+      {label}
+    </button>
+  );
+}
 
 export function AboutSettings({ copy }: { copy: Messages }) {
   const [version, setVersion] = useState("");
@@ -23,7 +48,7 @@ export function AboutSettings({ copy }: { copy: Messages }) {
         <div>
           <p className="text-lg font-semibold">Voxely</p>
           <p className="text-sm text-muted-foreground">
-            {copy.aboutVersion}: {version || "…"}
+            {copy.aboutVersion}: {versionWithReleaseDate(version, APP_RELEASED_ON, copy.dateLocale)}
           </p>
         </div>
       </div>
@@ -35,17 +60,13 @@ export function AboutSettings({ copy }: { copy: Messages }) {
         <div>
           <dt className="inline text-muted-foreground">{copy.aboutGithub}: </dt>
           <dd className="inline">
-            <button
-              type="button"
-              className="text-primary underline-offset-2 hover:underline"
-              onClick={() => {
-                void api.openGithub().catch((error: unknown) => {
-                  toast.error(formatInvokeError(error, copy));
-                });
-              }}
-            >
-              {copy.githubRepo}
-            </button>
+            <GithubLink label={copy.githubRepo} copy={copy} onOpen={() => api.openGithub()} />
+            <span className="text-muted-foreground"> / </span>
+            <GithubLink
+              label={copy.githubIssues}
+              copy={copy}
+              onOpen={() => api.openGithub("issues")}
+            />
           </dd>
         </div>
       </dl>

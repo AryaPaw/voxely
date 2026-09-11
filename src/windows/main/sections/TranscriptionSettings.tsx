@@ -2,6 +2,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { api, type AppSettings } from "../../../lib/api";
 import type { Messages } from "../../../lib/i18n";
+import { speechLanguageOptions } from "../../../lib/speech-languages";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { SettingsField } from "../../../components/settings/SettingsField";
 import { SettingsSwitchRow } from "../../../components/settings/SettingsSwitchRow";
@@ -80,13 +81,14 @@ export function TranscriptionSettings({
           aria-label={copy.language}
           value={settings.language}
           onValueChange={(language) => onChange({ language })}
-          options={[
-            { value: "auto", label: copy.insertAuto },
-            { value: "ru", label: copy.uiRu },
-            { value: "en", label: copy.uiEn },
-          ]}
+          options={speechLanguageOptions(
+            copy.speechLanguageAuto,
+            copy.dateLocale,
+            settings.language,
+          )}
         />
       </SettingsField>
+      <p className="-mt-3 mb-4 max-w-lg text-xs text-muted-foreground">{copy.speechLanguageHint}</p>
       <SettingsSwitchRow
         label={copy.autoRetries}
         checked={settings.retry.automaticRetries}
