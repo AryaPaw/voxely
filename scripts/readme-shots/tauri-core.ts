@@ -2,7 +2,7 @@ import type { AppSettings, DspPreset, MeterSample, Recording, SessionState } fro
 
 const preset: DspPreset = {
   id: "stt-fast",
-  name: "Быстрая диктовка",
+  name: "Fast dictation",
   order: [
     { id: "highpass", kind: "highPass", enabled: true },
     { id: "gain", kind: "gain", enabled: true },
@@ -44,7 +44,7 @@ const settings: AppSettings = {
   inputDevice: "default",
   keepOriginalRecordings: true,
   theme: "dark",
-  language: "ru",
+  language: "en",
   model: "openai/gpt-transcribe",
   customModel: null,
   insertionMode: "unicode",
@@ -63,7 +63,7 @@ const settings: AppSettings = {
   activePresetId: "stt-fast",
   presets: [preset],
   firstRunComplete: true,
-  uiLanguage: "ru",
+  uiLanguage: "en",
   autoUpdateEnabled: true,
 };
 
@@ -74,7 +74,7 @@ const history: Recording[] = [
     durationMs: 8200,
     rawAudioPath: "a.wav",
     processedAudioPath: "b.wav",
-    transcript: "Открой вчерашний отчёт и пришли ссылку в чат.",
+    transcript: "Open yesterday's report and send the link in chat.",
     status: "completed",
     provider: "openrouter",
     model: "openai/gpt-transcribe",
@@ -91,7 +91,7 @@ const history: Recording[] = [
     durationMs: 5400,
     rawAudioPath: "c.wav",
     processedAudioPath: "d.wav",
-    transcript: "Напомни про созвон в пятницу в 11:00.",
+    transcript: "Remind me about the Friday call at 11:00.",
     status: "completed",
     provider: "openrouter",
     model: "openai/gpt-transcribe",
@@ -118,7 +118,10 @@ function sessionFromSearch(): SessionState {
 const meter: MeterSample = {
   rms: 0.14,
   peak: 0.38,
-  levels: Array.from({ length: 28 }, (_, index) => 0.18 + ((index % 7) / 18) * 0.45),
+  levels: [
+    0.05, 0.07, 0.1, 0.16, 0.28, 0.44, 0.36, 0.22, 0.3, 0.52, 0.4, 0.24, 0.14, 0.2, 0.34, 0.48,
+    0.38, 0.22, 0.12, 0.18, 0.26, 0.2, 0.12, 0.08, 0.06, 0.05, 0.04, 0.04,
+  ],
 };
 
 export async function invoke<T>(cmd: string): Promise<T> {
@@ -135,7 +138,7 @@ export async function invoke<T>(cmd: string): Promise<T> {
       return true as T;
     case "list_microphones":
       return [
-        { id: "mic-internal", name: "Микрофон ноутбука", isDefault: true },
+        { id: "mic-internal", name: "Laptop microphone", isDefault: true },
         { id: "mic-1", name: "Studio Mic", isDefault: false },
       ] as T;
     case "get_meter":

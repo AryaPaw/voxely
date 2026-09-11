@@ -5,7 +5,7 @@
 <h1 align="center">Voxely</h1>
 
 <p align="center">
-  Диктовка для Windows. Нажал хоткей, сказал фразу, текст оказался в том окне, где ты работал.
+  Windows dictation. Press the hotkey, speak, and the transcript lands in the window you started in.
 </p>
 
 <p align="center">
@@ -17,100 +17,98 @@
 </p>
 
 <p align="center">
-  <a href="#как-пользоваться">Как пользоваться</a>
+  <a href="#how-to-use">How to use</a>
   &nbsp;|&nbsp;
-  <a href="#установка">Установка</a>
+  <a href="#install">Install</a>
   &nbsp;|&nbsp;
-  <a href="#приватность">Приватность</a>
+  <a href="#privacy">Privacy</a>
   &nbsp;|&nbsp;
-  <a href="#для-разработчиков">Разработка</a>
+  <a href="#for-developers">Developers</a>
 </p>
 
 <p align="center">
-  <img src="docs/images/overlay.png" alt="Оверлей записи Voxely" width="720" />
+  <img src="docs/images/hud.png" alt="Voxely recording HUD" width="440" />
 </p>
 
-## Зачем это
+## Why Voxely
 
-Voxely живёт в трее. Ты пишешь в Cursor, Telegram или Word, жмёшь глобальный хоткей и говоришь. Программа записывает звук, чистит его фильтрами, отправляет в OpenRouter и вставляет расшифровку туда, где ты начал диктовку.
+Voxely lives in the tray. You keep typing in Cursor, Telegram, or Word, press a global hotkey, and speak. It records, runs speech filters, sends audio to OpenRouter, and inserts the transcript into the window where you started.
 
-Не надо переключаться в отдельное окно и не надо вручную копировать каждое предложение.
+No extra dictation window. No copying every sentence by hand.
 
-## Как это выглядит
+## Screenshots
 
 <p align="center">
-  <img src="docs/images/history.png" alt="История диктовок" width="800" />
+  <img src="docs/images/history.png" alt="Dictation history" width="800" />
 </p>
 
 <p align="center">
-  <img src="docs/images/general.png" alt="Глобальный хоткей и трей" width="48%" />
+  <img src="docs/images/general.png" alt="Global hotkey and tray" width="48%" />
   &nbsp;
-  <img src="docs/images/filters.png" alt="Фильтры микрофона" width="48%" />
+  <img src="docs/images/filters.png" alt="Microphone filters" width="48%" />
 </p>
 
 <p align="center">
-  <img src="docs/images/transcription.png" alt="Ключ OpenRouter и модель" width="48%" />
+  <img src="docs/images/transcription.png" alt="OpenRouter key and model" width="48%" />
   &nbsp;
-  <img src="docs/images/about.png" alt="О программе" width="48%" />
+  <img src="docs/images/about.png" alt="About Voxely" width="48%" />
 </p>
 
-## Как пользоваться
+## How to use
 
-1. Положи [API-ключ OpenRouter](https://openrouter.ai/) в **Расшифровка**. Ключ уходит в Windows Credential Manager, не в файл настроек.
-2. Кликни в поле, куда нужен текст.
-3. Нажми **Ctrl+Shift+Space** (хоткей можно сменить в **Общие**).
-4. Говори. Снизу экрана HUD показывает запись и уровень голоса.
-5. Нажми хоткей ещё раз, чтобы остановить. Расшифровка вставится в то окно, где ты начал.
-6. Наведи на HUD, если нужно **отменить** запись. Escape тоже отменяет.
+1. Put your [OpenRouter API key](https://openrouter.ai/) in **Transcription**. It is stored in Windows Credential Manager, not in the settings file.
+2. Click the field where the text should go.
+3. Press **Ctrl+Shift+Space** (change this in **General**).
+4. Speak. The HUD at the bottom of the screen shows recording and level.
+5. Press the hotkey again to stop. The transcript is inserted into the window you started in.
+6. Hover the HUD to **cancel**. Escape also cancels.
 
-История хранит расшифровки локально: можно копировать, слушать и искать по тексту.
+History keeps transcripts locally so you can copy, listen, and search.
 
-## Возможности
+## Features
 
-- Глобальный хоткей и работа из трея, без постоянного окна на переднем плане
-- Вставка в исходное окно через Unicode, либо только копирование в буфер, если так удобнее
-- HUD записи: волна, таймер, отмена наведением
-- Фильтры для речи: срез низов, усиление, шумоподавление, компрессор, лимитер
-- Сравнение оригинала и обработанного звука на одной громкости
-- Импорт цепочки фильтров из OBS
-- История, поиск, хранение на диске с лимитом места и сроком жизни
-- Русский и английский интерфейс, светлая, тёмная и системная тема
-- Автообновления с подписью Tauri, когда опубликован релиз
+- Global hotkey and tray-first workflow
+- Unicode insert into the captured window, or clipboard-only if you prefer to paste
+- Recording HUD: waveform, timer, hover to cancel
+- Speech filters: high-pass, gain, noise reduction, compressor, limiter
+- A/B listen of original vs processed audio at matched loudness
+- Import a filter chain from OBS
+- Local history, search, retention, and storage limits
+- English and Russian UI, light, dark, and system theme
+- Signed Tauri updates once a release is published
 
-## Установка
+## Install
 
-Нужен **Windows 11 x64**. При первом запуске установщик при необходимости подтянет WebView2.
+You need **Windows 11 x64**. The installer can fetch WebView2 on first run if it is missing.
 
-1. Скачай установщик с [Releases](https://github.com/AryaPaw/voxely/releases).
-2. Установи для текущего пользователя.
-3. Открой Voxely из меню «Пуск» или из трея.
-4. Добавь ключ OpenRouter и проверь соединение.
+1. Download the installer from [Releases](https://github.com/AryaPaw/voxely/releases).
+2. Install for the current user.
+3. Open Voxely from the Start menu or the tray.
+4. Add an OpenRouter key and test the connection.
 
-Модель по умолчанию: `openai/gpt-transcribe`. Список моделей подтягивается из OpenRouter.
+Default model: `openai/gpt-transcribe`. The model list comes from OpenRouter.
 
-Если Windows SmartScreen ругается на первый скачанный файл, это ожидаемо, пока нет Authenticode. Подпись обновлений Tauri при этом своя, отдельная.
+SmartScreen may warn on the first download until Authenticode signing is in place. Tauri updater signatures are separate.
 
-## Вставка текста
+## Text insertion
 
-В **Дополнительно** два режима вставки:
+**Advanced** has two insert modes:
 
-- **В окно (Unicode)** — программа печатает расшифровку в окно, которое было активно в начале записи. Это основной режим.
-- **Только буфер обмена** — текст копируется, вставка остаётся за тобой. Ctrl+V программа сама не шлёт.
+- **Into window (Unicode)** — types the transcript into the window that was focused when you started. This is the default.
+- **Clipboard only** — copies the text and does not paste. The app never sends Ctrl+V.
 
-Некоторые приложения (часть Chromium и редакторов) принимают Unicode хуже других. Если символы не появились, запись всё равно лежит в истории: скопируй оттуда или переключись на буфер.
+Some Chromium-based apps accept Unicode poorly. If nothing appears, the recording is still in History: copy it there, or switch to clipboard mode.
 
-## Приватность
+## Privacy
 
-- API-ключ лежит в Windows Credential Manager, не в git и не в SQLite
-- Аудио и история живут в `%APPDATA%\Voxely`
-- Расшифровка идёт через OpenRouter: звук уходит к выбранной модели, ключ не светится в логах
-- Оверлей не перехватывает фокус и не подменяет чужое окно при вставке
+- The API key stays in Windows Credential Manager, not git or SQLite
+- Audio and history live in `%APPDATA%\Voxely`
+- Transcription goes through OpenRouter; logs omit the key
+- The overlay does not steal focus and will not type into a different app
 
-Подробности для аудита: [`docs/SECURITY.md`](docs/SECURITY.md).
+Audit notes: [`docs/SECURITY.md`](docs/SECURITY.md).
 
-## Для разработчиков
-
-Сборка и проверки:
+## For developers
 
 ```text
 bun install
@@ -118,20 +116,18 @@ bun run tauri dev
 bun run verify
 ```
 
-Нужны Bun 1.4+, Rust stable и Visual Studio 2022 Build Tools с C++.
-
-Удобный запуск:
+Needs Bun 1.4+, Rust stable, and Visual Studio 2022 Build Tools with C++.
 
 ```powershell
 .\scripts\dev.ps1
 ```
 
-Архитектура, релиз и пайплайн звука: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/RELEASE.md`](docs/RELEASE.md), [`docs/OPENROUTER.md`](docs/OPENROUTER.md).
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/RELEASE.md`](docs/RELEASE.md), and [`docs/OPENROUTER.md`](docs/OPENROUTER.md).
 
-Скриншоты README снимаются с реального UI через мок Tauri:
+Refresh README screenshots from the real UI with a Tauri mock:
 
 ```text
-bunx vite --config scripts/readme-shots/vite.config.ts
+bun run docs:shots
 ```
 
-Лицензия: [AGPL-3.0](LICENSE).
+License: [AGPL-3.0](LICENSE).

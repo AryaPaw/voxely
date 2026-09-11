@@ -17,9 +17,18 @@ export default defineConfig({
       html.shot-overlay,
       html.shot-overlay body,
       html.shot-overlay #root {
+        display: flex;
+        align-items: center;
+        justify-content: center;
         background:
-          radial-gradient(1200px 480px at 50% 20%, rgb(36 52 78), transparent 62%),
+          radial-gradient(720px 280px at 50% 35%, rgb(36 52 78), transparent 64%),
           linear-gradient(180deg, rgb(18 22 30), rgb(10 12 16)) !important;
+      }
+      html.shot-overlay .overlay-shell {
+        width: 440px;
+        height: 108px;
+        padding: 22px 20px 28px;
+        flex: none;
       }
     </style>
     <script>
