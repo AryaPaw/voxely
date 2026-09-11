@@ -39,19 +39,19 @@ No extra dictation window. No copying every sentence by hand.
 ## Screenshots
 
 <p align="center">
-  <img src="docs/images/history.png" alt="Dictation history" width="800" />
+  <img src="docs/images/shot-history.png" alt="Dictation history" width="800" />
 </p>
 
 <p align="center">
-  <img src="docs/images/general.png" alt="Global hotkey and tray" width="48%" />
+  <img src="docs/images/shot-general.png" alt="Global hotkey and tray" width="48%" />
   &nbsp;
-  <img src="docs/images/filters.png" alt="Microphone filters" width="48%" />
+  <img src="docs/images/shot-filters.png" alt="Microphone filters" width="48%" />
 </p>
 
 <p align="center">
-  <img src="docs/images/transcription.png" alt="OpenRouter key and model" width="48%" />
+  <img src="docs/images/shot-transcription.png" alt="OpenRouter key and model" width="48%" />
   &nbsp;
-  <img src="docs/images/about.png" alt="About Voxely" width="48%" />
+  <img src="docs/images/shot-about.png" alt="About Voxely" width="48%" />
 </p>
 
 ## How to use
