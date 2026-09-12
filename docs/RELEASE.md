@@ -28,6 +28,6 @@ bun run tauri build
 
 ## Publish
 
-Push a `vX.Y.Z` tag only after manifests already contain `X.Y.Z`. The release workflow builds signed NSIS, runs installer smoke, then publishes one GitHub Release named `Voxely X.Y.Z`. It must not leave a leftover draft.
+Push a `vX.Y.Z` tag only after manifests already contain `X.Y.Z`. The release workflow builds signed NSIS, runs installer smoke, then publishes one GitHub Release named `vX.Y.Z`. It must not leave a leftover draft.
 
 Rollback: keep the previous NSIS and do not move `latest`. A failed update must leave the running app intact.
