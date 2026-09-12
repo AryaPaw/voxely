@@ -97,7 +97,10 @@ pub fn cleanup_orphans(audio_root: &Path, repo: &HistoryRepo) -> Result<(), AppE
             let _ = std::fs::remove_file(entry.path());
             continue;
         }
-        if !keep.contains(&name) && name.ends_with(".wav") {
+        if !keep.contains(&name)
+            && name.ends_with(".wav")
+            && !crate::app::compare::keep_compare_wav(&name)
+        {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -119,6 +122,22 @@ mod tests {
         let deleted = apply_retention(&repo, dir.path(), Retention::Days(7), None).unwrap();
         assert!(deleted.is_empty());
         assert_eq!(repo.list(10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn cleanup_keeps_filter_and_compare_wavs() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("h.db")).unwrap();
+        let audio = dir.path();
+        std::fs::write(audio.join("filter-sample.wav"), b"a").unwrap();
+        std::fs::write(audio.join("filter-preview.wav"), b"b").unwrap();
+        std::fs::write(audio.join("model-compare.stt.wav"), b"c").unwrap();
+        std::fs::write(audio.join("orphan.wav"), b"d").unwrap();
+        cleanup_orphans(audio, &repo).unwrap();
+        assert!(audio.join("filter-sample.wav").exists());
+        assert!(audio.join("filter-preview.wav").exists());
+        assert!(audio.join("model-compare.stt.wav").exists());
+        assert!(!audio.join("orphan.wav").exists());
     }
 
     #[test]

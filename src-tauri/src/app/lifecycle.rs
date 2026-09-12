@@ -1,15 +1,55 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, PhysicalPosition, Position};
+
+use tauri_plugin_autostart::ManagerExt;
 
 use crate::app::overlay::{center_physical_position, WorkArea};
 use crate::app::session::AppContext;
 use crate::app::shortcuts::sync_shortcuts;
 use crate::error::AppError;
 use crate::windows_int::overlay::work_area_for_cursor;
+
+pub fn is_local_build() -> bool {
+    cfg!(debug_assertions)
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeInfo {
+    pub local_build: bool,
+}
+
+pub fn runtime_info() -> RuntimeInfo {
+    RuntimeInfo {
+        local_build: is_local_build(),
+    }
+}
+
+pub fn app_display_name(locale: &str) -> &'static str {
+    if !is_local_build() {
+        return "Voxely";
+    }
+    if locale == "en" {
+        "Voxely (local)"
+    } else {
+        "Voxely (локальная)"
+    }
+}
+
+fn apply_app_identity(app: &AppHandle, locale: &str) {
+    let name = app_display_name(locale);
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_title(name);
+    }
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(name));
+    }
+}
 
 pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
     let locale = {
@@ -33,6 +73,7 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
     if let Some(tray) = app.tray_by_id("main") {
         tray.set_menu(Some(menu))
             .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        apply_app_identity(app, &locale);
         return Ok(());
     }
     let icon = app
@@ -41,7 +82,7 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
         .ok_or_else(|| AppError::StorageFailed("missing tray icon".into()))?;
     TrayIconBuilder::with_id("main")
         .icon(icon)
-        .tooltip("Voxely")
+        .tooltip(app_display_name(&locale))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -61,6 +102,7 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
         })
         .build(app)
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    apply_app_identity(app, &locale);
     Ok(())
 }
 
@@ -73,14 +115,44 @@ pub fn tray_labels(locale: &str) -> (&'static str, &'static str) {
 }
 
 pub fn should_hide_on_launch(args: impl IntoIterator<Item = impl AsRef<str>>) -> bool {
-    args.into_iter().any(|arg| arg.as_ref() == "--autostart")
+    args.into_iter().any(|arg| {
+        arg.as_ref()
+            .split(char::is_whitespace)
+            .any(|part| part == "--autostart")
+    })
+}
+
+pub fn hide_main_to_tray(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+        let _ = window.set_skip_taskbar(true);
+    }
+}
+
+pub fn apply_launch_visibility(app: &AppHandle, args: impl IntoIterator<Item = impl AsRef<str>>) {
+    if should_hide_on_launch(args) {
+        hide_main_to_tray(app);
+        return;
+    }
+    center_main_window(app);
+    show_main(app, "/");
 }
 
 pub fn show_main(app: &AppHandle, _route: &str) {
     if let Some(window) = app.get_webview_window("main") {
+        let _ = window.set_skip_taskbar(false);
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+pub fn sync_autostart(app: &AppHandle, start_with_windows: bool) {
+    let autostart = app.autolaunch();
+    if start_with_windows {
+        let _ = autostart.enable();
+    } else {
+        let _ = autostart.disable();
     }
 }
 
@@ -167,8 +239,32 @@ mod tests {
     }
 
     #[test]
+    fn local_debug_build_marks_the_app_name() {
+        if is_local_build() {
+            assert_eq!(app_display_name("en"), "Voxely (local)");
+            assert_eq!(app_display_name("ru"), "Voxely (локальная)");
+        } else {
+            assert_eq!(app_display_name("en"), "Voxely");
+            assert_eq!(app_display_name("ru"), "Voxely");
+        }
+        assert_eq!(runtime_info().local_build, is_local_build());
+    }
+
+    #[test]
     fn autostart_hides_main_window() {
         assert!(should_hide_on_launch(["voxely.exe", "--autostart"]));
+        assert!(should_hide_on_launch([
+            r#"C:\Users\AryaPaw\AppData\Local\Voxely\voxely.exe --autostart"#
+        ]));
         assert!(!should_hide_on_launch(["voxely.exe"]));
+        assert!(!should_hide_on_launch(["voxely.exe", "--open"]));
+    }
+
+    #[test]
+    fn second_autostart_instance_does_not_request_focus() {
+        assert!(should_hide_on_launch([
+            "C:\\Program Files\\Voxely\\voxely.exe",
+            "--autostart"
+        ]));
     }
 }

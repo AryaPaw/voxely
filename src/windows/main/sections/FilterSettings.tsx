@@ -151,6 +151,17 @@ export function FilterSettings({
               patchPreset({ ...preset, order: setSlot(preset.order, "rnnoise", enabled) })
             }
           />
+          <TuneSlider
+            label={copy.filterRnnoiseMix.replace(
+              "{value}",
+              String(Math.round((preset.rnnoiseMix ?? 1) * 100)),
+            )}
+            min={0}
+            max={1}
+            step={0.05}
+            value={preset.rnnoiseMix ?? 1}
+            onChange={(rnnoiseMix) => patchPreset({ ...preset, rnnoiseMix })}
+          />
           <SettingsSwitchRow
             label={copy.filterCompressor}
             checked={slotEnabled(preset, "compressor")}
@@ -320,8 +331,13 @@ const FilterPreviewPlayer = memo(function FilterPreviewPlayer({
         </Button>
         <Button onClick={() => playSide("processed")}>{copy.playProcessed}</Button>
       </div>
-      <audio ref={originalRef} preload="auto" src={originalSrc} />
-      <audio ref={processedRef} preload="auto" src={processedSrc} />
+      <audio key={`${preview.nonce}-original`} ref={originalRef} preload="auto" src={originalSrc} />
+      <audio
+        key={`${preview.nonce}-processed`}
+        ref={processedRef}
+        preload="auto"
+        src={processedSrc}
+      />
     </div>
   );
 });

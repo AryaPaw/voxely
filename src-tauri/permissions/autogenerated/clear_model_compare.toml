@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-clear-model-compare"
+description = "Enables the clear_model_compare command without any pre-configured scope."
+commands.allow = ["clear_model_compare"]
+
+[[permission]]
+identifier = "deny-clear-model-compare"
+description = "Denies the clear_model_compare command without any pre-configured scope."
+commands.deny = ["clear_model_compare"]

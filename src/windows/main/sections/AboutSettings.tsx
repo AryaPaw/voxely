@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { toast } from "sonner";
 import { api } from "../../../lib/api";
-import { formatInvokeError, updateToast, type Messages } from "../../../lib/i18n";
+import { formatInvokeError, updateToast, type Messages, appDisplayName } from "../../../lib/i18n";
 import { APP_RELEASED_ON, versionWithReleaseDate } from "../../../lib/release-meta";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
@@ -32,7 +32,7 @@ function GithubLink({
   );
 }
 
-export function AboutSettings({ copy }: { copy: Messages }) {
+export function AboutSettings({ copy, localBuild }: { copy: Messages; localBuild: boolean }) {
   const [version, setVersion] = useState("");
   const [checking, setChecking] = useState(false);
 
@@ -46,7 +46,7 @@ export function AboutSettings({ copy }: { copy: Messages }) {
       <div className="mb-6 flex items-center gap-4">
         <img src="/favicon.png" alt="" className="h-16 w-16 rounded-2xl" />
         <div>
-          <p className="text-lg font-semibold">Voxely</p>
+          <p className="text-lg font-semibold">{appDisplayName(copy, localBuild)}</p>
           <p className="text-sm text-muted-foreground">
             {copy.aboutVersion}: {versionWithReleaseDate(version, APP_RELEASED_ON, copy.dateLocale)}
           </p>

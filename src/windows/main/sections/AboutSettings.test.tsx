@@ -14,8 +14,9 @@ afterEach(() => cleanup());
 
 describe("AboutSettings", () => {
   it("shows runtime version, author, GitHub and manual update", async () => {
-    render(<AboutSettings copy={messagesFor("en")} />);
+    render(<AboutSettings copy={messagesFor("en")} localBuild={false} />);
     expect(await screen.findByText(/Version: 0\.1\.0 \(.+2026\)/)).toBeInTheDocument();
+    expect(screen.getByText("Voxely")).toBeInTheDocument();
     expect(screen.getByText("AryaPaw")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "AryaPaw/voxely" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Issues" })).toBeInTheDocument();

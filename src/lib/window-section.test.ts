@@ -8,7 +8,9 @@ describe("sectionFromSearch", () => {
   });
 
   it("reads a known settings section", () => {
-    expect(sectionFromSearch("?section=filters")).toBe("filters");
+    expect(sectionFromSearch("?section=compare")).toBe("compare");
+    expect(sectionFromSearch("?section=debug")).toBe("history");
+    expect(sectionFromSearch("?section=debug", true)).toBe("debug");
     expect(sectionFromSearch("?overlay&section=about")).toBe("about");
   });
 

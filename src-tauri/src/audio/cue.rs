@@ -13,10 +13,6 @@ const DECAY_S: f32 = 0.12;
 const ENV_FLOOR: f32 = 1e-4;
 const FRONT_CHANNELS: usize = 2;
 
-const CANCEL_ATTACK_S: f32 = 0.012;
-const CANCEL_DECAY_S: f32 = 0.038;
-const CANCEL_GAP_S: f32 = 0.04;
-
 pub fn cue_envelope(t: f32) -> f32 {
     envelope_at(t, ATTACK_S, DECAY_S, CUE_PEAK)
 }
@@ -39,8 +35,8 @@ fn envelope_at(t: f32, attack: f32, decay: f32, peak: f32) -> f32 {
 
 pub fn cue_hz(kind: CueKind) -> f32 {
     match kind {
-        CueKind::Start | CueKind::Cancel => 880.0,
-        CueKind::Stop => 698.46,
+        CueKind::Start => 880.0,
+        CueKind::Cancel | CueKind::Stop => 415.3,
     }
 }
 
@@ -69,29 +65,60 @@ fn normalize_peak(samples: &mut [f32]) {
     }
 }
 
-fn rms(samples: &[f32]) -> f32 {
-    if samples.is_empty() {
-        return 0.0;
+fn cue_energy(samples: &[f32]) -> f32 {
+    samples.iter().map(|sample| sample * sample).sum()
+}
+
+fn match_start_energy(samples: &mut [f32], start: &[f32]) {
+    let target = cue_energy(start);
+    let current = cue_energy(samples);
+    if current > 1e-12 {
+        let gain = (target / current).sqrt();
+        for sample in samples {
+            *sample *= gain;
+        }
     }
-    let sum: f32 = samples.iter().map(|sample| sample * sample).sum();
-    (sum / samples.len() as f32).sqrt()
+}
+
+fn cancel_cut(sample_rate: u32) -> Vec<f32> {
+    let duration = ATTACK_S + DECAY_S;
+    let n = ((f64::from(duration) * f64::from(sample_rate)) as usize).max(1);
+    let sr = sample_rate as f32;
+    let mut samples = vec![0.0; n];
+    let mut phase = 0.0f32;
+    let f0 = cue_hz(CueKind::Cancel);
+    let f1 = 311.13;
+    for (i, sample) in samples.iter_mut().enumerate() {
+        let t = i as f32 / sr;
+        let p = (t / duration).clamp(0.0, 1.0);
+        let freq = f0 + (f1 - f0) * p * p;
+        phase += freq * 2.0 * std::f32::consts::PI / sr;
+        *sample = phase.sin() * envelope_at(t, ATTACK_S, DECAY_S, CUE_PEAK);
+    }
+    samples
+}
+
+pub fn parse_cue_kind(kind: &str) -> Result<CueKind, AppError> {
+    match kind {
+        "start" => Ok(CueKind::Start),
+        "stop" => Ok(CueKind::Stop),
+        "cancel" => Ok(CueKind::Cancel),
+        _ => Err(AppError::RequestValidationFailed("unknown cue".into())),
+    }
 }
 
 pub fn cue_samples(kind: CueKind, sample_rate: u32) -> Vec<f32> {
-    let mut samples = match kind {
-        CueKind::Start => ping_tone(cue_hz(kind), sample_rate, ATTACK_S, DECAY_S),
-        CueKind::Stop => ping_tone(cue_hz(kind), sample_rate, ATTACK_S, DECAY_S),
-        CueKind::Cancel => {
-            let blip = ping_tone(cue_hz(kind), sample_rate, CANCEL_ATTACK_S, CANCEL_DECAY_S);
-            let gap = ((CANCEL_GAP_S * sample_rate as f32) as usize).max(1);
-            let mut out = blip.clone();
-            out.extend(std::iter::repeat(0.0).take(gap));
-            out.extend(blip);
-            out
+    let mut start = ping_tone(cue_hz(CueKind::Start), sample_rate, ATTACK_S, DECAY_S);
+    normalize_peak(&mut start);
+    match kind {
+        CueKind::Start => start,
+        CueKind::Stop | CueKind::Cancel => {
+            let mut samples = cancel_cut(sample_rate);
+            normalize_peak(&mut samples);
+            match_start_energy(&mut samples, &start);
+            samples
         }
-    };
-    normalize_peak(&mut samples);
-    samples
+    }
 }
 
 pub fn write_cue_channels(frame: &mut [f32], value: f32) {
@@ -228,42 +255,35 @@ mod tests {
     }
 
     #[test]
-    fn start_stop_cancel_share_peak_in_the_same_register() {
+    fn stop_and_cancel_match_start_energy() {
         let start = cue_samples(CueKind::Start, 48_000);
         let stop = cue_samples(CueKind::Stop, 48_000);
         let cancel = cue_samples(CueKind::Cancel, 48_000);
+        let start_energy = cue_energy(&start);
         let start_db = cue_peak_db(&start);
-        let stop_db = cue_peak_db(&stop);
-        let cancel_db = cue_peak_db(&cancel);
-        assert!(
-            (start_db - stop_db).abs() < 0.2,
-            "start {start_db} stop {stop_db}"
-        );
-        assert!(
-            (start_db - cancel_db).abs() < 0.2,
-            "start {start_db} cancel {cancel_db}"
-        );
+        assert!((cue_energy(&stop) - start_energy).abs() / start_energy < 0.02);
+        assert!((cue_energy(&cancel) - start_energy).abs() / start_energy < 0.02);
+        assert!(cue_peak_db(&stop) <= start_db + 0.05);
+        assert!(cue_peak_db(&cancel) <= start_db + 0.05);
         assert_eq!(cue_hz(CueKind::Start), 880.0);
-        assert_eq!(cue_hz(CueKind::Stop), 698.46);
-        assert_eq!(cue_hz(CueKind::Cancel), 880.0);
+        assert_eq!(cue_hz(CueKind::Stop), cue_hz(CueKind::Cancel));
+        assert_eq!(cue_hz(CueKind::Cancel), 415.3);
+        assert_eq!(&stop, &cancel);
         assert_ne!(&start, &stop);
-        assert_ne!(&start, &cancel);
-        assert!(start.len() >= 48_000 / 10);
+        assert_eq!(stop.len(), start.len());
+        assert_eq!(cancel.len(), start.len());
     }
 
     #[test]
-    fn cancel_is_two_short_pings_without_a_long_tail() {
-        let samples = cue_samples(CueKind::Cancel, 48_000);
-        let blip = ((CANCEL_ATTACK_S + CANCEL_DECAY_S) * 48_000.0) as usize;
-        let gap_n = (CANCEL_GAP_S * 48_000.0) as usize;
-        let first = rms(&samples[..blip]);
-        let gap = rms(&samples[blip..blip + gap_n]);
-        let second = rms(&samples[blip + gap_n..]);
-        assert!(first > 0.05, "first ping rms {first}");
-        assert!(second > 0.05, "second ping rms {second}");
-        assert!(gap < first * 0.12, "gap {gap} first {first}");
-        assert!(gap < second * 0.12, "gap {gap} second {second}");
-        assert_eq!(samples.len(), blip * 2 + gap_n);
+    fn stop_and_cancel_are_not_the_start_ping() {
+        let start = cue_samples(CueKind::Start, 48_000);
+        let stop = cue_samples(CueKind::Stop, 48_000);
+        let cancel = cue_samples(CueKind::Cancel, 48_000);
+        assert_eq!(&stop, &cancel);
+        assert_ne!(&start, &cancel);
+        assert!(cancel.iter().all(|s| s.abs() <= CUE_PEAK + 1e-5));
+        assert_eq!(parse_cue_kind("stop").unwrap(), CueKind::Stop);
+        assert!(parse_cue_kind("nope").is_err());
     }
 
     #[test]

@@ -9,6 +9,7 @@ export function resolveUiLocale(uiLanguage: string, navigatorLanguage = "en"): U
 
 const ru = {
   navHistory: "История",
+  navCompare: "Сравнение",
   navGeneral: "Общие",
   navAudio: "Микрофон",
   navFilters: "Фильтры",
@@ -16,7 +17,26 @@ const ru = {
   navStorage: "Хранение",
   navAppearance: "Внешний вид",
   navAdvanced: "Дополнительно",
+  navDebug: "Отладка",
   navAbout: "О программе",
+  compareIntro:
+    "Один клип, несколько моделей OpenRouter рядом. Это не идёт в историю и не вставляется в другое окно.",
+  compareRecord: "Записать клип",
+  compareStop: "Стоп",
+  compareRun: "Сравнить",
+  compareAddModel: "Добавить модель",
+  compareRemoveModel: "Убрать",
+  compareMakeDefault: "Сделать основной",
+  compareNoKey: "Сначала добавьте API-ключ на странице расшифровки.",
+  compareNoClip: "Сначала запишите клип.",
+  compareBusy: "Сначала остановите диктовку или запись фильтра.",
+  compareSlotError: "Ошибка",
+  compareAttempt: "Попытка {value}",
+  debugCues: "Звуки диктовки",
+  debugCueIntro: "Проверьте сигналы старта, конца записи и отмены. HUD при этом не открывается.",
+  debugCueStart: "Старт",
+  debugCueStop: "Конец записи",
+  debugCueCancel: "Отмена",
   historyTitle: "История",
   historyHint: "Диктовки хранятся локально на этом компьютере.",
   search: "Поиск по расшифровкам",
@@ -30,7 +50,7 @@ const ru = {
   copied: "Скопировано",
   filtersTitle: "Фильтры",
   filtersIntro:
-    "Запишите короткую фразу на этой странице, включите нужные фильтры и сравните две кнопки. По умолчанию включены только лёгкий срез низов и чуть громкости, поэтому разница едва слышна. Чтобы услышать шум и динамику, включите шумоподавление и компрессор. Обе версии для прослушивания выровнены по громкости.",
+    "Запишите короткую фразу на этой странице, включите нужные фильтры и сравните две кнопки. По умолчанию включены только лёгкий срез низов и чуть громкости, поэтому разница едва слышна. Чтобы услышать шум и динамику, включите шумоподавление и компрессор. Обе кнопки используют одну громкость прослушивания, поэтому усиление и компрессор остаются слышны. Это тот же звук, что в истории, без сжатия для расшифровки.",
   recordSample: "Записать образец",
   stopSample: "Стоп",
   recordingSample: "Говорите… затем нажмите Стоп",
@@ -132,7 +152,7 @@ const ru = {
   limit1gb: "1 ГБ",
   limit5gb: "5 ГБ",
   limitUnlimited: "Без лимита",
-  keepOriginals: "Хранить исходные записи (лучше для прослушивания)",
+  keepOriginals: "Хранить исходные записи (для повторной обработки)",
   deleteAllHistory: "Удалить всю историю",
   deleteAllConfirm: "Удалить всю историю?",
   deleteAllCannotUndo: "Это нельзя отменить.",
@@ -179,6 +199,7 @@ const ru = {
   clippingWarning: "Клиппинг",
   noFilterSample: "Сначала запишите образец на этой странице.",
   filterRnnoise: "Шумоподавление",
+  filterRnnoiseMix: "Смесь шумоподавления {value}%",
   filterCompressor: "Компрессор",
   filterExpander: "Экспандер",
   filterGate: "Гейт",
@@ -199,6 +220,8 @@ const ru = {
   aboutVersion: "Версия",
   aboutGithub: "GitHub",
   authorName: "AryaPaw",
+  appName: "Voxely",
+  appNameLocal: "Voxely (локальная)",
   githubRepo: "AryaPaw/voxely",
   githubIssues: "Issues",
   loadFailed: "Не удалось загрузить настройки",
@@ -214,6 +237,7 @@ const ru = {
 
 const en = {
   navHistory: "History",
+  navCompare: "Compare",
   navGeneral: "General",
   navAudio: "Microphone",
   navFilters: "Filters",
@@ -221,7 +245,26 @@ const en = {
   navStorage: "Storage",
   navAppearance: "Appearance",
   navAdvanced: "Advanced",
+  navDebug: "Debug",
   navAbout: "About",
+  compareIntro:
+    "One clip, several OpenRouter models side by side. This does not go into history and is not inserted into another window.",
+  compareRecord: "Record clip",
+  compareStop: "Stop",
+  compareRun: "Compare",
+  compareAddModel: "Add model",
+  compareRemoveModel: "Remove",
+  compareMakeDefault: "Set as default",
+  compareNoKey: "Add an API key on the transcription page first.",
+  compareNoClip: "Record a clip first.",
+  compareBusy: "Stop dictation or the filter sample first.",
+  compareSlotError: "Error",
+  compareAttempt: "Attempt {value}",
+  debugCues: "Dictation cues",
+  debugCueIntro: "Play the start, stop, and cancel cues. This does not open the HUD.",
+  debugCueStart: "Start",
+  debugCueStop: "End of recording",
+  debugCueCancel: "Cancel",
   historyTitle: "History",
   historyHint: "Dictations stay on this computer.",
   search: "Search transcripts",
@@ -235,7 +278,7 @@ const en = {
   copied: "Copied",
   filtersTitle: "Filters",
   filtersIntro:
-    "Record a short phrase here, enable the filters you want, then compare the two buttons. The default preset is only a light low cut and a little gain, so the difference is subtle. Turn on noise reduction and compressor to hear a clearer change. Both listen versions are loudness-matched.",
+    "Record a short phrase here, enable the filters you want, then compare the two buttons. The default preset is only a light low cut and a little gain, so the difference is subtle. Turn on noise reduction and compressor to hear a clearer change. Both buttons share one listen gain, so extra gain and compression stay audible. This is the same audio as History, not the downsampled STT file.",
   recordSample: "Record sample",
   stopSample: "Stop",
   recordingSample: "Speak… then press Stop",
@@ -338,7 +381,7 @@ const en = {
   limit1gb: "1 GB",
   limit5gb: "5 GB",
   limitUnlimited: "Unlimited",
-  keepOriginals: "Keep original recordings (better for playback)",
+  keepOriginals: "Keep original recordings (for reprocessing)",
   deleteAllHistory: "Delete all history",
   deleteAllConfirm: "Delete all history?",
   deleteAllCannotUndo: "This cannot be undone.",
@@ -385,6 +428,7 @@ const en = {
   clippingWarning: "Clipping",
   noFilterSample: "Record a sample on this page first.",
   filterRnnoise: "Noise reduction",
+  filterRnnoiseMix: "Noise reduction mix {value}%",
   filterCompressor: "Compressor",
   filterExpander: "Expander",
   filterGate: "Gate",
@@ -406,6 +450,8 @@ const en = {
   aboutVersion: "Version",
   aboutGithub: "GitHub",
   authorName: "AryaPaw",
+  appName: "Voxely",
+  appNameLocal: "Voxely (local)",
   githubRepo: "AryaPaw/voxely",
   githubIssues: "Issues",
   loadFailed: "Could not load settings",
@@ -424,6 +470,14 @@ export function applyUiLocale(locale: UiLocale): void {
 }
 
 export type Messages = typeof ru;
+
+export function isLocalBuild(): boolean {
+  return import.meta.env.DEV;
+}
+
+export function appDisplayName(copy: Messages, local = isLocalBuild()): string {
+  return local ? copy.appNameLocal : copy.appName;
+}
 
 export function factoryPresetLabel(preset: { id: string; name: string }, copy: Messages): string {
   switch (preset.id) {

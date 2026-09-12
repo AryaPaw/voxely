@@ -36,6 +36,8 @@ describe("OverlayApp", () => {
     expect(screen.getByText(/Cancel recording|Отменить запись/)).toHaveClass("overlay-center");
     expect(pill.querySelector(".overlay-wave")).toBeNull();
     expect(pill.querySelector(".overlay-dot")).toBeNull();
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(invoke).not.toHaveBeenCalledWith("cancel_dictation");
     fireEvent.click(pill);
     expect(invoke).toHaveBeenCalledWith("cancel_dictation");
     fireEvent.mouseLeave(pill);

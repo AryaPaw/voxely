@@ -79,6 +79,7 @@ export interface DspPreset {
     sampleRate: number;
   };
   limiter: { thresholdDb: number; releaseMs: number; sampleRate: number };
+  rnnoiseMix: number;
 }
 
 export interface MicTune {
@@ -129,6 +130,7 @@ export interface AppSettings {
   micTune?: MicTune;
   uiLanguage?: string;
   autoUpdateEnabled?: boolean;
+  compareModels?: string[];
 }
 
 export interface MeterSample {
@@ -137,9 +139,36 @@ export interface MeterSample {
   levels?: number[];
 }
 
+export interface CompareSlot {
+  model: string;
+  status: string;
+  text: string | null;
+  error: string | null;
+  attempt: number;
+  cost: number | null;
+  latencyMs: number | null;
+}
+
+export interface CompareState {
+  recording: boolean;
+  running: boolean;
+  nonce: number;
+  listenPath: string | null;
+  sttPath: string | null;
+  runId: string | null;
+  slots: CompareSlot[];
+}
+
+export type CueKind = "start" | "stop" | "cancel";
+
+export interface RuntimeInfo {
+  localBuild: boolean;
+}
+
 export const api = {
   session: () => invoke<SessionState>("get_session_state"),
   settings: () => invoke<AppSettings>("get_settings"),
+  runtimeInfo: () => invoke<RuntimeInfo>("get_runtime_info"),
   saveSettings: (settings: AppSettings) => invoke<AppSettings>("save_settings", { settings }),
   history: () => invoke<Recording[]>("list_history"),
   recording: (id: string) => invoke<Recording | null>("get_recording", { id }),
@@ -173,4 +202,10 @@ export const api = {
   audioPath: (id: string) => invoke<string | null>("recording_audio_url", { id }),
   openAudioDir: () => invoke<void>("open_audio_dir"),
   openGithub: (page?: string) => invoke<void>("open_github", { page }),
+  startModelCompare: () => invoke<void>("start_model_compare"),
+  stopModelCompare: () => invoke<CompareState>("stop_model_compare"),
+  runModelCompare: () => invoke<CompareState>("run_model_compare"),
+  getModelCompare: () => invoke<CompareState>("get_model_compare"),
+  clearModelCompare: () => invoke<void>("clear_model_compare"),
+  playCue: (kind: CueKind) => invoke<void>("play_cue", { kind }),
 };

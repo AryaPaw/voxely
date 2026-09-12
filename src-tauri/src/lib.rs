@@ -22,8 +22,8 @@ use tauri_plugin_autostart::MacosLauncher;
 use tracing_subscriber::EnvFilter;
 
 use crate::app::lifecycle::{
-    attach_context, center_main_window, configure_tray, reregister_hotkey, should_hide_on_launch,
-    show_main,
+    apply_launch_visibility, attach_context, configure_tray, hide_main_to_tray, reregister_hotkey,
+    should_hide_on_launch, show_main, sync_autostart,
 };
 use crate::app::session::AppContext;
 use crate::commands::*;
@@ -47,10 +47,13 @@ fn init_logging(debug: bool, log_dir: Option<&Path>) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            if should_hide_on_launch(&args) {
+                return;
+            }
             show_main(app, "/");
         }))
+        .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -62,21 +65,17 @@ pub fn run() {
             let ctx = attach_context(app.handle())?;
             let hotkey = ctx.settings.lock().hotkey.clone();
             let debug = ctx.settings.lock().debug_logging;
+            let start_with_windows = ctx.settings.lock().start_with_windows;
             let logs = ctx.data_dir.join("logs");
             init_logging(debug, Some(&logs));
             app.manage(ctx);
             configure_tray(app.handle())?;
+            sync_autostart(app.handle(), start_with_windows);
             crate::updates::spawn_background_loop(app.handle().clone());
             if let Err(err) = reregister_hotkey(app.handle(), &hotkey) {
                 tracing::error!(error = %err, "hotkey failed");
             }
-            if should_hide_on_launch(std::env::args()) {
-                if let Some(window) = app.get_webview_window("main") {
-                    let _ = window.hide();
-                }
-            } else {
-                center_main_window(app.handle());
-            }
+            apply_launch_visibility(app.handle(), std::env::args());
             if let Some(window) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
                 window.on_window_event(move |event| {
@@ -84,9 +83,7 @@ pub fn run() {
                         let ctx = handle.state::<Arc<AppContext>>();
                         if ctx.settings.lock().close_to_tray {
                             api.prevent_close();
-                            if let Some(w) = handle.get_webview_window("main") {
-                                let _ = w.hide();
-                            }
+                            hide_main_to_tray(&handle);
                         }
                     }
                 });
@@ -129,7 +126,14 @@ pub fn run() {
             recording_audio_url,
             cancel_dictation,
             set_hotkey_capture,
-            open_github
+            open_github,
+            start_model_compare,
+            stop_model_compare,
+            run_model_compare,
+            get_model_compare,
+            clear_model_compare,
+            get_runtime_info,
+            play_cue
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|err| {

@@ -1,5 +1,8 @@
 use crate::dsp::metrics::SAMPLE_RATE;
 use crate::error::AppError;
+use rubato::{
+    Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
+};
 
 pub fn to_mono(frames: &[f32], channels: usize) -> Vec<f32> {
     if channels <= 1 {
@@ -24,6 +27,51 @@ pub fn f32_to_i16(samples: &[f32]) -> Vec<i16> {
 
 pub fn resample_to_48k(input: &[f32], input_rate: u32) -> Result<Vec<f32>, AppError> {
     Ok(resample_linear(input, input_rate, SAMPLE_RATE))
+}
+
+pub fn resample_sinc(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
+    if input.is_empty() {
+        return Vec::new();
+    }
+    if input_rate == 0 || output_rate == 0 || input_rate == output_rate {
+        return input.to_vec();
+    }
+    let ratio = f64::from(output_rate) / f64::from(input_rate);
+    let params = SincInterpolationParameters {
+        sinc_len: 128,
+        f_cutoff: 0.95,
+        interpolation: SincInterpolationType::Linear,
+        oversampling_factor: 128,
+        window: WindowFunction::BlackmanHarris2,
+    };
+    let chunk = 1024.min(input.len().max(8));
+    let Ok(mut resampler) = SincFixedIn::<f32>::new(ratio, 2.0, params, chunk, 1) else {
+        return resample_linear(input, input_rate, output_rate);
+    };
+    let mut output = Vec::with_capacity(((input.len() as f64) * ratio).ceil() as usize + 16);
+    let mut offset = 0;
+    while offset < input.len() {
+        let needed = resampler.input_frames_next();
+        if offset + needed <= input.len() {
+            let chunk_in = &input[offset..offset + needed];
+            if let Ok(waves) = resampler.process(&[chunk_in], None) {
+                output.extend_from_slice(&waves[0]);
+            }
+            offset += needed;
+        } else {
+            let rest = &input[offset..];
+            if let Ok(waves) = resampler.process_partial(Some(&[rest]), None) {
+                output.extend_from_slice(&waves[0]);
+            }
+            break;
+        }
+    }
+    if let Ok(waves) = resampler.process_partial::<&[f32]>(None, None) {
+        output.extend_from_slice(&waves[0]);
+    }
+    let expected = ((input.len() as f64) * ratio).round().max(1.0) as usize;
+    output.truncate(expected);
+    output
 }
 
 pub fn resample_linear(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
@@ -61,6 +109,19 @@ mod tests {
     fn identity_resample() {
         let samples = vec![0.1, 0.2, 0.3];
         assert_eq!(resample_to_48k(&samples, 48_000).unwrap(), samples);
+    }
+
+    #[test]
+    fn sinc_48k_to_16k_differs_from_linear() {
+        let input: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
+            .collect();
+        let sinc = resample_sinc(&input, 48_000, 16_000);
+        let linear = resample_linear(&input, 48_000, 16_000);
+        assert!((sinc.len() as i32 - 1600).abs() <= 2);
+        assert_ne!(sinc, linear);
+        assert_ne!(sinc, linear);
+        assert_eq!(resample_sinc(&input, 16_000, 16_000), input);
     }
 
     #[test]

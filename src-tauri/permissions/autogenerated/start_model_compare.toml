@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-start-model-compare"
+description = "Enables the start_model_compare command without any pre-configured scope."
+commands.allow = ["start_model_compare"]
+
+[[permission]]
+identifier = "deny-start-model-compare"
+description = "Denies the start_model_compare command without any pre-configured scope."
+commands.deny = ["start_model_compare"]

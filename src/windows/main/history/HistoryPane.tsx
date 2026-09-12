@@ -129,6 +129,7 @@ export function HistoryCard({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const failed = (item.status === "failed" || item.status === "interrupted") && !item.transcript;
   const processing = item.status === "processing" && !item.transcript;
+  const canRetry = Boolean(item.rawAudioPath || item.processedAudioPath);
   const processingLabel = item.processedAudioPath ? copy.processing : copy.processingAudio;
 
   useEffect(() => {
@@ -195,18 +196,19 @@ export function HistoryCard({
             >
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
             </Button>
-          ) : (
+          ) : null}
+          {canRetry ? (
             <Button
               type="button"
               size="icon"
               variant="ghost"
               aria-label={copy.retry}
-              disabled={retrying}
+              disabled={retrying || processing}
               onClick={() => void retryTranscription()}
             >
               <RotateCcw className={`h-4 w-4 text-primary${retrying ? " history-spin" : ""}`} />
             </Button>
-          )}
+          ) : null}
           <Button
             type="button"
             size="icon"

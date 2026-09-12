@@ -55,6 +55,30 @@ describe("HistoryPane", () => {
     expect(screen.getByRole("heading", { name: "История" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Удалить" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Копировать" }));
+    expect(screen.getByRole("button", { name: "Повторить расшифровку" })).toBeInTheDocument();
+  });
+
+  it("keeps retry on completed transcripts and hides it without audio", () => {
+    const { rerender } = render(
+      <HistoryCard
+        item={recording()}
+        copy={messagesFor("ru")}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Повторить расшифровку" })).toBeEnabled();
+    rerender(
+      <HistoryCard
+        item={recording({ rawAudioPath: null, processedAudioPath: null })}
+        copy={messagesFor("ru")}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    expect(screen.queryByRole("button", { name: "Повторить расшифровку" })).not.toBeInTheDocument();
   });
 
   it("shows interrupted as retryable, not processing", () => {

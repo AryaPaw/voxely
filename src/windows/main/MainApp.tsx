@@ -23,6 +23,8 @@ import { FilterSettings } from "./sections/FilterSettings";
 import { GeneralSettings } from "./sections/GeneralSettings";
 import { HistorySettings } from "./sections/HistorySettings";
 import { TranscriptionSettings } from "./sections/TranscriptionSettings";
+import { ComparePane } from "./sections/ComparePane";
+import { DebugSettings } from "./sections/DebugSettings";
 
 export function MainApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -31,6 +33,7 @@ export function MainApp() {
   const [section, setSection] = useState<Section>(() => sectionFromSearch(window.location.search));
   const [keyConfigured, setKeyConfigured] = useState(false);
   const [query, setQuery] = useState("");
+  const [localBuild, setLocalBuild] = useState(false);
 
   async function refreshHistory() {
     const [items, configured] = await Promise.all([api.history(), api.keyConfigured()]);
@@ -40,8 +43,17 @@ export function MainApp() {
 
   async function loadSettings() {
     try {
-      const nextSettings = await api.settings();
+      const [nextSettings, runtime] = await Promise.all([api.settings(), api.runtimeInfo()]);
       setSettings(nextSettings);
+      setLocalBuild(runtime.localBuild);
+      if (runtime.localBuild) {
+        const fromUrl = sectionFromSearch(window.location.search, true);
+        if (fromUrl === "debug") {
+          setSection("debug");
+        }
+      } else {
+        setSection((current) => (current === "debug" ? "history" : current));
+      }
       applyTheme(nextSettings.theme);
       applyUiLocale(resolveUiLocale(nextSettings.uiLanguage ?? "auto", navigator.language));
       setLoadError("");
@@ -135,7 +147,7 @@ export function MainApp() {
   return (
     <>
       <div className="flex h-full">
-        <SectionNav current={section} copy={copy} onSelect={setSection} />
+        <SectionNav current={section} copy={copy} localBuild={localBuild} onSelect={setSection} />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {section === "history" ? (
             <HistoryPane
@@ -149,6 +161,16 @@ export function MainApp() {
               onOpenSettings={() => setSection("general")}
               copy={copy}
             />
+          ) : section === "compare" && settings ? (
+            <div className="min-h-0 flex-1 overflow-auto p-6">
+              <ComparePane
+                settings={settings}
+                copy={copy}
+                keyConfigured={keyConfigured}
+                onChange={(patch) => void persist({ ...settings, ...patch })}
+                onOpenKey={() => setSection("transcription")}
+              />
+            </div>
           ) : (
             <div className="min-h-0 flex-1 overflow-auto p-6">
               {section === "general" ? (
@@ -215,7 +237,8 @@ export function MainApp() {
                   }}
                 />
               ) : null}
-              {section === "about" ? <AboutSettings copy={copy} /> : null}
+              {section === "debug" && localBuild ? <DebugSettings copy={copy} /> : null}
+              {section === "about" ? <AboutSettings copy={copy} localBuild={localBuild} /> : null}
             </div>
           )}
         </main>

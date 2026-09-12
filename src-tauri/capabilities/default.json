@@ -57,6 +57,13 @@
     "allow-cancel-dictation",
     "allow-set-hotkey-capture",
     "allow-open-github",
+    "allow-start-model-compare",
+    "allow-stop-model-compare",
+    "allow-run-model-compare",
+    "allow-get-model-compare",
+    "allow-clear-model-compare",
+    "allow-get-runtime-info",
+    "allow-play-cue",
     "updater:default",
     "process:allow-restart"
   ]

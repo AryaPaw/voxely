@@ -35,6 +35,8 @@ pub struct AppSettings {
     pub ui_language: String,
     #[serde(default = "default_auto_update")]
     pub auto_update_enabled: bool,
+    #[serde(default = "default_compare_models")]
+    pub compare_models: Vec<String>,
 }
 
 fn default_ui_language() -> String {
@@ -43,6 +45,13 @@ fn default_ui_language() -> String {
 
 fn default_auto_update() -> bool {
     true
+}
+
+fn default_compare_models() -> Vec<String> {
+    vec![
+        "openai/gpt-transcribe".into(),
+        "openai/whisper-large-v3".into(),
+    ]
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -134,17 +143,18 @@ impl Default for AppSettings {
             storage_limit: "1gb".into(),
             debug_logging: false,
             retry: RetrySettings::default(),
-            active_preset_id: "stt-fast".into(),
+            active_preset_id: "stt-optimized".into(),
             presets: vec![
                 DspPreset::stt_fast(),
                 DspPreset::stt_optimized(),
                 DspPreset::obs_imported(),
             ],
             first_run_complete: false,
-            config_revision: 4,
+            config_revision: 5,
             mic_tune: MicTune::default(),
             ui_language: default_ui_language(),
             auto_update_enabled: default_auto_update(),
+            compare_models: default_compare_models(),
         }
     }
 }
@@ -165,8 +175,8 @@ impl AppSettings {
         let mut loaded: Self =
             serde_json::from_str(&text).map_err(|e| AppError::StorageFailed(e.to_string()))?;
         let original_revision = loaded.config_revision;
-        if original_revision < 4 {
-            if path.exists() {
+        if original_revision < 5 {
+            if original_revision < 4 && path.exists() {
                 let backup = path.with_extension("json.bak");
                 let _ = std::fs::copy(path, backup);
             }
@@ -179,8 +189,13 @@ impl AppSettings {
             if original_revision < 3 {
                 loaded.migrate_long_stt_timeouts();
             }
-            loaded.migrate_honest_dsp_and_insert();
-            loaded.config_revision = 4;
+            if original_revision < 4 {
+                loaded.migrate_honest_dsp_and_insert();
+            }
+            if original_revision < 5 {
+                loaded.migrate_stock_fast_to_quality();
+            }
+            loaded.config_revision = 5;
             let _ = loaded.save(path);
         }
         Ok(loaded)
@@ -210,6 +225,28 @@ impl AppSettings {
         }
         if self.retry.connect_timeout_ms < 3_000 {
             self.retry.connect_timeout_ms = 8_000;
+        }
+    }
+
+    pub fn migrate_stock_fast_to_quality(&mut self) {
+        let legacy_quality = DspPreset::stt_optimized_revision_4();
+        let factory_fast = DspPreset::stt_fast();
+        for preset in &mut self.presets {
+            if preset.id == "stt-optimized" && *preset == legacy_quality {
+                *preset = DspPreset::stt_optimized();
+            }
+        }
+        if self.active_preset_id == "stt-fast" {
+            let stock_fast = self.presets.iter().any(|preset| {
+                preset.id == "stt-fast"
+                    && (*preset == factory_fast
+                        || *preset
+                            == factory_fast
+                                .apply_mic_tune(&crate::dsp::mic_tune::MicTune::default()))
+            });
+            if stock_fast {
+                self.active_preset_id = "stt-optimized".into();
+            }
         }
     }
 
@@ -245,7 +282,7 @@ impl AppSettings {
             .iter()
             .find(|p| p.id == self.active_preset_id)
             .cloned()
-            .unwrap_or_else(DspPreset::stt_fast)
+            .unwrap_or_else(DspPreset::stt_optimized)
     }
 
     pub fn storage_limit_bytes(&self) -> Option<u64> {
@@ -274,8 +311,8 @@ mod tests {
         assert_eq!(loaded.hotkey, "Ctrl+Shift+Space");
         assert_eq!(loaded.theme, "dark");
         assert_eq!(loaded.retention, "3d");
-        assert_eq!(loaded.active_preset_id, "stt-fast");
-        assert_eq!(loaded.config_revision, 4);
+        assert_eq!(loaded.active_preset_id, "stt-optimized");
+        assert_eq!(loaded.config_revision, 5);
         assert_eq!(loaded.mic_tune, MicTune::default());
         assert_eq!(loaded.retry.request_timeout_ms, 20_000);
         assert_eq!(loaded.retry.total_operation_timeout_ms, 12 * 60 * 1000);
@@ -293,22 +330,63 @@ mod tests {
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.theme, "system");
         assert_eq!(loaded.retention, "3d");
-        assert_eq!(loaded.active_preset_id, "stt-fast");
-        assert_eq!(loaded.config_revision, 4);
+        assert_eq!(loaded.active_preset_id, "stt-optimized");
+        assert_eq!(loaded.config_revision, 5);
     }
 
     #[test]
     fn migrates_optimized_preset_to_fast() {
-        let dir = tempdir().unwrap();
-        let path = dir.path().join("s.json");
         let mut settings = AppSettings::default();
         settings.active_preset_id = "stt-optimized".into();
         settings.presets.retain(|preset| preset.id != "stt-fast");
-        settings.config_revision = 1;
-        settings.save(&path).unwrap();
+        settings.migrate_fast_stt();
+        assert_eq!(settings.active_preset_id, "stt-fast");
+        assert!(settings
+            .presets
+            .iter()
+            .any(|preset| preset.id == "stt-fast"));
+    }
+
+    #[test]
+    fn revision_5_moves_stock_fast_to_quality() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut settings = AppSettings::default();
+        settings.active_preset_id = "stt-fast".into();
+        settings.presets = vec![
+            DspPreset::stt_fast(),
+            DspPreset::stt_optimized_revision_4(),
+            DspPreset::obs_imported(),
+        ];
+        settings.config_revision = 4;
+        std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+        let loaded = AppSettings::load(&path).unwrap();
+        assert_eq!(loaded.active_preset_id, "stt-optimized");
+        assert_eq!(loaded.config_revision, 5);
+        let quality = loaded
+            .presets
+            .iter()
+            .find(|preset| preset.id == "stt-optimized")
+            .unwrap();
+        assert!(!quality
+            .order
+            .iter()
+            .any(|slot| slot.kind == crate::dsp::pipeline::FilterKind::Expander && slot.enabled));
+        assert!((quality.rnnoise_mix - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn revision_5_keeps_custom_fast() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut settings = AppSettings::default();
+        settings.active_preset_id = "stt-fast".into();
+        settings.presets[0].gain.db = 9.0;
+        settings.config_revision = 4;
+        std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.active_preset_id, "stt-fast");
-        assert!(loaded.presets.iter().any(|preset| preset.id == "stt-fast"));
+        assert_eq!(loaded.config_revision, 5);
     }
 
     #[test]
@@ -323,7 +401,7 @@ mod tests {
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.retry.request_timeout_ms, 20_000);
         assert_eq!(loaded.retry.total_operation_timeout_ms, 12 * 60 * 1000);
-        assert_eq!(loaded.config_revision, 4);
+        assert_eq!(loaded.config_revision, 5);
     }
 
     #[test]
@@ -332,7 +410,7 @@ mod tests {
         let quality = DspPreset::stt_optimized();
         assert_ne!(fast.order, quality.order);
         let settings = AppSettings::default();
-        assert_eq!(settings.active_preset().order, fast.order);
+        assert_eq!(settings.active_preset().order, quality.order);
     }
 
     #[test]
@@ -360,7 +438,7 @@ mod tests {
         let reset = AppSettings::reset_user_settings(true);
         assert_eq!(reset.hotkey, AppSettings::default().hotkey);
         assert_eq!(reset.theme, AppSettings::default().theme);
-        assert_eq!(reset.active_preset_id, "stt-fast");
+        assert_eq!(reset.active_preset_id, "stt-optimized");
         assert_eq!(reset.presets.len(), 3);
         assert!(reset.first_run_complete);
         let full = AppSettings::reset_user_settings(false);

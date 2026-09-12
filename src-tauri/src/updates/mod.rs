@@ -58,7 +58,7 @@ async fn run_check(app: &AppHandle, force: bool) -> UpdateCode {
     if !force && !settings.auto_update_enabled {
         return UpdateCode::None;
     }
-    let busy = is_cancellable(&ctx.state.lock());
+    let busy = is_cancellable(&ctx.state.lock()) || crate::app::compare::compare_busy(&ctx);
     if !install_allowed(busy) {
         return UpdateCode::Deferred;
     }

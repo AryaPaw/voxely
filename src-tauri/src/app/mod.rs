@@ -1,3 +1,4 @@
+pub mod compare;
 pub mod lifecycle;
 pub mod locale;
 pub mod machine;

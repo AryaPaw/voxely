@@ -34,6 +34,7 @@ const preset: DspPreset = {
     sampleRate: 48000,
   },
   limiter: { thresholdDb: -1, releaseMs: 40, sampleRate: 48000 },
+  rnnoiseMix: 1,
 };
 
 const settings: AppSettings = {
@@ -60,11 +61,11 @@ const settings: AppSettings = {
     maxRetryDelayMs: 8000,
     totalOperationTimeoutMs: 720000,
   },
-  activePresetId: "stt-fast",
+  activePresetId: "stt-optimized",
   presets: [preset],
   firstRunComplete: true,
   uiLanguage: "en",
-  autoUpdateEnabled: true,
+  compareModels: ["openai/gpt-transcribe", "openai/whisper-large-v3"],
 };
 
 const history: Recording[] = [
@@ -128,6 +129,8 @@ export async function invoke<T>(cmd: string): Promise<T> {
   switch (cmd) {
     case "get_settings":
       return settings as T;
+    case "get_runtime_info":
+      return { localBuild: false } as T;
     case "save_settings":
       return settings as T;
     case "get_session_state":
@@ -146,7 +149,19 @@ export async function invoke<T>(cmd: string): Promise<T> {
     case "start_input_meter":
     case "stop_input_meter":
     case "start_filter_sample":
-    case "cancel_dictation":
+    case "get_model_compare":
+      return {
+        recording: false,
+        running: false,
+        nonce: 0,
+        listenPath: null,
+        sttPath: null,
+        runId: null,
+        slots: [],
+      } as T;
+    case "start_model_compare":
+    case "clear_model_compare":
+    case "play_cue":
     case "open_audio_dir":
     case "open_github":
     case "open_logs":

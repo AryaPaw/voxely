@@ -347,6 +347,16 @@ pub fn audio_dir(root: &Path) -> PathBuf {
     root.join("audio")
 }
 
+pub fn can_retry_from_history(rec: &Recording) -> bool {
+    rec.raw_audio_path.is_some() || rec.processed_audio_path.is_some()
+}
+
+pub fn history_listen_name(rec: &Recording) -> Option<&String> {
+    rec.processed_audio_path
+        .as_ref()
+        .or(rec.raw_audio_path.as_ref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -361,5 +371,25 @@ mod tests {
         assert_eq!(repo.list(10).unwrap().len(), 1);
         repo.delete(&rec.id).unwrap();
         assert!(repo.list(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn completed_recordings_with_audio_can_retry() {
+        let mut rec = new_recording("openai/gpt-transcribe".into());
+        rec.status = RecordingStatus::Completed;
+        rec.transcript = Some("old".into());
+        rec.processed_audio_path = Some("1.processed.wav".into());
+        assert!(can_retry_from_history(&rec));
+        rec.processed_audio_path = None;
+        rec.raw_audio_path = None;
+        assert!(!can_retry_from_history(&rec));
+        rec.processed_audio_path = Some("1.processed.wav".into());
+        rec.raw_audio_path = Some("1.wav".into());
+        assert_eq!(
+            history_listen_name(&rec).map(String::as_str),
+            Some("1.processed.wav")
+        );
+        rec.processed_audio_path = None;
+        assert_eq!(history_listen_name(&rec).map(String::as_str), Some("1.wav"));
     }
 }

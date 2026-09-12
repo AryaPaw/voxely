@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-get-model-compare"
+description = "Enables the get_model_compare command without any pre-configured scope."
+commands.allow = ["get_model_compare"]
+
+[[permission]]
+identifier = "deny-get-model-compare"
+description = "Denies the get_model_compare command without any pre-configured scope."
+commands.deny = ["get_model_compare"]

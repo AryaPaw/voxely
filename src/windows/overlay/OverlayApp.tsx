@@ -83,17 +83,6 @@ export function OverlayApp() {
     return () => window.clearInterval(clock);
   }, [recording]);
 
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        void api.cancel();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, []);
-
   function onPillClick() {
     if (cancelReady) {
       void api.cancel();

@@ -355,11 +355,16 @@ pub fn write_pcm16_wav(path: &Path, sample_rate: u32, samples: &[f32]) -> Result
 }
 
 pub fn read_pcm16_wav(path: &Path) -> Result<Vec<f32>, AppError> {
+    Ok(read_pcm16_wav_with_rate(path)?.0)
+}
+
+pub fn read_pcm16_wav_with_rate(path: &Path) -> Result<(Vec<f32>, u32), AppError> {
     let mut reader =
         hound::WavReader::open(path).map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    let rate = reader.spec().sample_rate;
     let samples: Result<Vec<i16>, _> = reader.samples::<i16>().collect();
     let samples = samples.map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    Ok(i16_to_f32(&samples))
+    Ok((i16_to_f32(&samples), rate))
 }
 
 #[cfg(test)]
@@ -375,6 +380,8 @@ mod tests {
         write_pcm16_wav(&path, 48_000, &data).unwrap();
         let decoded = read_pcm16_wav(&path).unwrap();
         assert_eq!(decoded.len(), data.len());
+        let (_, rate) = read_pcm16_wav_with_rate(&path).unwrap();
+        assert_eq!(rate, 48_000);
         for (a, b) in decoded.iter().zip(data.iter()) {
             assert!((a - b).abs() < 0.01);
         }

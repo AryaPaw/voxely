@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-stop-model-compare"
+description = "Enables the stop_model_compare command without any pre-configured scope."
+commands.allow = ["stop_model_compare"]
+
+[[permission]]
+identifier = "deny-stop-model-compare"
+description = "Denies the stop_model_compare command without any pre-configured scope."
+commands.deny = ["stop_model_compare"]

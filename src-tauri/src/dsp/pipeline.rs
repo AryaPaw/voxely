@@ -4,7 +4,7 @@ use super::dynamics::{Dynamics, DynamicsConfig, GateConfig, Limiter, LimiterConf
 use super::high_pass::{apply_gain, GainConfig, HighPass, HighPassConfig};
 use super::metrics::{is_finite_buffer, metrics, AudioMetrics, SAMPLE_RATE, STT_SAMPLE_RATE};
 use super::rnnoise::Rnnoise;
-use crate::audio::resample::resample_linear;
+use crate::audio::resample::resample_sinc;
 use crate::error::AppError;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -39,6 +39,12 @@ pub struct DspPreset {
     pub expander: DynamicsConfig,
     pub gate: GateConfig,
     pub limiter: LimiterConfig,
+    #[serde(default = "default_rnnoise_mix")]
+    pub rnnoise_mix: f32,
+}
+
+fn default_rnnoise_mix() -> f32 {
+    1.0
 }
 
 impl DspPreset {
@@ -64,6 +70,7 @@ impl DspPreset {
                 release_ms: 60.0,
                 sample_rate: 48_000.0,
             },
+            rnnoise_mix: 1.0,
         }
     }
 
@@ -89,10 +96,11 @@ impl DspPreset {
                 release_ms: 40.0,
                 sample_rate: 48_000.0,
             },
+            rnnoise_mix: 1.0,
         }
     }
 
-    pub fn stt_optimized() -> Self {
+    pub fn stt_optimized_revision_4() -> Self {
         Self {
             id: "stt-optimized".into(),
             name: "Качество (медленнее)".into(),
@@ -124,6 +132,50 @@ impl DspPreset {
                 release_ms: 40.0,
                 sample_rate: 48_000.0,
             },
+            rnnoise_mix: 1.0,
+        }
+    }
+
+    pub fn stt_optimized() -> Self {
+        Self {
+            id: "stt-optimized".into(),
+            name: "Качество (медленнее)".into(),
+            order: vec![
+                slot("highpass", FilterKind::HighPass, true),
+                slot("rnnoise", FilterKind::Rnnoise, true),
+                slot("compressor", FilterKind::Compressor, true),
+                slot("expander", FilterKind::Expander, false),
+                slot("gain", FilterKind::Gain, true),
+                slot("gate", FilterKind::Gate, false),
+                slot("limiter", FilterKind::Limiter, true),
+            ],
+            high_pass: HighPassConfig {
+                cutoff_hz: 70.0,
+                sample_rate: 48_000.0,
+            },
+            gain: GainConfig { db: 1.5 },
+            compressor: DynamicsConfig {
+                threshold_db: -18.0,
+                ratio: 1.8,
+                attack_ms: 10.0,
+                release_ms: 100.0,
+                makeup_db: 1.0,
+                sample_rate: 48_000.0,
+            },
+            expander: DynamicsConfig::expander_stt(),
+            gate: GateConfig {
+                open_threshold_db: -48.0,
+                close_threshold_db: -52.0,
+                hold_ms: 250.0,
+                release_ms: 200.0,
+                sample_rate: 48_000.0,
+            },
+            limiter: LimiterConfig {
+                threshold_db: -0.8,
+                release_ms: 50.0,
+                sample_rate: 48_000.0,
+            },
+            rnnoise_mix: 0.6,
         }
     }
 }
@@ -177,6 +229,11 @@ impl DspPipeline {
                     samples = out;
                 }
                 FilterKind::Rnnoise => {
+                    let mix = self.preset.rnnoise_mix.clamp(0.0, 1.0);
+                    if mix <= 0.0 {
+                        continue;
+                    }
+                    let dry = samples.clone();
                     let mut out = self.rnnoise.process(&samples);
                     out.extend(self.rnnoise.flush());
                     if out.len() < samples.len() {
@@ -184,7 +241,15 @@ impl DspPipeline {
                     } else {
                         out.truncate(samples.len());
                     }
-                    samples = out;
+                    if mix >= 1.0 {
+                        samples = out;
+                    } else {
+                        samples = dry
+                            .iter()
+                            .zip(out.iter())
+                            .map(|(dry_s, wet_s)| dry_s * (1.0 - mix) + wet_s * mix)
+                            .collect();
+                    }
                 }
                 FilterKind::Gain => apply_gain(&mut samples, self.preset.gain),
                 FilterKind::Compressor => self.compressor.process(&mut samples),
@@ -212,15 +277,22 @@ pub fn prepare_listen(
 }
 
 pub fn apply_listen_loudness(samples: &[f32]) -> (Vec<f32>, AudioMetrics) {
+    apply_listen_gain(samples, listen_gain(samples))
+}
+
+pub fn listen_gain(samples: &[f32]) -> f32 {
     let peak = samples
         .iter()
         .fold(0.0f32, |acc, sample| acc.max(sample.abs()));
     let target = 10f32.powf(-2.0 / 20.0);
-    let gain = if peak > 1e-6 {
+    if peak > 1e-6 {
         (target / peak).min(8.0)
     } else {
         1.0
-    };
+    }
+}
+
+pub fn apply_listen_gain(samples: &[f32], gain: f32) -> (Vec<f32>, AudioMetrics) {
     let out: Vec<f32> = samples
         .iter()
         .map(|sample| (sample * gain).clamp(-0.999, 1.0))
@@ -237,9 +309,18 @@ pub fn prepare_listen_preview(
 ) -> Result<ListenPreview, AppError> {
     let (filtered, _) = prepare_listen(preset, samples.clone())?;
     let stt = filtered.clone();
-    let (original, _) = apply_listen_loudness(&samples);
-    let (preview, preview_metrics) = apply_listen_loudness(&filtered);
+    let gain = listen_gain(&samples);
+    let (original, _) = apply_listen_gain(&samples, gain);
+    let (preview, preview_metrics) = apply_listen_gain(&filtered, gain);
     Ok((original, preview, preview_metrics, stt))
+}
+
+pub fn samples_for_stt(samples: &[f32], input_rate: u32) -> Vec<f32> {
+    if input_rate == STT_SAMPLE_RATE {
+        samples.to_vec()
+    } else {
+        resample_sinc(samples, input_rate, STT_SAMPLE_RATE)
+    }
 }
 
 pub fn prepare_transcription(
@@ -247,10 +328,7 @@ pub fn prepare_transcription(
     samples: Vec<f32>,
 ) -> Result<(Vec<f32>, u32), AppError> {
     let (processed, _) = prepare_listen(preset, samples)?;
-    Ok((
-        resample_linear(&processed, SAMPLE_RATE, STT_SAMPLE_RATE),
-        STT_SAMPLE_RATE,
-    ))
+    Ok((samples_for_stt(&processed, SAMPLE_RATE), STT_SAMPLE_RATE))
 }
 
 #[cfg(test)]
@@ -297,12 +375,31 @@ mod tests {
             prepare_listen_preview(DspPreset::stt_fast(), sine.clone()).unwrap();
         let (listen, _) = prepare_listen(DspPreset::stt_fast(), sine).unwrap();
         assert_eq!(stt, listen);
-        let original_peak = original.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        let preview_peak = preview.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        assert!((original_peak - preview_peak).abs() < 0.08);
         assert!(preview.iter().all(|s| s.abs() <= 1.0));
         assert_eq!(metrics.clip_count, 0);
         assert!(metrics.peak > 0.0);
+        let original_peak = original.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        let preview_peak = preview.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        assert!(original_peak > 0.0);
+        assert!(preview_peak > 0.0);
+    }
+
+    #[test]
+    fn linked_listen_gain_keeps_filter_loudness_audible() {
+        let sine: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.05)
+            .collect();
+        let six = gain_only(6.0);
+        let twelve = gain_only(12.0);
+        let (original_six, preview_six, _, _) = prepare_listen_preview(six, sine.clone()).unwrap();
+        let (original_twelve, preview_twelve, _, _) = prepare_listen_preview(twelve, sine).unwrap();
+        let original_six_peak = original_six.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        let original_twelve_peak = original_twelve.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        let preview_six_peak = preview_six.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        let preview_twelve_peak = preview_twelve.iter().fold(0.0f32, |a, s| a.max(s.abs()));
+        assert!((original_six_peak - original_twelve_peak).abs() < 0.01);
+        assert!(preview_twelve_peak > preview_six_peak);
+        assert!(preview_twelve_peak > original_twelve_peak);
     }
 
     fn gain_only(db: f32) -> DspPreset {
@@ -327,6 +424,51 @@ mod tests {
         assert!(twelve_metrics.rms > six_metrics.rms);
         let (_, stt_rate) = prepare_transcription(six, sine).unwrap();
         assert_eq!(stt_rate, STT_SAMPLE_RATE);
+    }
+
+    #[test]
+    fn factory_quality_disables_expander_and_mixes_rnnoise() {
+        let quality = DspPreset::stt_optimized();
+        assert!(!quality
+            .order
+            .iter()
+            .any(|slot| slot.kind == FilterKind::Expander && slot.enabled));
+        assert!(quality
+            .order
+            .iter()
+            .any(|slot| slot.kind == FilterKind::Rnnoise && slot.enabled));
+        assert!((quality.rnnoise_mix - 0.6).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn rnnoise_mix_zero_keeps_input_length() {
+        let sine: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
+            .collect();
+        let mut dry = DspPreset::stt_optimized();
+        dry.order.retain(|slot| slot.kind == FilterKind::Rnnoise);
+        dry.rnnoise_mix = 0.0;
+        let (out, _) = prepare_listen(dry, sine.clone()).unwrap();
+        assert_eq!(out.len(), sine.len());
+        assert_eq!(out, sine);
+        let mut wet = DspPreset::stt_optimized();
+        wet.order.retain(|slot| slot.kind == FilterKind::Rnnoise);
+        wet.rnnoise_mix = 1.0;
+        let (wet_out, _) = prepare_listen(wet, sine.clone()).unwrap();
+        assert_eq!(wet_out.len(), sine.len());
+        assert_ne!(wet_out, sine);
+    }
+
+    #[test]
+    fn transcription_prep_uses_sinc_not_linear() {
+        let sine: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
+            .collect();
+        let (processed, _) = prepare_listen(DspPreset::stt_fast(), sine.clone()).unwrap();
+        let out = samples_for_stt(&processed, SAMPLE_RATE);
+        let linear =
+            crate::audio::resample::resample_linear(&processed, SAMPLE_RATE, STT_SAMPLE_RATE);
+        assert_ne!(out, linear);
     }
 
     #[test]

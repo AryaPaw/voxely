@@ -14,13 +14,14 @@ use crate::history::retention::delete_recording;
 use crate::settings::AppSettings;
 use crate::transcription::openrouter::{list_transcription_models, SttModel};
 use crate::windows_int::credentials::{delete_api_key, has_api_key, set_api_key};
-use crate::windows_int::text_injector::native;
+use crate::windows_int::text_injector::{
+    insert_transcript_now, native, resolve_insert_target, NativeHwnd,
+};
 use base64::engine::general_purpose::STANDARD;
 use base64::Engine;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tauri_plugin_autostart::ManagerExt;
 
 #[tauri::command]
 pub fn get_session_state(ctx: State<'_, Arc<AppContext>>) -> SessionState {
@@ -55,12 +56,7 @@ fn persist_settings(
     if let Err(e) = crate::app::shortcuts::sync_shortcuts(app) {
         tracing::error!(error = %e, "hotkey register failed");
     }
-    let autostart = app.autolaunch();
-    if settings.start_with_windows {
-        let _ = autostart.enable();
-    } else {
-        let _ = autostart.disable();
-    }
+    crate::app::lifecycle::sync_autostart(app, settings.start_with_windows);
     let _ = configure_tray(app);
     Ok(settings)
 }
@@ -145,8 +141,8 @@ fn preview_from_original(ctx: &AppContext, original: &Path) -> Result<DspPreview
     Ok(DspPreview {
         original_path: original_preview.to_string_lossy().into_owned(),
         processed_path: processed_path.to_string_lossy().into_owned(),
-        original_data_url: String::new(),
-        processed_data_url: String::new(),
+        original_data_url: wav_data_url(&original_preview)?,
+        processed_data_url: wav_data_url(&processed_path)?,
         peak: metrics.peak,
         rms: metrics.rms,
         clip_count: metrics.clip_count,
@@ -175,6 +171,11 @@ pub fn start_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppErr
     if is_cancellable(&ctx.state.lock()) {
         return Err(AppError::IllegalTransition(
             "dictation is already running".into(),
+        ));
+    }
+    if ctx.compare_capture.lock().is_some() {
+        return Err(AppError::IllegalTransition(
+            "compare is already recording".into(),
         ));
     }
     release_meter_monitor(ctx.inner());
@@ -352,12 +353,27 @@ pub fn copy_transcript(text: String) -> Result<(), AppError> {
 pub fn insert_transcript(app: AppHandle, text: String) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
     let mode = ctx.settings.lock().insertion_mode.clone();
-    let captured = *ctx.captured_hwnd.lock();
-    match mode.as_str() {
-        "clipboard" => native::clipboard_copy(&text),
-        _ => captured
-            .ok_or_else(|| AppError::TextInsertionFailed("no captured window".into()))
-            .and_then(|hwnd| native::insert_unicode(hwnd, &text)),
+    let start = *ctx.captured_hwnd.lock();
+    let overlay = app.get_webview_window("overlay").and_then(|window| {
+        window.hwnd().ok().map(|hwnd| NativeHwnd {
+            value: hwnd.0 as usize,
+        })
+    });
+    let main = app.get_webview_window("main").and_then(|window| {
+        window.hwnd().ok().map(|hwnd| NativeHwnd {
+            value: hwnd.0 as usize,
+        })
+    });
+    let skip: Vec<usize> = [overlay, main]
+        .into_iter()
+        .flatten()
+        .map(|hwnd| hwnd.value)
+        .collect();
+    let live = native::capture_target_excluding(&skip);
+    let captured = resolve_insert_target(start, live, overlay, main);
+    match insert_transcript_now(&mode, captured, overlay, &text, || false) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(err),
     }
 }
 
@@ -393,11 +409,7 @@ pub fn recording_audio_url(
         .lock()
         .get(&id)?
         .ok_or_else(|| AppError::StorageFailed("not found".into()))?;
-    let Some(name) = rec
-        .raw_audio_path
-        .as_ref()
-        .or(rec.processed_audio_path.as_ref())
-    else {
+    let Some(name) = crate::history::repository::history_listen_name(&rec) else {
         return Ok(None);
     };
     if name.contains("..") || Path::new(name).is_absolute() {
@@ -418,4 +430,45 @@ pub fn recording_audio_url(
         return Ok(None);
     }
     Ok(Some(canonical.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+pub fn start_model_compare(app: AppHandle) -> Result<(), AppError> {
+    crate::app::compare::start_model_compare(&app)
+}
+
+#[tauri::command]
+pub fn stop_model_compare(app: AppHandle) -> Result<crate::app::compare::CompareState, AppError> {
+    crate::app::compare::stop_model_compare(&app)
+}
+
+#[tauri::command]
+pub async fn run_model_compare(
+    app: AppHandle,
+) -> Result<crate::app::compare::CompareState, AppError> {
+    crate::app::compare::run_model_compare(app).await
+}
+
+#[tauri::command]
+pub fn get_model_compare(app: AppHandle) -> crate::app::compare::CompareState {
+    crate::app::compare::get_model_compare(&app)
+}
+
+#[tauri::command]
+pub fn clear_model_compare(app: AppHandle) -> Result<(), AppError> {
+    crate::app::compare::clear_model_compare(&app)
+}
+
+#[tauri::command]
+pub fn get_runtime_info() -> crate::app::lifecycle::RuntimeInfo {
+    crate::app::lifecycle::runtime_info()
+}
+
+#[tauri::command]
+pub fn play_cue(kind: String) -> Result<(), AppError> {
+    if !crate::app::lifecycle::is_local_build() {
+        return Err(AppError::RequestValidationFailed("debug only".into()));
+    }
+    crate::audio::cue::play_dictation_cue(crate::audio::cue::parse_cue_kind(&kind)?);
+    Ok(())
 }

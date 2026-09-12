@@ -54,7 +54,7 @@ function settings(): AppSettings {
       maxRetryDelayMs: 8000,
       totalOperationTimeoutMs: 720000,
     },
-    activePresetId: "stt-fast",
+    activePresetId: "stt-optimized",
     presets: [],
     firstRunComplete: true,
     uiLanguage: "en",

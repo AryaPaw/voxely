@@ -1,6 +1,6 @@
 use parking_lot::Mutex;
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
@@ -15,17 +15,24 @@ use crate::app::machine::{apply_event, may_commit_session, SessionEvent, Session
 use crate::app::overlay::{
     overlay_physical_position, WorkArea, OVERLAY_GAP_PX, OVERLAY_HEIGHT, OVERLAY_WIDTH,
 };
-use crate::audio::capture::{read_pcm16_wav, write_pcm16_wav, CaptureSession, MeterSample};
+use crate::audio::capture::{
+    read_pcm16_wav, read_pcm16_wav_with_rate, write_pcm16_wav, CaptureSession, MeterSample,
+};
 use crate::audio::devices::list_input_devices;
-use crate::dsp::pipeline::prepare_transcription;
+use crate::dsp::metrics::{SAMPLE_RATE, STT_SAMPLE_RATE};
+use crate::dsp::pipeline::{prepare_listen, samples_for_stt};
 use crate::error::AppError;
-use crate::history::repository::{audio_dir, new_recording, HistoryRepo, RecordingStatus};
+use crate::history::repository::{
+    audio_dir, can_retry_from_history, new_recording, HistoryRepo, RecordingStatus,
+};
 use crate::history::retention::{apply_retention, cleanup_orphans, Retention};
 use crate::settings::AppSettings;
 use crate::transcription::openrouter::{transcribe_file_with_progress, SttProgress};
 use crate::windows_int::credentials::get_api_key;
 use crate::windows_int::overlay::work_area_for_cursor;
-use crate::windows_int::text_injector::{insert_should_abort, native, NativeHwnd};
+use crate::windows_int::text_injector::{
+    insert_should_abort, insert_transcript_now, native, resolve_insert_target, NativeHwnd,
+};
 
 pub struct AppContext {
     pub settings_path: PathBuf,
@@ -45,6 +52,10 @@ pub struct AppContext {
     pub abort_start: AtomicBool,
     pub session_generation: AtomicU64,
     pub preview_capture: Mutex<Option<CaptureSession>>,
+    pub compare_capture: Mutex<Option<CaptureSession>>,
+    pub compare_cancel: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
+    pub compare_state: Mutex<crate::app::compare::CompareState>,
+    pub compare_running: AtomicBool,
     pub meter_monitor: Mutex<Option<CaptureSession>>,
     pub update_gate: tokio::sync::Mutex<bool>,
 }
@@ -87,6 +98,10 @@ impl AppContext {
             abort_start: AtomicBool::new(false),
             session_generation: AtomicU64::new(0),
             preview_capture: Mutex::new(None),
+            compare_capture: Mutex::new(None),
+            compare_cancel: Mutex::new(None),
+            compare_state: Mutex::new(crate::app::compare::CompareState::default()),
+            compare_running: AtomicBool::new(false),
             meter_monitor: Mutex::new(None),
             update_gate: tokio::sync::Mutex::new(false),
         })
@@ -127,7 +142,9 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
     let state = ctx.state.lock().clone();
     match state {
         SessionState::StartingRecording | SessionState::Recording => {
-            let _ = ctx.transition(SessionEvent::Cancelled);
+            if ctx.transition(SessionEvent::Cancelled).is_err() {
+                return Ok(());
+            }
             if let Some(session) = ctx.capture.lock().take() {
                 thread::spawn(move || {
                     if let Ok(result) = session.stop() {
@@ -138,9 +155,7 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
             *ctx.session_recording_id.lock() = None;
             ctx.abort_start.store(true, Ordering::SeqCst);
             ctx.emit_state(app);
-            if ctx.settings.lock().notifications {
-                crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Cancel);
-            }
+            play_cancel_cue(&ctx);
             hide_overlay_later(app.clone(), Duration::from_millis(16));
             Ok(())
         }
@@ -150,15 +165,21 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
         | SessionState::Transcribing { .. }
         | SessionState::RetryWaiting { .. } => {
             fail_active_recording(&ctx, &AppError::Cancelled);
-            let _ = ctx.transition(SessionEvent::Cancelled);
-            ctx.emit_state(app);
-            if ctx.settings.lock().notifications {
-                crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Cancel);
+            if ctx.transition(SessionEvent::Cancelled).is_err() {
+                return Ok(());
             }
+            ctx.emit_state(app);
+            play_cancel_cue(&ctx);
             hide_overlay_later(app.clone(), Duration::from_millis(16));
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+fn play_cancel_cue(ctx: &AppContext) {
+    if ctx.settings.lock().notifications {
+        crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Cancel);
     }
 }
 
@@ -173,11 +194,13 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
             }
         });
     }
+    crate::app::compare::steal_compare_capture(&ctx);
     release_meter_monitor(&ctx);
     let (tx, _) = tokio::sync::watch::channel(false);
     *ctx.cancel_tx.lock() = Some(tx);
     ctx.transition(SessionEvent::StartRequested)?;
-    *ctx.captured_hwnd.lock() = native::capture_target();
+    let skip = voxely_window_roots(app);
+    *ctx.captured_hwnd.lock() = native::capture_target_excluding(&skip);
     *ctx.overlay_shown_at.lock() = Some(Instant::now());
     show_overlay(app);
     ctx.emit_state(app);
@@ -239,6 +262,10 @@ fn finish_capture_start(app: &AppHandle, started: Result<CaptureSession, AppErro
 
 fn stop_recording(app: &AppHandle) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
+    native::wait_for_keys_up(
+        &crate::windows_int::text_injector::hotkey_keys_to_release(&ctx.settings.lock().hotkey),
+        Duration::from_millis(300),
+    );
     let Some(session) = ctx.capture.lock().take() else {
         ctx.abort_start.store(true, Ordering::SeqCst);
         let _ = ctx.transition(SessionEvent::Cancelled);
@@ -360,7 +387,7 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
             rx
         }
     };
-    let processed = tokio::task::spawn_blocking(move || prepare_transcription(preset, samples))
+    let processed = tokio::task::spawn_blocking(move || prepare_listen(preset, samples))
         .await
         .map_err(|e| AppError::AudioProcessingFailed(e.to_string()))??;
     if *rx.borrow()
@@ -372,10 +399,10 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
     {
         return Err(AppError::Cancelled);
     }
-    let (processed, rate) = processed;
+    let (processed, _) = processed;
     let processed_name = format!("{recording_id}.processed.wav");
     let processed_path = audio_root.join(&processed_name);
-    write_pcm16_wav(&processed_path, rate, &processed)?;
+    write_pcm16_wav(&processed_path, SAMPLE_RATE, &processed)?;
     let mut rec = rec;
     rec.processed_audio_path = Some(processed_name);
     rec.updated_at = chrono::Utc::now();
@@ -405,19 +432,21 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
     };
     rec.request_started_at = Some(chrono::Utc::now());
     ctx.history.lock().update(&rec)?;
-    match run_transcription(
+    let stt_path = write_stt_upload(&processed_path)?;
+    let transcribed = run_transcription(
         app,
         recording_id,
         &key,
         &settings.model,
         language,
-        &processed_path,
+        &stt_path,
         settings.retry.to_policy(),
         Duration::from_millis(rec.duration_ms as u64),
         rx.clone(),
     )
-    .await
-    {
+    .await;
+    let _ = std::fs::remove_file(&stt_path);
+    match transcribed {
         Ok(success) => {
             let cancelled = *rx.borrow();
             if !may_commit_session(
@@ -441,7 +470,7 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
             ctx.emit_state(app);
             *ctx.session_recording_id.lock() = None;
             let mode = ctx.settings.lock().insertion_mode.clone();
-            let captured = *ctx.captured_hwnd.lock();
+            let start_hwnd = *ctx.captured_hwnd.lock();
             let text = success.text.clone();
             let app_clone = app.clone();
             let commit_generation = started_generation;
@@ -455,18 +484,31 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
                     return;
                 }
                 hide_overlay_now(&app_clone);
+                let overlay = overlay_native_hwnd(&app_clone);
+                let main = native_hwnd_for_label(&app_clone, "main");
+                let skip = voxely_window_roots(&app_clone);
                 let _ = ctx.transition(SessionEvent::Dismiss);
                 ctx.emit_state(&app_clone);
                 let insert_app = app_clone.clone();
                 thread::spawn(move || {
+                    std::thread::sleep(Duration::from_millis(16));
                     let abort_app = insert_app.clone();
-                    let result = insert_transcript_now(&mode, captured, &text, move || {
-                        let ctx = abort_app.state::<Arc<AppContext>>();
-                        insert_should_abort(
-                            commit_generation,
-                            ctx.session_generation.load(Ordering::SeqCst),
-                        )
-                    });
+                    let abort = {
+                        let abort_app = abort_app.clone();
+                        move || {
+                            let ctx = abort_app.state::<Arc<AppContext>>();
+                            insert_should_abort(
+                                commit_generation,
+                                ctx.session_generation.load(Ordering::SeqCst),
+                            )
+                        }
+                    };
+                    if abort() {
+                        return;
+                    }
+                    let live = native::capture_target_excluding(&skip);
+                    let captured = resolve_insert_target(start_hwnd, live, overlay, main);
+                    let result = insert_transcript_now(&mode, captured, overlay, &text, abort);
                     let notify = insert_app.clone();
                     let _ = insert_app.run_on_main_thread(move || match result {
                         Ok("copied") => {
@@ -494,37 +536,23 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
     }
 }
 
-fn insert_transcript_now(
-    mode: &str,
-    captured: Option<NativeHwnd>,
-    text: &str,
-    abort: impl Fn() -> bool,
-) -> Result<&'static str, AppError> {
-    if abort() {
-        return Err(AppError::Cancelled);
-    }
-    std::thread::sleep(std::time::Duration::from_millis(40));
-    if abort() {
-        return Err(AppError::Cancelled);
-    }
-    match mode {
-        "clipboard" => {
-            native::clipboard_copy(text)?;
-            Ok("copied")
-        }
-        _ => {
-            let hwnd = captured
-                .ok_or_else(|| AppError::TextInsertionFailed("no captured window".into()))?;
-            match native::insert_unicode_while(hwnd, text, abort) {
-                Ok(()) => Ok("inserted"),
-                Err(AppError::Cancelled) => Err(AppError::Cancelled),
-                Err(_) => {
-                    native::clipboard_copy(text)?;
-                    Ok("copied")
-                }
-            }
-        }
-    }
+fn overlay_native_hwnd(app: &AppHandle) -> Option<NativeHwnd> {
+    native_hwnd_for_label(app, "overlay")
+}
+
+fn native_hwnd_for_label(app: &AppHandle, label: &str) -> Option<NativeHwnd> {
+    let window = app.get_webview_window(label)?;
+    let hwnd = window.hwnd().ok()?;
+    Some(NativeHwnd {
+        value: hwnd.0 as usize,
+    })
+}
+
+fn voxely_window_roots(app: &AppHandle) -> Vec<usize> {
+    ["overlay", "main"]
+        .into_iter()
+        .filter_map(|label| native_hwnd_for_label(app, label).map(|h| h.value))
+        .collect()
 }
 
 fn bump_overlay_epoch(ctx: &AppContext) {
@@ -742,6 +770,14 @@ pub fn current_meter(app: &AppHandle) -> MeterSample {
     {
         return sample;
     }
+    if let Some(sample) = ctx
+        .compare_capture
+        .lock()
+        .as_ref()
+        .map(CaptureSession::meter)
+    {
+        return sample;
+    }
     let sample = ctx
         .meter_monitor
         .lock()
@@ -758,7 +794,10 @@ pub fn release_meter_monitor(ctx: &AppContext) {
 }
 
 pub fn start_meter_monitor(ctx: &AppContext) -> Result<(), AppError> {
-    if ctx.capture.lock().is_some() || ctx.preview_capture.lock().is_some() {
+    if ctx.capture.lock().is_some()
+        || ctx.preview_capture.lock().is_some()
+        || ctx.compare_capture.lock().is_some()
+    {
         return Ok(());
     }
     if ctx.meter_monitor.lock().is_some() {
@@ -802,6 +841,9 @@ async fn manual_retry_inner(
         .get(recording_id)?
         .ok_or_else(|| AppError::StorageFailed("recording missing".into()))?;
     let audio_root = audio_dir(&ctx.data_dir);
+    if !can_retry_from_history(&rec) {
+        return Err(AppError::StorageFailed("audio missing".into()));
+    }
     let processed_path = rec
         .processed_audio_path
         .as_ref()
@@ -815,21 +857,24 @@ async fn manual_retry_inner(
         Some(settings.language.as_str())
     };
     let (_tx, rx) = tokio::sync::watch::channel(false);
-    match run_transcription(
+    let stt_path = write_stt_upload(&processed_path)?;
+    let transcribed = run_transcription(
         app,
         recording_id,
         &key,
         &settings.model,
         language,
-        &processed_path,
+        &stt_path,
         settings.retry.to_policy(),
         Duration::from_millis(rec.duration_ms as u64),
         rx,
     )
-    .await
-    {
+    .await;
+    let _ = std::fs::remove_file(&stt_path);
+    match transcribed {
         Ok(success) => {
             rec.status = RecordingStatus::Completed;
+            rec.model = settings.model.clone();
             rec.transcript = Some(success.text);
             rec.attempt_count = success.attempt as i64;
             rec.usage_json = success.usage_json;
@@ -852,6 +897,14 @@ async fn manual_retry_inner(
             Err(err)
         }
     }
+}
+
+fn write_stt_upload(listen_path: &Path) -> Result<PathBuf, AppError> {
+    let (samples, rate) = read_pcm16_wav_with_rate(listen_path)?;
+    let stt = samples_for_stt(&samples, rate);
+    let dest = listen_path.with_extension("stt.wav");
+    write_pcm16_wav(&dest, STT_SAMPLE_RATE, &stt)?;
+    Ok(dest)
 }
 
 #[cfg(test)]

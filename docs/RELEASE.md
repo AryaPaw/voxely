@@ -2,7 +2,7 @@
 
 Do not bump `package.json`, `src-tauri/Cargo.toml`, or `src-tauri/tauri.conf.json` until the version is confirmed.
 
-Proposed next version after 0.2.1: `0.2.2` (patch) unless a user-visible feature lands.
+Proposed next version after 0.2.2: `0.2.3` (patch) unless a user-visible feature lands.
 
 ## Secrets
 

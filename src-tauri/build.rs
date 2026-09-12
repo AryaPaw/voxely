@@ -37,6 +37,13 @@ fn main() {
             "cancel_dictation",
             "set_hotkey_capture",
             "open_github",
+            "start_model_compare",
+            "stop_model_compare",
+            "run_model_compare",
+            "get_model_compare",
+            "clear_model_compare",
+            "get_runtime_info",
+            "play_cue",
         ]),
     ))
     .expect("tauri build");
