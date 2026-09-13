@@ -470,6 +470,7 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
             ctx.emit_state(app);
             *ctx.session_recording_id.lock() = None;
             let mode = ctx.settings.lock().insertion_mode.clone();
+            let hotkey = ctx.settings.lock().hotkey.clone();
             let start_hwnd = *ctx.captured_hwnd.lock();
             let text = success.text.clone();
             let app_clone = app.clone();
@@ -508,7 +509,8 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
                     }
                     let live = native::capture_target_excluding(&skip);
                     let captured = resolve_insert_target(start_hwnd, live, overlay, main);
-                    let result = insert_transcript_now(&mode, captured, overlay, &text, abort);
+                    let result =
+                        insert_transcript_now(&mode, captured, overlay, &text, abort, &hotkey);
                     let notify = insert_app.clone();
                     let _ = insert_app.run_on_main_thread(move || match result {
                         Ok("copied") => {

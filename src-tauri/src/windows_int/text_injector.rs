@@ -122,13 +122,17 @@ pub fn hotkey_keys_to_release(spec: &str) -> Vec<u16> {
 }
 
 pub fn prefix_release_keys(hotkey: &str) -> Vec<u16> {
-    let mut keys = hotkey_keys_to_release(hotkey);
-    for extra in [0x20u16, 0x25, 0x26, 0x27, 0x28] {
-        if !keys.contains(&extra) {
-            keys.push(extra);
-        }
+    hotkey_keys_to_release(hotkey)
+}
+
+pub fn map_unicode_insert_result(
+    result: Result<(), crate::error::AppError>,
+) -> Result<&'static str, crate::error::AppError> {
+    match result {
+        Ok(()) => Ok("inserted"),
+        Err(crate::error::AppError::Cancelled) => Err(crate::error::AppError::Cancelled),
+        Err(err) => Err(err),
     }
-    keys
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -177,6 +181,7 @@ pub fn insert_transcript_now(
     overlay: Option<NativeHwnd>,
     text: &str,
     abort: impl Fn() -> bool,
+    hotkey: &str,
 ) -> Result<&'static str, crate::error::AppError> {
     use crate::error::AppError;
     if abort() {
@@ -190,14 +195,16 @@ pub fn insert_transcript_now(
         _ => {
             let hwnd = captured
                 .ok_or_else(|| AppError::TextInsertionFailed("no captured window".into()))?;
-            match native::insert_unicode_while(hwnd, text, abort, overlay) {
-                Ok(()) => Ok("inserted"),
-                Err(AppError::Cancelled) => Err(AppError::Cancelled),
-                Err(_) => {
-                    native::clipboard_copy(text)?;
-                    Ok("copied")
-                }
+            native::wait_for_keys_up(
+                &hotkey_keys_to_release(hotkey),
+                std::time::Duration::from_millis(300),
+            );
+            if abort() {
+                return Err(AppError::Cancelled);
             }
+            map_unicode_insert_result(native::insert_unicode_while(
+                hwnd, text, abort, overlay, hotkey,
+            ))
         }
     }
 }
@@ -293,7 +300,7 @@ pub mod native {
     }
 
     pub fn insert_unicode(hwnd: NativeHwnd, text: &str) -> Result<(), AppError> {
-        insert_unicode_while(hwnd, text, || false, None)
+        insert_unicode_while(hwnd, text, || false, None, "")
     }
 
     pub fn insert_unicode_while(
@@ -301,8 +308,9 @@ pub mod native {
         text: &str,
         abort: impl Fn() -> bool,
         overlay: Option<NativeHwnd>,
+        hotkey: &str,
     ) -> Result<(), AppError> {
-        insert_into_window(hwnd, text, abort, overlay)
+        insert_into_window(hwnd, text, abort, overlay, hotkey)
     }
 
     pub fn insert_into_window(
@@ -310,6 +318,7 @@ pub mod native {
         text: &str,
         abort: impl Fn() -> bool,
         overlay: Option<NativeHwnd>,
+        hotkey: &str,
     ) -> Result<(), AppError> {
         unsafe {
             let target = HWND(hwnd.value as *mut _);
@@ -355,7 +364,7 @@ pub mod native {
                 let focus_root = hwnd_root_value(thread_focus_hwnd(target).unwrap_or(target));
                 if should_send_key_paste(captured_root, foreground_root, focus_root) {
                     let class = window_class_name(target);
-                    match send_insert_keys(text, class.as_deref(), &abort) {
+                    match send_insert_keys(text, class.as_deref(), &abort, hotkey) {
                         Ok(()) => return Ok(()),
                         Err("aborted") => return Err(AppError::Cancelled),
                         Err(reason) => last_reason = reason,
@@ -399,12 +408,13 @@ pub mod native {
         text: &str,
         class: Option<&str>,
         abort: impl Fn() -> bool,
+        hotkey: &str,
     ) -> Result<(), &'static str> {
         if abort() {
             return Err("aborted");
         }
         let mut prefix = Vec::new();
-        for vk in expand_keys_to_poll(&super::prefix_release_keys("Ctrl+Shift+Space")) {
+        for vk in expand_keys_to_poll(&super::prefix_release_keys(hotkey)) {
             if vk_down(vk) {
                 prefix.push(key(vk, true));
             }
@@ -725,8 +735,10 @@ pub mod native {
         text: &str,
         abort: impl Fn() -> bool,
         overlay: Option<NativeHwnd>,
+        hotkey: &str,
     ) -> Result<(), AppError> {
         let _ = overlay;
+        let _ = hotkey;
         if abort() {
             return Err(AppError::Cancelled);
         }
@@ -738,8 +750,9 @@ pub mod native {
         text: &str,
         abort: impl Fn() -> bool,
         overlay: Option<NativeHwnd>,
+        hotkey: &str,
     ) -> Result<(), AppError> {
-        insert_unicode_while(hwnd, text, abort, overlay)
+        insert_unicode_while(hwnd, text, abort, overlay, hotkey)
     }
 
     pub fn clipboard_paste(_text: &str) -> Result<Option<String>, AppError> {
@@ -893,8 +906,32 @@ mod tests {
         assert!(keys.contains(&0x11));
         assert!(keys.contains(&0x10));
         assert!(!hotkey_keys_to_release("Ctrl+Shift+Q").contains(&0x20));
-        assert!(prefix_release_keys("Ctrl+Shift+Q").contains(&0x20));
-        assert!(prefix_release_keys("Ctrl+Shift+Q").contains(&0x25));
+        assert_eq!(
+            prefix_release_keys("Ctrl+Shift+Q"),
+            hotkey_keys_to_release("Ctrl+Shift+Q")
+        );
+        assert!(!prefix_release_keys("Ctrl+Shift+Q").contains(&0x20));
+        assert!(!prefix_release_keys("Ctrl+Shift+Q").contains(&0x25));
+        assert!(prefix_release_keys("Ctrl+Shift+Space").contains(&0x20));
+    }
+
+    #[test]
+    fn unicode_insert_failure_does_not_copy() {
+        let err = crate::error::AppError::TextInsertionFailed("focus left".into());
+        assert!(matches!(
+            map_unicode_insert_result(Err(err.clone())),
+            Err(crate::error::AppError::TextInsertionFailed(_))
+        ));
+        assert_eq!(
+            map_unicode_insert_result(Err(crate::error::AppError::Cancelled)),
+            Err(crate::error::AppError::Cancelled)
+        );
+        assert_eq!(map_unicode_insert_result(Ok(())), Ok("inserted"));
+        let failed = insert_transcript_now("unicode", None, None, "hi", || false, "Ctrl+Shift+Q");
+        assert!(matches!(
+            failed,
+            Err(crate::error::AppError::TextInsertionFailed(_))
+        ));
     }
 
     #[test]

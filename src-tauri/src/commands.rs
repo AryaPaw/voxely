@@ -353,6 +353,7 @@ pub fn copy_transcript(text: String) -> Result<(), AppError> {
 pub fn insert_transcript(app: AppHandle, text: String) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
     let mode = ctx.settings.lock().insertion_mode.clone();
+    let hotkey = ctx.settings.lock().hotkey.clone();
     let start = *ctx.captured_hwnd.lock();
     let overlay = app.get_webview_window("overlay").and_then(|window| {
         window.hwnd().ok().map(|hwnd| NativeHwnd {
@@ -371,7 +372,7 @@ pub fn insert_transcript(app: AppHandle, text: String) -> Result<(), AppError> {
         .collect();
     let live = native::capture_target_excluding(&skip);
     let captured = resolve_insert_target(start, live, overlay, main);
-    match insert_transcript_now(&mode, captured, overlay, &text, || false) {
+    match insert_transcript_now(&mode, captured, overlay, &text, || false, &hotkey) {
         Ok(_) => Ok(()),
         Err(err) => Err(err),
     }
