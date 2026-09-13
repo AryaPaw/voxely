@@ -134,11 +134,18 @@ export function HistoryCard({
 
   useEffect(() => {
     let cancelled = false;
-    void api.audioPath(item.id).then((path) => {
-      if (!cancelled) {
-        setAudioSrc(path ? convertFileSrc(path.replace(/\\/g, "/")) : null);
-      }
-    });
+    void api
+      .audioPath(item.id)
+      .then((path) => {
+        if (!cancelled) {
+          setAudioSrc(path ? convertFileSrc(path.replace(/\\/g, "/")) : null);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAudioSrc(null);
+        }
+      });
     return () => {
       cancelled = true;
     };

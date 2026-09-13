@@ -357,6 +357,17 @@ pub fn history_listen_name(rec: &Recording) -> Option<&String> {
         .or(rec.raw_audio_path.as_ref())
 }
 
+pub fn history_play_name(rec: &Recording, keep_original: bool) -> Option<&String> {
+    if rec.processed_audio_path.is_some() {
+        return rec.processed_audio_path.as_ref();
+    }
+    if keep_original {
+        rec.raw_audio_path.as_ref()
+    } else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +402,10 @@ mod tests {
         );
         rec.processed_audio_path = None;
         assert_eq!(history_listen_name(&rec).map(String::as_str), Some("1.wav"));
+        assert!(history_play_name(&rec, false).is_none());
+        assert_eq!(
+            history_play_name(&rec, true).map(String::as_str),
+            Some("1.wav")
+        );
     }
 }

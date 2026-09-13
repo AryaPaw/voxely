@@ -410,7 +410,10 @@ pub fn recording_audio_url(
         .lock()
         .get(&id)?
         .ok_or_else(|| AppError::StorageFailed("not found".into()))?;
-    let Some(name) = crate::history::repository::history_listen_name(&rec) else {
+    let Some(name) = crate::history::repository::history_play_name(
+        &rec,
+        ctx.settings.lock().keep_original_recordings,
+    ) else {
         return Ok(None);
     };
     if name.contains("..") || Path::new(name).is_absolute() {
@@ -418,6 +421,9 @@ pub fn recording_audio_url(
     }
     let root = crate::history::repository::audio_dir(&ctx.data_dir);
     let path = root.join(name);
+    if !path.is_file() {
+        return Ok(None);
+    }
     let canonical = path
         .canonicalize()
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
