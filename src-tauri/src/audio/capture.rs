@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{SampleFormat, StreamConfig};
@@ -59,6 +59,7 @@ pub struct CaptureResult {
     pub path: PathBuf,
     pub duration_ms: u64,
     pub sample_rate: u32,
+    pub samples: Vec<f32>,
 }
 
 impl CaptureSession {
@@ -240,6 +241,7 @@ fn run_monitor(mut built: BuiltCapture, stop: Arc<AtomicBool>) -> Result<Capture
         path: PathBuf::new(),
         duration_ms: 0,
         sample_rate: SAMPLE_RATE,
+        samples: Vec::new(),
     })
 }
 
@@ -262,13 +264,19 @@ fn run_capture(
             "capture overflow"
         );
     }
+    let finalize = Instant::now();
     let resampled = resample_to_48k(&pending, built.input_rate)?;
     write_pcm16_wav(&dest, SAMPLE_RATE, &resampled)?;
+    tracing::info!(
+        capture_finalize_ms = finalize.elapsed().as_millis() as u64,
+        "capture finalize"
+    );
     let duration_ms = (resampled.len() as u64 * 1000) / SAMPLE_RATE as u64;
     Ok(CaptureResult {
         path: dest,
         duration_ms,
         sample_rate: SAMPLE_RATE,
+        samples: resampled,
     })
 }
 

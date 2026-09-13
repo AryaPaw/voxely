@@ -16,11 +16,11 @@ use crate::app::overlay::{
     overlay_physical_position, WorkArea, OVERLAY_GAP_PX, OVERLAY_HEIGHT, OVERLAY_WIDTH,
 };
 use crate::audio::capture::{
-    read_pcm16_wav, read_pcm16_wav_with_rate, write_pcm16_wav, CaptureSession, MeterSample,
+    read_pcm16_wav_with_rate, write_pcm16_wav, CaptureSession, MeterSample,
 };
 use crate::audio::devices::list_input_devices;
 use crate::dsp::metrics::{SAMPLE_RATE, STT_SAMPLE_RATE};
-use crate::dsp::pipeline::{prepare_listen, samples_for_stt};
+use crate::dsp::pipeline::{prepare_listen_audio, samples_for_stt};
 use crate::error::AppError;
 use crate::history::repository::{
     audio_dir, can_retry_from_history, new_recording, HistoryRepo, RecordingStatus,
@@ -328,8 +328,9 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
     let _ = ctx.transition(SessionEvent::Saved);
     ctx.emit_state(app);
     let app_handle = app.clone();
+    let samples = result.samples;
     tauri::async_runtime::spawn(async move {
-        match process_and_transcribe(app_handle.clone(), rec.id.clone()).await {
+        match process_and_transcribe(app_handle.clone(), rec.id.clone(), samples).await {
             Ok(()) => {}
             Err(AppError::Cancelled) => {
                 let ctx = app_handle.state::<Arc<AppContext>>();
@@ -348,18 +349,26 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
     });
 }
 
-async fn process_and_transcribe(app: AppHandle, recording_id: String) -> Result<(), AppError> {
+async fn process_and_transcribe(
+    app: AppHandle,
+    recording_id: String,
+    samples: Vec<f32>,
+) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
     begin_transcription(&ctx, &recording_id)?;
     let finish = || {
         ctx.in_flight.lock().remove(&recording_id);
     };
-    let outcome = process_and_transcribe_inner(&app, &recording_id).await;
+    let outcome = process_and_transcribe_inner(&app, &recording_id, samples).await;
     finish();
     outcome
 }
 
-async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Result<(), AppError> {
+async fn process_and_transcribe_inner(
+    app: &AppHandle,
+    recording_id: &str,
+    samples: Vec<f32>,
+) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
     let started_generation = ctx.session_generation.load(Ordering::SeqCst);
     let settings = ctx.settings.lock().clone();
@@ -375,7 +384,6 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
         .clone()
         .ok_or_else(|| AppError::StorageFailed("raw missing".into()))?;
     let raw_path = audio_root.join(&raw_name);
-    let samples = read_pcm16_wav(&raw_path)?;
     let preset = settings.active_preset();
     let rx = {
         let mut slot = ctx.cancel_tx.lock();
@@ -387,9 +395,15 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
             rx
         }
     };
-    let processed = tokio::task::spawn_blocking(move || prepare_listen(preset, samples))
-        .await
-        .map_err(|e| AppError::AudioProcessingFailed(e.to_string()))??;
+    let processed_name = format!("{recording_id}.processed.wav");
+    let processed_path = audio_root.join(&processed_name);
+    let keep_original = settings.keep_original_recordings;
+    let processed_pcm = tokio::task::spawn_blocking({
+        let processed_path = processed_path.clone();
+        move || prepare_processed_audio(preset, samples, processed_path)
+    })
+    .await
+    .map_err(|e| AppError::AudioProcessingFailed(e.to_string()))??;
     if *rx.borrow()
         || !may_commit_session(
             started_generation,
@@ -399,17 +413,10 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
     {
         return Err(AppError::Cancelled);
     }
-    let (processed, _) = processed;
-    let processed_name = format!("{recording_id}.processed.wav");
-    let processed_path = audio_root.join(&processed_name);
-    write_pcm16_wav(&processed_path, SAMPLE_RATE, &processed)?;
     let mut rec = rec;
     rec.processed_audio_path = Some(processed_name);
     rec.updated_at = chrono::Utc::now();
-    if !settings.keep_original_recordings {
-        let _ = std::fs::remove_file(&raw_path);
-        rec.raw_audio_path = None;
-    }
+    apply_raw_retention(&mut rec, keep_original, &raw_path);
     ctx.history.lock().update(&rec)?;
     let _ = ctx.transition(SessionEvent::Processed);
     ctx.emit_state(app);
@@ -432,7 +439,19 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
     };
     rec.request_started_at = Some(chrono::Utc::now());
     ctx.history.lock().update(&rec)?;
-    let stt_path = write_stt_upload(&processed_path)?;
+    if *rx.borrow()
+        || !may_commit_session(
+            started_generation,
+            ctx.session_generation.load(Ordering::SeqCst),
+            false,
+        )
+    {
+        return Err(AppError::Cancelled);
+    }
+    let stt_dir = processed_path.clone();
+    let stt_path = tokio::task::spawn_blocking(move || write_stt_pcm(&processed_pcm, &stt_dir))
+        .await
+        .map_err(|e| AppError::AudioProcessingFailed(e.to_string()))??;
     let transcribed = run_transcription(
         app,
         recording_id,
@@ -466,6 +485,7 @@ async fn process_and_transcribe_inner(app: &AppHandle, recording_id: &str) -> Re
             rec.completed_at = Some(chrono::Utc::now());
             rec.updated_at = chrono::Utc::now();
             ctx.history.lock().update(&rec)?;
+            tracing::info!(stt_http_ms = success.latency_ms, "stt http");
             let _ = ctx.transition(SessionEvent::Succeeded);
             ctx.emit_state(app);
             *ctx.session_recording_id.lock() = None;
@@ -901,6 +921,59 @@ async fn manual_retry_inner(
     }
 }
 
+fn apply_raw_retention(
+    rec: &mut crate::history::repository::Recording,
+    keep_original: bool,
+    raw_path: &Path,
+) {
+    if !keep_original {
+        let _ = std::fs::remove_file(raw_path);
+        rec.raw_audio_path = None;
+    }
+}
+
+fn prepare_processed_audio(
+    preset: crate::dsp::pipeline::DspPreset,
+    samples: Vec<f32>,
+    processed_path: PathBuf,
+) -> Result<Vec<f32>, AppError> {
+    let dsp_started = Instant::now();
+    let processed = prepare_listen_audio(preset, samples)?;
+    let dsp_ms = dsp_started.elapsed().as_millis() as u64;
+    let processed_write_started = Instant::now();
+    write_pcm16_wav(&processed_path, SAMPLE_RATE, &processed)?;
+    let processed_write_ms = processed_write_started.elapsed().as_millis() as u64;
+    tracing::info!(
+        raw_read_ms = 0u64,
+        dsp_ms,
+        metrics_ms = 0u64,
+        processed_write_ms,
+        "dictation dsp"
+    );
+    Ok(processed)
+}
+
+fn write_stt_pcm(processed: &[f32], processed_path: &Path) -> Result<PathBuf, AppError> {
+    let downsample_started = Instant::now();
+    let stt = samples_for_stt(processed, SAMPLE_RATE);
+    let downsample_ms = downsample_started.elapsed().as_millis() as u64;
+    let stt_path = processed_path.with_extension("stt.wav");
+    let stt_write_started = Instant::now();
+    write_pcm16_wav(&stt_path, STT_SAMPLE_RATE, &stt)?;
+    let stt_write_ms = stt_write_started.elapsed().as_millis() as u64;
+    tracing::info!(downsample_ms, stt_write_ms, "dictation stt wav");
+    Ok(stt_path)
+}
+
+fn prepare_local_stt(
+    preset: crate::dsp::pipeline::DspPreset,
+    samples: Vec<f32>,
+    processed_path: PathBuf,
+) -> Result<PathBuf, AppError> {
+    let processed = prepare_processed_audio(preset, samples, processed_path.clone())?;
+    write_stt_pcm(&processed, &processed_path)
+}
+
 fn write_stt_upload(listen_path: &Path) -> Result<PathBuf, AppError> {
     let (samples, rate) = read_pcm16_wav_with_rate(listen_path)?;
     let stt = samples_for_stt(&samples, rate);
@@ -980,5 +1053,59 @@ mod tests {
         let kept = ctx.history.lock().get(&rec.id).unwrap().unwrap();
         assert_eq!(kept.status, RecordingStatus::Failed);
         assert_eq!(kept.last_error_code.as_deref(), Some("StorageFailed"));
+    }
+
+    #[test]
+    fn write_stt_upload_downsamples_disk_wav() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.processed.wav");
+        let sine: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
+            .collect();
+        crate::audio::capture::write_pcm16_wav(&path, SAMPLE_RATE, &sine).unwrap();
+        let stt = write_stt_upload(&path).unwrap();
+        let (pcm, rate) = read_pcm16_wav_with_rate(&stt).unwrap();
+        assert_eq!(rate, STT_SAMPLE_RATE);
+        assert!((pcm.len() as i32 - 1600).abs() <= 2);
+        assert!(pcm.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn dropping_original_removes_raw_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("raw.wav");
+        crate::audio::capture::write_pcm16_wav(&raw, SAMPLE_RATE, &[0.1; 48]).unwrap();
+        let mut rec = new_recording("openai/gpt-transcribe".into());
+        rec.raw_audio_path = Some("raw.wav".into());
+        apply_raw_retention(&mut rec, false, &raw);
+        assert!(rec.raw_audio_path.is_none());
+        assert!(!raw.exists());
+        let kept = dir.path().join("keep.wav");
+        crate::audio::capture::write_pcm16_wav(&kept, SAMPLE_RATE, &[0.1; 48]).unwrap();
+        rec.raw_audio_path = Some("keep.wav".into());
+        apply_raw_retention(&mut rec, true, &kept);
+        assert_eq!(rec.raw_audio_path.as_deref(), Some("keep.wav"));
+        assert!(kept.exists());
+    }
+
+    #[test]
+    fn prepare_local_stt_writes_processed_and_stt() {
+        let dir = tempfile::tempdir().unwrap();
+        let processed = dir.path().join("rec.processed.wav");
+        let sine: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
+            .collect();
+        let stt = prepare_local_stt(
+            crate::dsp::pipeline::DspPreset::stt_fast(),
+            sine,
+            processed.clone(),
+        )
+        .unwrap();
+        assert!(processed.exists());
+        assert!(stt.exists());
+        let (_, processed_rate) = read_pcm16_wav_with_rate(&processed).unwrap();
+        let (_, stt_rate) = read_pcm16_wav_with_rate(&stt).unwrap();
+        assert_eq!(processed_rate, SAMPLE_RATE);
+        assert_eq!(stt_rate, STT_SAMPLE_RATE);
     }
 }

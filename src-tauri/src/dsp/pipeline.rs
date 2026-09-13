@@ -213,7 +213,19 @@ impl DspPipeline {
         })
     }
 
-    pub fn process(&mut self, mut samples: Vec<f32>) -> Result<(Vec<f32>, AudioMetrics), AppError> {
+    pub fn process(&mut self, samples: Vec<f32>) -> Result<(Vec<f32>, AudioMetrics), AppError> {
+        self.process_inner(samples, true)
+    }
+
+    pub fn process_audio(&mut self, samples: Vec<f32>) -> Result<Vec<f32>, AppError> {
+        Ok(self.process_inner(samples, false)?.0)
+    }
+
+    fn process_inner(
+        &mut self,
+        mut samples: Vec<f32>,
+        with_metrics: bool,
+    ) -> Result<(Vec<f32>, AudioMetrics), AppError> {
         if samples.is_empty() {
             return Ok((samples, metrics(&[])));
         }
@@ -233,7 +245,11 @@ impl DspPipeline {
                     if mix <= 0.0 {
                         continue;
                     }
-                    let dry = samples.clone();
+                    let dry = if mix < 1.0 {
+                        Some(samples.clone())
+                    } else {
+                        None
+                    };
                     let mut out = self.rnnoise.process(&samples);
                     out.extend(self.rnnoise.flush());
                     if out.len() < samples.len() {
@@ -244,6 +260,7 @@ impl DspPipeline {
                     if mix >= 1.0 {
                         samples = out;
                     } else {
+                        let dry = dry.expect("dry mix");
                         samples = dry
                             .iter()
                             .zip(out.iter())
@@ -263,7 +280,11 @@ impl DspPipeline {
                 ));
             }
         }
-        let stats = metrics(&samples);
+        let stats = if with_metrics {
+            metrics(&samples)
+        } else {
+            metrics(&[])
+        };
         Ok((samples, stats))
     }
 }
@@ -274,6 +295,11 @@ pub fn prepare_listen(
 ) -> Result<(Vec<f32>, AudioMetrics), AppError> {
     let mut pipeline = DspPipeline::new(preset)?;
     pipeline.process(samples)
+}
+
+pub fn prepare_listen_audio(preset: DspPreset, samples: Vec<f32>) -> Result<Vec<f32>, AppError> {
+    let mut pipeline = DspPipeline::new(preset)?;
+    pipeline.process_audio(samples)
 }
 
 pub fn apply_listen_loudness(samples: &[f32]) -> (Vec<f32>, AudioMetrics) {
@@ -457,6 +483,40 @@ mod tests {
         let (wet_out, _) = prepare_listen(wet, sine.clone()).unwrap();
         assert_eq!(wet_out.len(), sine.len());
         assert_ne!(wet_out, sine);
+    }
+
+    #[test]
+    fn rnnoise_mix_partial_is_weighted() {
+        let sine: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
+            .collect();
+        let mut base = DspPreset::stt_optimized();
+        base.order.retain(|slot| slot.kind == FilterKind::Rnnoise);
+        let mut dry = base.clone();
+        dry.rnnoise_mix = 0.0;
+        let mut wet = base.clone();
+        wet.rnnoise_mix = 1.0;
+        let mut mixed = base;
+        mixed.rnnoise_mix = 0.6;
+        let dry_out = prepare_listen_audio(dry, sine.clone()).unwrap();
+        let wet_out = prepare_listen_audio(wet, sine.clone()).unwrap();
+        let mix_out = prepare_listen_audio(mixed, sine).unwrap();
+        assert_eq!(mix_out.len(), dry_out.len());
+        for i in 0..mix_out.len() {
+            let expected = dry_out[i] * 0.4 + wet_out[i] * 0.6;
+            assert!((mix_out[i] - expected).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn process_audio_matches_process_without_using_metrics() {
+        let sine: Vec<f32> = (0..4800)
+            .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
+            .collect();
+        let audio = prepare_listen_audio(DspPreset::stt_optimized(), sine.clone()).unwrap();
+        let (with_metrics, metrics) = prepare_listen(DspPreset::stt_optimized(), sine).unwrap();
+        assert_eq!(audio, with_metrics);
+        assert!(metrics.peak > 0.0);
     }
 
     #[test]

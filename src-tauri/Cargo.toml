@@ -79,3 +79,18 @@ lto = true
 opt-level = 3
 panic = "unwind"
 strip = true
+
+[profile.dev.package.nnnoiseless]
+opt-level = 3
+
+[profile.dev.package.rubato]
+opt-level = 3
+
+[profile.dev.package.rustfft]
+opt-level = 3
+
+[profile.dev.package.realfft]
+opt-level = 3
+
+[profile.dev.package.easyfft]
+opt-level = 3

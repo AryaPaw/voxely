@@ -9,7 +9,7 @@ use crate::app::machine::is_cancellable;
 use crate::app::session::{release_meter_monitor, AppContext};
 use crate::audio::capture::{read_pcm16_wav_with_rate, write_pcm16_wav, CaptureSession};
 use crate::dsp::metrics::{SAMPLE_RATE, STT_SAMPLE_RATE};
-use crate::dsp::pipeline::{prepare_listen, samples_for_stt};
+use crate::dsp::pipeline::{prepare_listen_audio, samples_for_stt};
 use crate::error::AppError;
 use crate::history::repository::audio_dir;
 use crate::transcription::openrouter::{transcribe_file, TranscriptionSuccess};
@@ -144,9 +144,13 @@ pub fn stop_model_compare(app: &AppHandle) -> Result<CompareState, AppError> {
         .take()
         .ok_or_else(|| AppError::AudioCaptureFailed("compare not started".into()))?;
     let result = session.stop()?;
-    let (pcm, rate) = read_pcm16_wav_with_rate(&result.path)?;
+    let (pcm, rate) = if result.samples.is_empty() {
+        read_pcm16_wav_with_rate(&result.path)?
+    } else {
+        (result.samples, result.sample_rate)
+    };
     let preset = ctx.settings.lock().active_preset();
-    let (listen, _) = prepare_listen(preset, pcm)?;
+    let listen = prepare_listen_audio(preset, pcm)?;
     let stt = samples_for_stt(&listen, rate);
     let audio = audio_dir(&ctx.data_dir);
     let nonce = ctx.compare_state.lock().nonce.max(1);

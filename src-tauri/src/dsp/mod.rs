@@ -5,3 +5,5 @@ pub mod mic_tune;
 pub mod obs_mapping;
 pub mod pipeline;
 pub mod rnnoise;
+#[cfg(test)]
+pub mod timing;
