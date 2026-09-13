@@ -8,6 +8,7 @@ mod commands;
 pub mod dsp;
 mod error;
 mod history;
+mod logging;
 mod obs;
 mod settings;
 mod transcription;
@@ -37,8 +38,17 @@ fn init_logging(debug: bool, log_dir: Option<&Path>) {
     let subscriber = tracing_subscriber::fmt().with_env_filter(EnvFilter::new(filter));
     if let Some(dir) = log_dir {
         let _ = std::fs::create_dir_all(dir);
-        let file_appender = tracing_appender::rolling::daily(dir, "voxely.log");
-        let _ = subscriber.with_writer(file_appender).try_init();
+        let file_appender = match crate::logging::file_appender(dir) {
+            Ok(appender) => appender,
+            Err(_) => {
+                let _ = subscriber.try_init();
+                return;
+            }
+        };
+        let _ = subscriber
+            .with_ansi(false)
+            .with_writer(file_appender)
+            .try_init();
     } else {
         let _ = subscriber.try_init();
     }
