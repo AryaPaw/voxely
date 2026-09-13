@@ -104,6 +104,57 @@ pub fn classify_http_status(status: u16, retry_after: Option<Duration>) -> Class
     }
 }
 
+pub fn classify_http(status: u16, retry_after: Option<Duration>, body: &str) -> ClassifiedError {
+    let lower = body.to_ascii_lowercase();
+    let provider_gap = lower.contains("could not be reached")
+        || lower.contains("no available")
+        || lower.contains("overloaded")
+        || lower.contains("no endpoints")
+        || lower.contains("provider returned error");
+    if provider_gap && status != 401 && status != 403 {
+        return ClassifiedError {
+            class: RetryClass::Retryable,
+            error: AppError::ProviderUnavailable,
+            http_status: Some(status),
+            retry_after,
+        };
+    }
+    if (status == 400 || status == 404 || status == 422)
+        && (lower.contains("invalid model")
+            || lower.contains("model not found")
+            || lower.contains("does not exist"))
+    {
+        return ClassifiedError {
+            class: RetryClass::Terminal,
+            error: AppError::InvalidModel(truncated_body(body)),
+            http_status: Some(status),
+            retry_after: None,
+        };
+    }
+    classify_http_status(status, retry_after)
+}
+
+pub fn truncated_body(body: &str) -> String {
+    const LIMIT: usize = 400;
+    let compact: String = body.chars().take(LIMIT).collect();
+    if body.chars().count() > LIMIT {
+        format!("{compact}...")
+    } else {
+        compact
+    }
+}
+
+pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
+    let mut out = err.to_string();
+    let mut source = err.source();
+    while let Some(inner) = source {
+        out.push_str(": ");
+        out.push_str(&inner.to_string());
+        source = inner.source();
+    }
+    out
+}
+
 pub fn classify_io(message: &str) -> ClassifiedError {
     let lower = message.to_ascii_lowercase();
     let retryable = lower.contains("timed out")
@@ -115,7 +166,10 @@ pub fn classify_io(message: &str) -> ClassifiedError {
         || lower.contains("unreachable")
         || lower.contains("temporarily")
         || lower.contains("tls")
-        || lower.contains("reset by peer");
+        || lower.contains("reset by peer")
+        || lower.contains("error sending request")
+        || lower.contains("error trying to connect")
+        || lower.contains("tcp connect");
     ClassifiedError {
         class: if retryable {
             RetryClass::Retryable
@@ -270,6 +324,26 @@ mod tests {
                 RetryClass::Retryable
             );
         }
+    }
+
+    #[test]
+    fn sending_request_failure_is_retryable() {
+        let classified = classify_io(
+            "error sending request for url (https://openrouter.ai/api/v1/audio/transcriptions)",
+        );
+        assert_eq!(classified.class, RetryClass::Retryable);
+        assert!(matches!(classified.error, AppError::ConnectionFailed(_)));
+    }
+
+    #[test]
+    fn provider_could_not_be_reached_is_retryable() {
+        let classified = classify_http(
+            400,
+            None,
+            r#"{"error":{"message":"Provider returned error: The model could not be reached"}}"#,
+        );
+        assert_eq!(classified.class, RetryClass::Retryable);
+        assert_eq!(classified.error, AppError::ProviderUnavailable);
     }
 
     #[test]

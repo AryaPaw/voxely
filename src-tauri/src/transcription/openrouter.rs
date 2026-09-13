@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::AppError;
 use crate::transcription::retry::{
-    classify_http_status, classify_io, parse_retry_after, AttemptDecision, ClassifiedError,
-    RetryPolicy, RetryScheduler,
+    classify_http, classify_io, error_chain, parse_retry_after, truncated_body, AttemptDecision,
+    ClassifiedError, RetryPolicy, RetryScheduler,
 };
 
 const DEFAULT_BASE: &str = "https://openrouter.ai/api/v1";
@@ -126,6 +126,13 @@ pub async fn transcribe_file_with_progress(
                         return Ok(success);
                     }
                     Some(Err(classified)) => {
+                        tracing::warn!(
+                            attempt,
+                            status = classified.http_status,
+                            retryable = classified.class == crate::transcription::retry::RetryClass::Retryable,
+                            error = %classified.error,
+                            "stt attempt failed"
+                        );
                         match scheduler.after_failure(&classified, Instant::now(), 0.08) {
                             AttemptDecision::GiveUp(err) => return Err(err),
                             AttemptDecision::Wait {
@@ -216,12 +223,12 @@ async fn one_attempt(
         .multipart(form)
         .timeout(timeout)
         .build()
-        .map_err(|e| classify_io(&e.to_string()))?;
+        .map_err(|e| classify_io(&error_chain(&e)))?;
     let _ = connect_timeout;
     let response = client
         .execute(request)
         .await
-        .map_err(|e| classify_io(&e.to_string()))?;
+        .map_err(|e| classify_io(&error_chain(&e)))?;
     let status = response.status().as_u16();
     let generation_id = response
         .headers()
@@ -236,9 +243,11 @@ async fn one_attempt(
     let body = response
         .text()
         .await
-        .map_err(|e| classify_io(&e.to_string()))?;
+        .map_err(|e| classify_io(&error_chain(&e)))?;
     if !(200..300).contains(&status) {
-        return Err(classify_http_status(status, retry_after));
+        let snippet = truncated_body(&body);
+        tracing::warn!(status, body = %snippet, "stt http error");
+        return Err(classify_http(status, retry_after, &body));
     }
     let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|_| ClassifiedError {
         class: crate::transcription::retry::RetryClass::Terminal,
@@ -289,7 +298,7 @@ pub async fn list_transcription_models(
         .timeout(Duration::from_secs(8))
         .send()
         .await
-        .map_err(|e| AppError::ConnectionFailed(e.to_string()))?;
+        .map_err(|e| AppError::ConnectionFailed(error_chain(&e)))?;
     if !response.status().is_success() {
         return Err(AppError::ProviderUnavailable);
     }
