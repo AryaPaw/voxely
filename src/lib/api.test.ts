@@ -85,9 +85,7 @@ describe("formatDuration", () => {
 
   it("uses English units when asked", () => {
     expect(formatDuration(10000, { seconds: "sec.", minutes: "min." })).toBe("10 sec.");
-    expect(formatDuration(330000, { seconds: "sec.", minutes: "min." })).toBe(
-      "5 min. 30 sec.",
-    );
+    expect(formatDuration(330000, { seconds: "sec.", minutes: "min." })).toBe("5 min. 30 sec.");
   });
 });
 
