@@ -1,6 +1,7 @@
 import { toast } from "sonner";
 import { api, type AppSettings } from "../../../lib/api";
 import { formatInvokeError, statusToast, type Messages } from "../../../lib/i18n";
+import { reportError } from "../../../lib/system-notify";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { SettingsField } from "../../../components/settings/SettingsField";
 import { SettingsSwitchRow } from "../../../components/settings/SettingsSwitchRow";
@@ -36,7 +37,7 @@ export function AdvancedSettings({
       onSettingsReplaced(next, wipeApiKey);
       toast.success(statusToast("success", copy, wipeApiKey ? copy.resetAllDone : copy.resetDone));
     } catch (error: unknown) {
-      toast.error(statusToast("error", copy, formatInvokeError(error, copy)));
+      reportError(statusToast("error", copy, formatInvokeError(error, copy)));
     }
   }
 
@@ -44,7 +45,7 @@ export function AdvancedSettings({
     const failed = kind === "logs" ? copy.openLogsFailed : copy.openSettingsFailed;
     const open = kind === "logs" ? api.openLogs : api.openSettingsDir;
     void open().catch(() => {
-      toast.error(statusToast("error", copy, failed));
+      reportError(statusToast("error", copy, failed));
     });
   }
 

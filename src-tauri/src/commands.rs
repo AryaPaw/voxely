@@ -374,7 +374,10 @@ pub fn insert_transcript(app: AppHandle, text: String) -> Result<(), AppError> {
     let captured = resolve_insert_target(start, live, overlay, main);
     match insert_transcript_now(&mode, captured, overlay, &text, || false, &hotkey) {
         Ok(_) => Ok(()),
-        Err(err) => Err(err),
+        Err(err) => {
+            crate::notify::show_error(&app, &err);
+            Err(err)
+        }
     }
 }
 
@@ -478,4 +481,12 @@ pub fn play_cue(kind: String) -> Result<(), AppError> {
     }
     crate::audio::cue::play_dictation_cue(crate::audio::cue::parse_cue_kind(&kind)?);
     Ok(())
+}
+
+#[tauri::command]
+pub fn preview_error_notification(app: AppHandle) -> Result<(), AppError> {
+    if !crate::app::lifecycle::is_local_build() {
+        return Err(AppError::RequestValidationFailed("debug only".into()));
+    }
+    crate::notify::show_preview(&app)
 }

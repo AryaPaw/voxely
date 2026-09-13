@@ -75,8 +75,19 @@ describe("sessionStatusLabel", () => {
 });
 
 describe("formatDuration", () => {
-  it("pads seconds", () => {
-    expect(formatDuration(5000)).toBe("0:05");
+  it("uses spoken second and minute units", () => {
+    expect(formatDuration(5000)).toBe("5 сек.");
+    expect(formatDuration(10000)).toBe("10 сек.");
+    expect(formatDuration(65000)).toBe("1 мин. 5 сек.");
+    expect(formatDuration(330000)).toBe("5 мин. 30 сек.");
+    expect(formatDuration(300000)).toBe("5 мин.");
+  });
+
+  it("uses English units when asked", () => {
+    expect(formatDuration(10000, { seconds: "sec.", minutes: "min." })).toBe("10 sec.");
+    expect(formatDuration(330000, { seconds: "sec.", minutes: "min." })).toBe(
+      "5 min. 30 sec.",
+    );
   });
 });
 

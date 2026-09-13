@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { toast } from "sonner";
 import { api } from "../../../lib/api";
+import { reportError } from "../../../lib/system-notify";
 import { formatInvokeError, updateToast, type Messages, appDisplayName } from "../../../lib/i18n";
 import { APP_RELEASED_ON, versionWithReleaseDate } from "../../../lib/release-meta";
 import { PageHeader } from "../../../components/settings/PageHeader";
@@ -23,7 +24,7 @@ function GithubLink({
       className="text-primary underline-offset-2 hover:underline"
       onClick={() => {
         void onOpen().catch((error: unknown) => {
-          toast.error(formatInvokeError(error, copy));
+          reportError(formatInvokeError(error, copy));
         });
       }}
     >
@@ -79,7 +80,7 @@ export function AboutSettings({ copy, localBuild }: { copy: Messages; localBuild
             const code = await api.checkForUpdates();
             toast.success(updateToast(code, copy));
           } catch (error) {
-            toast.error(formatInvokeError(error, copy));
+            reportError(formatInvokeError(error, copy));
           } finally {
             setChecking(false);
           }

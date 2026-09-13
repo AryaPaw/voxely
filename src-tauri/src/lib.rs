@@ -9,6 +9,7 @@ pub mod dsp;
 mod error;
 mod history;
 mod logging;
+mod notify;
 mod obs;
 mod settings;
 mod transcription;
@@ -70,6 +71,7 @@ pub fn run() {
         ))
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let ctx = attach_context(app.handle())?;
@@ -84,6 +86,7 @@ pub fn run() {
             crate::updates::spawn_background_loop(app.handle().clone());
             if let Err(err) = reregister_hotkey(app.handle(), &hotkey) {
                 tracing::error!(error = %err, "hotkey failed");
+                crate::notify::show_error(app.handle(), &err);
             }
             apply_launch_visibility(app.handle(), std::env::args());
             if let Some(window) = app.get_webview_window("main") {
@@ -143,7 +146,8 @@ pub fn run() {
             get_model_compare,
             clear_model_compare,
             get_runtime_info,
-            play_cue
+            play_cue,
+            preview_error_notification
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|err| {

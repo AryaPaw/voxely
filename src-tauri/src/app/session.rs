@@ -255,6 +255,7 @@ fn finish_capture_start(app: &AppHandle, started: Result<CaptureSession, AppErro
             tracing::error!(error = %err, "capture start failed");
             let _ = ctx.transition(SessionEvent::CaptureFailed(err.clone()));
             ctx.emit_state(app);
+            crate::notify::show_error(app, &err);
             hide_overlay_later(app.clone(), Duration::from_millis(2000));
         }
     }
@@ -292,6 +293,7 @@ fn stop_recording(app: &AppHandle) -> Result<(), AppError> {
                 let ctx = handle.state::<Arc<AppContext>>();
                 let _ = ctx.transition(SessionEvent::SaveFailed(err.clone()));
                 ctx.emit_state(&handle);
+                crate::notify::show_error(&handle, &err);
                 hide_overlay_later(handle, Duration::from_millis(2000));
             });
         }
@@ -341,8 +343,9 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
                 tracing::error!(error = %err, "pipeline failed");
                 let ctx = app_handle.state::<Arc<AppContext>>();
                 mark_recording_failed(&ctx, &rec.id, &err);
-                let _ = ctx.transition(SessionEvent::Failed(err));
+                let _ = ctx.transition(SessionEvent::Failed(err.clone()));
                 ctx.emit_state(&app_handle);
+                crate::notify::show_error(&app_handle, &err);
                 hide_overlay_later(app_handle, Duration::from_millis(2000));
             }
         }
@@ -539,6 +542,7 @@ async fn process_and_transcribe_inner(
                         Ok(_) => {}
                         Err(AppError::Cancelled) => {}
                         Err(err) => {
+                            crate::notify::show_error(&notify, &err);
                             let _ = notify.emit("session://insert", err.code());
                         }
                     });
@@ -848,6 +852,9 @@ pub async fn manual_retry(
     begin_transcription(&ctx, &recording_id)?;
     let result = manual_retry_inner(&app, &recording_id).await;
     ctx.in_flight.lock().remove(&recording_id);
+    if let Err(err) = &result {
+        crate::notify::show_error(&app, err);
+    }
     result
 }
 

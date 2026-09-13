@@ -11,8 +11,8 @@ import {
   Settings as SettingsIcon,
   Trash2,
 } from "lucide-react";
-import { toast } from "sonner";
 import { api, type Recording } from "../../../lib/api";
+import { reportError } from "../../../lib/system-notify";
 import { formatInvokeError, localizedError, type Messages } from "../../../lib/i18n";
 import { formatDuration, formatTime } from "../../../lib/utils";
 import { PageHeader } from "../../../components/settings/PageHeader";
@@ -169,7 +169,7 @@ export function HistoryCard({
       await api.retry(item.id);
       await onRefresh();
     } catch (error) {
-      toast.error(formatInvokeError(error, copy));
+      reportError(formatInvokeError(error, copy));
     } finally {
       setRetrying(false);
     }
@@ -178,6 +178,11 @@ export function HistoryCard({
   const errorText = item.lastErrorCode
     ? localizedError(item.lastErrorCode, copy, item.lastErrorMessage ?? undefined)
     : (item.lastErrorMessage ?? "—");
+  const duration = (ms: number) =>
+    formatDuration(ms, {
+      seconds: copy.durationSeconds,
+      minutes: copy.durationMinutes,
+    });
 
   return (
     <article className="history-card">
@@ -185,7 +190,7 @@ export function HistoryCard({
         <div className="text-[11px] font-medium tracking-wide text-muted-foreground">
           {formatTime(item.createdAt, copy.dateLocale)}
           <span className="mx-2 opacity-50">|</span>
-          {formatDuration(item.durationMs)}
+          {duration(item.durationMs)}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {item.transcript ? (
@@ -294,8 +299,8 @@ export function HistoryCard({
             style={{ width: `${progress * 100}%` }}
           />
         </div>
-        <div className="w-16 text-right text-[11px] tabular-nums text-muted-foreground">
-          {formatDuration(current)} / {formatDuration(item.durationMs)}
+        <div className="shrink-0 text-right text-[11px] whitespace-nowrap tabular-nums text-muted-foreground">
+          {duration(current)} / {duration(item.durationMs)}
         </div>
       </div>
       {audioSrc ? (

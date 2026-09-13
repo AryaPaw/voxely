@@ -2,6 +2,7 @@ import { useState } from "react";
 import { toast } from "sonner";
 import { api, type AppSettings } from "../../../lib/api";
 import type { Messages } from "../../../lib/i18n";
+import { reportError } from "../../../lib/system-notify";
 import { speechLanguageOptions } from "../../../lib/speech-languages";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { SettingsField } from "../../../components/settings/SettingsField";
@@ -49,7 +50,7 @@ export function TranscriptionSettings({
               setKeyDraft("");
               toast.success(copy.keySavedToast);
             } catch (error) {
-              toast.error(error instanceof Error ? error.message : copy.keyNotSaved);
+              reportError(error instanceof Error ? error.message : copy.keyNotSaved);
             }
           }}
         >
@@ -62,7 +63,7 @@ export function TranscriptionSettings({
               const count = await api.testConnection();
               toast.success(copy.modelsFound.replace("{n}", String(count)));
             } catch (error) {
-              toast.error(error instanceof Error ? error.message : copy.noConnection);
+              reportError(error instanceof Error ? error.message : copy.noConnection);
             }
           }}
         >

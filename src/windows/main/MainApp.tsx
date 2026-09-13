@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
+import { reportError } from "../../lib/system-notify";
 import { api, type AppSettings, type Recording, type SessionState } from "../../lib/api";
 import { applyTheme, resolvedTheme, watchSystemTheme } from "../../lib/theme";
 import {
@@ -67,7 +68,7 @@ export function MainApp() {
   useEffect(() => {
     void loadSettings();
     void refreshHistory().catch((error: unknown) => {
-      toast.error(
+      reportError(
         formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
       );
     });
@@ -140,7 +141,7 @@ export function MainApp() {
     } catch (error) {
       setSettings(currentSettings);
       applyTheme(currentSettings.theme);
-      toast.error(formatInvokeError(error, copy));
+      reportError(formatInvokeError(error, copy));
     }
   }
 

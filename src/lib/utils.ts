@@ -1,10 +1,26 @@
 export { cn } from "cn";
 
-export function formatDuration(ms: number): string {
+export type DurationUnits = {
+  seconds: string;
+  minutes: string;
+};
+
+const RUSSIAN_DURATION: DurationUnits = {
+  seconds: "сек.",
+  minutes: "мин.",
+};
+
+export function formatDuration(ms: number, units: DurationUnits = RUSSIAN_DURATION): string {
   const total = Math.max(0, Math.round(ms / 1000));
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  return `${m}:${s.toString().padStart(2, "0")}`;
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes === 0) {
+    return `${total} ${units.seconds}`;
+  }
+  if (seconds === 0) {
+    return `${minutes} ${units.minutes}`;
+  }
+  return `${minutes} ${units.minutes} ${seconds} ${units.seconds}`;
 }
 
 export function formatTime(iso: string, locale = "ru-RU"): string {

@@ -53,6 +53,7 @@ describe("HistoryPane", () => {
       />,
     );
     expect(screen.getByRole("heading", { name: "История" })).toBeInTheDocument();
+    expect(screen.getAllByText(/1 мин\. 5 сек\./)).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Удалить" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Копировать" }));
     expect(screen.getByRole("button", { name: "Повторить расшифровку" })).toBeInTheDocument();

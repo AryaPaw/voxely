@@ -162,6 +162,7 @@ export async function invoke<T>(cmd: string): Promise<T> {
     case "start_model_compare":
     case "clear_model_compare":
     case "play_cue":
+    case "preview_error_notification":
     case "open_audio_dir":
     case "open_github":
     case "open_logs":

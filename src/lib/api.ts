@@ -208,4 +208,5 @@ export const api = {
   getModelCompare: () => invoke<CompareState>("get_model_compare"),
   clearModelCompare: () => invoke<void>("clear_model_compare"),
   playCue: (kind: CueKind) => invoke<void>("play_cue", { kind }),
+  previewErrorNotification: () => invoke<void>("preview_error_notification"),
 };

@@ -44,6 +44,7 @@ fn main() {
             "clear_model_compare",
             "get_runtime_info",
             "play_cue",
+            "preview_error_notification",
         ]),
     ))
     .expect("tauri build");

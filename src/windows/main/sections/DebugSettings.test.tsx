@@ -23,4 +23,10 @@ describe("DebugSettings", () => {
     expect(invoke).toHaveBeenCalledWith("play_cue", { kind: "stop" });
     expect(invoke).toHaveBeenCalledWith("play_cue", { kind: "cancel" });
   });
+
+  it("sends a real Windows error notification", () => {
+    render(<DebugSettings copy={messagesFor("en")} />);
+    fireEvent.click(screen.getByRole("button", { name: "Show notification" }));
+    expect(invoke).toHaveBeenCalledWith("preview_error_notification");
+  });
 });

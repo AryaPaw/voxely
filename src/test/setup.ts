@@ -1,4 +1,11 @@
+import { vi } from "vitest";
 import "@testing-library/jest-dom/vitest";
+
+vi.mock("@tauri-apps/plugin-notification", () => ({
+  isPermissionGranted: vi.fn(async () => true),
+  requestPermission: vi.fn(async () => "granted"),
+  sendNotification: vi.fn(),
+}));
 
 class ResizeObserverStub {
   observe(): void {}

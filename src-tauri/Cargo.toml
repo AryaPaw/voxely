@@ -48,6 +48,7 @@ base64 = "0.22"
 directories = "5"
 once_cell = "1"
 sha2 = "0.10"
+tauri-plugin-notification = "2.4.0"
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = [
