@@ -4,7 +4,7 @@ import { APP_RELEASED_ON, formatReleaseDate, versionWithReleaseDate } from "./re
 describe("versionWithReleaseDate", () => {
   it("formats the shipped release date in parentheses", () => {
     expect(formatReleaseDate(APP_RELEASED_ON, "en-US")).toBe("Sep 13, 2026");
-    expect(versionWithReleaseDate("0.2.3", APP_RELEASED_ON, "en-US")).toBe("0.2.3 (Sep 13, 2026)");
+    expect(versionWithReleaseDate("0.2.4", APP_RELEASED_ON, "en-US")).toBe("0.2.4 (Sep 13, 2026)");
     expect(versionWithReleaseDate("", APP_RELEASED_ON, "en-US")).toBe("…");
   });
 });
