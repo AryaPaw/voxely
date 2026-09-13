@@ -6,6 +6,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
+use crate::app::lifecycle::is_local_build;
 use crate::app::machine::is_cancellable;
 use crate::app::session::AppContext;
 
@@ -14,6 +15,8 @@ use policy::{install_allowed, is_newer_stable};
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
 }
+
+const UPDATE_CHECK_ATTEMPTS: u32 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateCode {
@@ -34,6 +37,22 @@ impl UpdateCode {
             Self::Failed => "failed",
         }
     }
+}
+
+pub fn should_poll_updates(local_build: bool, auto_enabled: bool) -> bool {
+    auto_enabled && !local_build
+}
+
+pub fn update_error_retryable(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("error sending request")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+        || lower.contains("connection")
+        || lower.contains("dns")
+        || lower.contains("tls")
+        || lower.contains("status code")
+        || lower.contains("failed to check")
 }
 
 pub async fn check_and_maybe_install(app: &AppHandle, force: bool) -> UpdateCode {
@@ -62,36 +81,73 @@ async fn run_check(app: &AppHandle, force: bool) -> UpdateCode {
     if !install_allowed(busy) {
         return UpdateCode::Deferred;
     }
-    let updater = match app.updater() {
-        Ok(updater) => updater,
-        Err(err) => {
-            tracing::error!(error = %err, "updater unavailable");
-            return UpdateCode::Failed;
+    let mut delay = Duration::from_millis(400);
+    let mut last_err = String::new();
+    for attempt in 1..=UPDATE_CHECK_ATTEMPTS {
+        match try_check(app).await {
+            Ok(code) => return code,
+            Err(err) => {
+                last_err = err;
+                if attempt < UPDATE_CHECK_ATTEMPTS && update_error_retryable(&last_err) {
+                    tracing::warn!(
+                        attempt,
+                        error = %last_err,
+                        "update check retry"
+                    );
+                    tokio::time::sleep(delay).await;
+                    delay = delay.saturating_mul(2);
+                    continue;
+                }
+                break;
+            }
         }
+    }
+    tracing::error!(error = %last_err, "update check failed");
+    UpdateCode::Failed
+}
+
+async fn try_check(app: &AppHandle) -> Result<UpdateCode, String> {
+    let updater = match build_updater(app) {
+        Ok(updater) => updater,
+        Err(err) => return Err(err),
     };
     match updater.check().await {
         Ok(Some(update)) => {
             let prerelease = update.version.contains('-');
             if !is_newer_stable(current_version(), &update.version, prerelease) {
-                return UpdateCode::None;
+                return Ok(UpdateCode::None);
             }
             match update.download_and_install(|_, _| {}, || {}).await {
-                Ok(()) => UpdateCode::Installed,
+                Ok(()) => Ok(UpdateCode::Installed),
                 Err(err) => {
                     tracing::error!(error = %err, "update install failed");
-                    UpdateCode::Failed
+                    Ok(UpdateCode::Failed)
                 }
             }
         }
-        Ok(None) => UpdateCode::None,
-        Err(err) => {
-            tracing::error!(error = %err, "update check failed");
-            UpdateCode::Failed
-        }
+        Ok(None) => Ok(UpdateCode::None),
+        Err(err) => Err(err.to_string()),
     }
 }
 
+fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
+    let ua = format!(
+        "Voxely/{} (+https://github.com/AryaPaw/voxely)",
+        current_version()
+    );
+    app.updater_builder()
+        .timeout(Duration::from_secs(20))
+        .header("User-Agent", ua)
+        .map_err(|err| err.to_string())?
+        .build()
+        .map_err(|err| err.to_string())
+}
+
 pub fn spawn_background_loop(app: AppHandle) {
+    if is_local_build() {
+        tracing::info!("skipping auto-update polling on local debug build");
+        return;
+    }
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(Duration::from_secs(15)).await;
         loop {
@@ -100,7 +156,7 @@ pub fn spawn_background_loop(app: AppHandle) {
                 let enabled = ctx.settings.lock().auto_update_enabled;
                 enabled
             };
-            if enabled {
+            if should_poll_updates(false, enabled) {
                 let outcome = check_and_maybe_install(&app, false).await;
                 match outcome {
                     UpdateCode::Installed => return,
@@ -116,4 +172,27 @@ pub fn spawn_background_loop(app: AppHandle) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn local_debug_does_not_poll_updates() {
+        assert!(!should_poll_updates(true, true));
+        assert!(should_poll_updates(false, true));
+        assert!(!should_poll_updates(false, false));
+    }
+
+    #[test]
+    fn github_network_blip_is_retryable() {
+        assert!(update_error_retryable(
+            "error sending request for url (https://github.com/AryaPaw/voxely/releases/latest/download/latest.json)"
+        ));
+        assert!(update_error_retryable(
+            "update endpoint did not respond with a successful status code"
+        ));
+        assert!(!update_error_retryable("invalid signature"));
+    }
 }
