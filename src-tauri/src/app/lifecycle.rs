@@ -12,7 +12,7 @@ use crate::app::overlay::{center_physical_position, WorkArea};
 use crate::app::session::AppContext;
 use crate::app::shortcuts::sync_shortcuts;
 use crate::error::AppError;
-use crate::windows_int::overlay::work_area_for_cursor;
+use crate::windows_int::overlay::{work_area_for_cursor, work_area_for_foreground};
 
 pub fn is_local_build() -> bool {
     cfg!(debug_assertions)
@@ -30,24 +30,24 @@ pub fn runtime_info() -> RuntimeInfo {
     }
 }
 
-pub fn app_display_name(locale: &str) -> &'static str {
-    if !is_local_build() {
-        return "Voxely";
-    }
-    if locale == "en" {
-        "Voxely (local)"
+pub fn app_display_name(_locale: &str) -> &'static str {
+    "Voxely"
+}
+
+pub fn window_title() -> &'static str {
+    if is_local_build() {
+        "Voxely (sandbox)"
     } else {
-        "Voxely (локальная)"
+        "Voxely"
     }
 }
 
-fn apply_app_identity(app: &AppHandle, locale: &str) {
-    let name = app_display_name(locale);
+fn apply_app_identity(app: &AppHandle, _locale: &str) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title(name);
+        let _ = window.set_title(window_title());
     }
     if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_tooltip(Some(name));
+        let _ = tray.set_tooltip(Some(app_display_name("en")));
     }
 }
 
@@ -160,12 +160,22 @@ pub fn center_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         return;
     };
-    let work = work_area_for_cursor().unwrap_or(WorkArea {
-        left: 0,
-        top: 0,
-        right: 1920,
-        bottom: 1080,
-    });
+    let skip: Vec<usize> = ["main", "overlay"]
+        .into_iter()
+        .filter_map(|label| {
+            app.get_webview_window(label)
+                .and_then(|w| w.hwnd().ok())
+                .map(|h| h.0 as usize)
+        })
+        .collect();
+    let work = work_area_for_foreground(&skip)
+        .or_else(work_area_for_cursor)
+        .unwrap_or(WorkArea {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        });
     if let Ok(size) = window.outer_size() {
         let (x, y) = center_physical_position(work, size.width, size.height);
         let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
@@ -283,14 +293,14 @@ mod tests {
     }
 
     #[test]
-    fn local_debug_build_marks_the_app_name() {
+    fn window_title_marks_sandbox_only_on_local_builds() {
         if is_local_build() {
-            assert_eq!(app_display_name("en"), "Voxely (local)");
-            assert_eq!(app_display_name("ru"), "Voxely (локальная)");
+            assert_eq!(window_title(), "Voxely (sandbox)");
         } else {
-            assert_eq!(app_display_name("en"), "Voxely");
-            assert_eq!(app_display_name("ru"), "Voxely");
+            assert_eq!(window_title(), "Voxely");
         }
+        assert_eq!(app_display_name("en"), "Voxely");
+        assert_eq!(app_display_name("ru"), "Voxely");
         assert_eq!(runtime_info().local_build, is_local_build());
     }
 

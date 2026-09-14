@@ -25,9 +25,9 @@ export default defineConfig({
           linear-gradient(180deg, rgb(18 22 30), rgb(10 12 16)) !important;
       }
       html.shot-overlay .overlay-shell {
-        width: 440px;
-        height: 108px;
-        padding: 22px 20px 28px;
+        width: 320px;
+        height: 72px;
+        padding: 8px 12px 10px;
         flex: none;
       }
     </style>

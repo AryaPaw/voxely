@@ -58,9 +58,9 @@ describe("messagesFor", () => {
     expect(Object.keys(messagesFor("en")).sort()).toEqual(Object.keys(messagesFor("ru")).sort());
   });
 
-  it("marks a local build in the product name", () => {
-    expect(appDisplayName(messagesFor("en"), true)).toBe("Voxely (local)");
-    expect(appDisplayName(messagesFor("ru"), true)).toBe("Voxely (локальная)");
+  it("uses the same product name for local and release chrome", () => {
+    expect(appDisplayName(messagesFor("en"), true)).toBe("Voxely");
+    expect(appDisplayName(messagesFor("ru"), true)).toBe("Voxely");
     expect(appDisplayName(messagesFor("en"), false)).toBe("Voxely");
   });
 

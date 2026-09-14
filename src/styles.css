@@ -194,7 +194,7 @@ html:has(.overlay-shell),
 html:has(.overlay-shell) body,
 html:has(.overlay-shell) #root {
   background: transparent;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .overlay-shell {
@@ -202,9 +202,9 @@ html:has(.overlay-shell) #root {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 22px 20px 28px;
+  padding: 8px 12px 10px;
   background: transparent;
-  overflow: visible;
+  overflow: hidden;
 }
 
 .overlay-pill {
@@ -220,8 +220,8 @@ html:has(.overlay-shell) #root {
   background: var(--overlay-bg);
   padding: 0 18px;
   box-shadow:
-    0 10px 24px var(--overlay-shadow),
-    0 0 28px color-mix(in oklch, var(--overlay-glow) 22%, transparent);
+    0 4px 8px var(--overlay-shadow),
+    0 0 8px color-mix(in oklch, var(--overlay-glow) 18%, transparent);
   color: var(--overlay-fg);
   cursor: default;
   font: inherit;
@@ -245,8 +245,8 @@ html:has(.overlay-shell) #root {
   text-align: center;
   border-color: color-mix(in oklch, var(--overlay-armed) 70%, var(--overlay-border));
   box-shadow:
-    0 10px 24px var(--overlay-shadow),
-    0 0 28px color-mix(in oklch, var(--overlay-armed) 18%, transparent);
+    0 4px 8px var(--overlay-shadow),
+    0 0 8px color-mix(in oklch, var(--overlay-armed) 16%, transparent);
 }
 
 .overlay-center {

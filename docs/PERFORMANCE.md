@@ -101,11 +101,11 @@ N=1 local debug snapshots on AryaPaw-PC (not a 10-30 s settled campaign, not med
 
 Do not treat those two rows as a before/after of the same scenario. They differ in overlay lifetime and settle time. History 0/100/500, overlay cold/warm, 8 s / 60 s recording, WPR wakeups, and release series are incomplete. Until three campaigns exist, numbers are informational.
 
-Vite production split: `overlay.html` entry 0.20 kB JS (gzip 0.18 kB) plus shared CSS 66.68 kB; `index.html` main 232.78 kB JS (gzip 73.54 kB) plus the same CSS. Overlay no longer parses `MainApp`.
+The overlay window loads `overlay.html` / OverlayApp only. Loading `index.html` in that window mounts MainApp; overlay ACL has no `get_runtime_info`, so the HUD becomes a Retry screen. Overlay is created hidden at launch. Relative `./assets` URLs, inline transparent CSS, and `https://ipc.localhost` plus `script-src` eval/inline remain in CSP. HUD logical viewport is 320x72. Overlay is placed on the insert-target monitor when a captured HWND exists, otherwise the cursor monitor. Main is centered on the foreground window's monitor unless that window is Voxely. Debug daily-driver uses the same `%APPDATA%\Voxely` as release; it skips auto-update polling and does not show a Debug nav item or "(local)" title.
 
 ### Overlay / main lifecycle
 
-Default remains hide (not destroy) for both overlay after first dictation and main-in-tray. Destroy is allowed only after a later campaign shows a Private Bytes saving that beats cold-show UX. Vite MPA split is independent of HWND lifecycle.
+Default remains hide (not destroy) for both overlay (created hidden at launch) and main-in-tray. Destroy is allowed only after a later campaign shows a Private Bytes saving that beats cold-show UX. Vite MPA split is independent of HWND lifecycle. HUD logical viewport is 320x72 (pill 52px plus padding for a short glow).
 
 ## Supply chain
 

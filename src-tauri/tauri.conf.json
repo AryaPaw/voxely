@@ -20,10 +20,25 @@
         "minHeight": 520,
         "center": true,
         "visible": false
+      },
+      {
+        "label": "overlay",
+        "title": "Voxely Overlay",
+        "url": "overlay.html",
+        "width": 320,
+        "height": 72,
+        "visible": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "resizable": false,
+        "focus": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' data: blob:; media-src 'self' asset: http://asset.localhost https://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost",
+      "csp": "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; img-src 'self' data: blob:; media-src 'self' asset: http://asset.localhost https://asset.localhost blob: data:; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost https://ipc.localhost",
       "assetProtocol": {
         "enable": true,
         "scope": [

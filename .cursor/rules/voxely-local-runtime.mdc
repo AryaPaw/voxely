@@ -1,0 +1,19 @@
+---
+description: "Keep the user's daily-driver debug Voxely exe current after code changes"
+alwaysApply: true
+---
+
+# voxely-local-runtime
+
+The daily driver is `src-tauri/target/debug/voxely.exe` (local debug build), not `tauri dev` and not the installed `%LOCALAPPDATA%\Voxely` copy.
+
+After a wave that changes Rust, frontend, or anything the running app should show:
+
+1. Stop running `voxely.exe` if it locks the binary (`Access is denied` on overwrite means it is still running).
+2. Rebuild with `bunx tauri build -d --no-bundle`.
+3. Start `src-tauri/target/debug/voxely.exe` again.
+4. Prove the user is on that build before claiming the wave is done: the running process path is that debug exe, `CreationDate`/`StartTime` is at or after the exe `LastWriteTime`, and the expected HWND exists (main and/or overlay, matching the change).
+
+Do not leave the user on a stale exe. Do this on every such wave without waiting to be asked.
+
+If the user says the app is still broken, first re-check the running path and timestamps. Do not debug a different binary than the one on screen.

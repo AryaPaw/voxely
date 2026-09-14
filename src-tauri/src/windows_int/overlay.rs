@@ -1,17 +1,13 @@
 use crate::app::overlay::WorkArea;
 
 #[cfg(windows)]
-pub fn work_area_for_cursor() -> Option<WorkArea> {
+fn work_area_from_monitor(
+    monitor: windows::Win32::Graphics::Gdi::HMONITOR,
+) -> Option<WorkArea> {
     unsafe {
-        use windows::Win32::Foundation::{BOOL, POINT, RECT};
-        use windows::Win32::Graphics::Gdi::{
-            GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-        };
-        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+        use windows::Win32::Foundation::{BOOL, RECT};
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
 
-        let mut point = POINT::default();
-        GetCursorPos(&mut point).ok()?;
-        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             rcMonitor: RECT::default(),
@@ -28,6 +24,54 @@ pub fn work_area_for_cursor() -> Option<WorkArea> {
             right: info.rcWork.right,
             bottom: info.rcWork.bottom,
         })
+    }
+}
+
+#[cfg(windows)]
+pub fn work_area_for_cursor() -> Option<WorkArea> {
+    unsafe {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
+        use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+        let mut point = POINT::default();
+        GetCursorPos(&mut point).ok()?;
+        work_area_from_monitor(MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST))
+    }
+}
+
+#[cfg(windows)]
+pub fn work_area_for_hwnd(raw: isize) -> Option<WorkArea> {
+    if raw == 0 {
+        return None;
+    }
+    unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+
+        let hwnd = HWND(raw as *mut core::ffi::c_void);
+        work_area_from_monitor(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST))
+    }
+}
+
+#[cfg(windows)]
+pub fn work_area_for_foreground(skip_roots: &[usize]) -> Option<WorkArea> {
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetAncestor, GetForegroundWindow, GA_ROOT,
+        };
+
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return work_area_for_cursor();
+        }
+        let root = GetAncestor(hwnd, GA_ROOT);
+        let root_val = root.0 as usize;
+        let raw = hwnd.0 as usize;
+        if skip_roots.contains(&root_val) || skip_roots.contains(&raw) {
+            return work_area_for_cursor();
+        }
+        work_area_for_hwnd(hwnd.0 as isize)
     }
 }
 
@@ -62,5 +106,15 @@ pub fn apply_overlay_exstyle(_raw: isize) {}
 
 #[cfg(not(windows))]
 pub fn work_area_for_cursor() -> Option<WorkArea> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn work_area_for_hwnd(_raw: isize) -> Option<WorkArea> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn work_area_for_foreground(_skip_roots: &[usize]) -> Option<WorkArea> {
     None
 }

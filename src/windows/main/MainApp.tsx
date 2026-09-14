@@ -45,20 +45,26 @@ export function MainApp() {
 
   async function loadSettings() {
     try {
-      const [nextSettings, runtime] = await Promise.all([api.settings(), api.runtimeInfo()]);
+      const nextSettings = await api.settings();
       setSettings(nextSettings);
-      setLocalBuild(runtime.localBuild);
-      if (runtime.localBuild) {
-        const fromUrl = sectionFromSearch(window.location.search, true);
-        if (fromUrl === "debug") {
-          setSection("debug");
-        }
-      } else {
-        setSection((current) => (current === "debug" ? "history" : current));
-      }
       applyTheme(nextSettings.theme);
       applyUiLocale(resolveUiLocale(nextSettings.uiLanguage ?? "auto", navigator.language));
       setLoadError("");
+      try {
+        const runtime = await api.runtimeInfo();
+        setLocalBuild(runtime.localBuild);
+        if (runtime.localBuild) {
+          const fromUrl = sectionFromSearch(window.location.search, true);
+          if (fromUrl === "debug") {
+            setSection("debug");
+          }
+        } else {
+          setSection((current) => (current === "debug" ? "history" : current));
+        }
+      } catch {
+        setLocalBuild(false);
+        setSection((current) => (current === "debug" ? "history" : current));
+      }
     } catch (error) {
       setLoadError(
         formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),

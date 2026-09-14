@@ -30,7 +30,7 @@ use crate::history::retention::{apply_retention, cleanup_orphans, Retention};
 use crate::settings::AppSettings;
 use crate::transcription::openrouter::{transcribe_file_with_progress, SttProgress};
 use crate::windows_int::credentials::get_api_key;
-use crate::windows_int::overlay::work_area_for_cursor;
+use crate::windows_int::overlay::{work_area_for_cursor, work_area_for_hwnd};
 use crate::windows_int::text_injector::{
     insert_should_abort, insert_transcript_now, native, resolve_insert_target, NativeHwnd,
 };
@@ -597,17 +597,29 @@ fn bump_overlay_epoch(ctx: &AppContext) {
     *ctx.overlay_epoch.lock() += 1;
 }
 
+fn overlay_work_area(window: &WebviewWindow) -> WorkArea {
+    let fallback = WorkArea {
+        left: 0,
+        top: 0,
+        right: 1920,
+        bottom: 1040,
+    };
+    if let Some(ctx) = window.try_state::<Arc<AppContext>>() {
+        if let Some(hwnd) = *ctx.captured_hwnd.lock() {
+            if let Some(work) = work_area_for_hwnd(hwnd.value as isize) {
+                return work;
+            }
+        }
+    }
+    work_area_for_cursor().unwrap_or(fallback)
+}
+
 fn position_overlay(window: &WebviewWindow) {
     let scale = window.scale_factor().unwrap_or(1.0);
     let width = (OVERLAY_WIDTH * scale).round() as u32;
     let height = (OVERLAY_HEIGHT * scale).round() as u32;
     let gap = (f64::from(OVERLAY_GAP_PX) * scale).round() as i32;
-    let work = work_area_for_cursor().unwrap_or(WorkArea {
-        left: 0,
-        top: 0,
-        right: 1920,
-        bottom: 1040,
-    });
+    let work = overlay_work_area(window);
     let (x, y) = overlay_physical_position(work, width, height, gap);
     let _ = window.set_size(Size::Logical(LogicalSize::new(
         OVERLAY_WIDTH,
@@ -626,7 +638,20 @@ fn show_overlay(app: &AppHandle) {
         let _ = window.show();
         return;
     }
-    let builder = WebviewWindowBuilder::new(app, "overlay", overlay_url())
+    match build_overlay_window(app, overlay_url()) {
+        Ok(window) => {
+            position_overlay(&window);
+            decorate_overlay(&window);
+            let _ = window.show();
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "overlay window failed");
+        }
+    }
+}
+
+fn build_overlay_window(app: &AppHandle, url: WebviewUrl) -> tauri::Result<WebviewWindow> {
+    WebviewWindowBuilder::new(app, "overlay", url)
         .title("Voxely Overlay")
         .decorations(false)
         .always_on_top(true)
@@ -636,12 +661,8 @@ fn show_overlay(app: &AppHandle) {
         .resizable(false)
         .transparent(true)
         .shadow(false)
-        .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT);
-    if let Ok(window) = builder.build() {
-        position_overlay(&window);
-        decorate_overlay(&window);
-        let _ = window.show();
-    }
+        .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT)
+        .build()
 }
 
 fn decorate_overlay(window: &WebviewWindow) {
@@ -654,6 +675,13 @@ fn decorate_overlay(window: &WebviewWindow) {
 
 fn overlay_url() -> WebviewUrl {
     WebviewUrl::App("overlay.html".into())
+}
+
+pub fn prepare_overlay_window(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window("overlay") {
+        decorate_overlay(&window);
+        position_overlay(&window);
+    }
 }
 
 fn hide_overlay_now(app: &AppHandle) {

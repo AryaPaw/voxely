@@ -17,7 +17,7 @@ const ru = {
   navStorage: "Хранение",
   navAppearance: "Внешний вид",
   navAdvanced: "Дополнительно",
-  navDebug: "Отладка",
+  navDebug: "Песочница",
   navAbout: "О программе",
   compareIntro:
     "Один клип, несколько моделей OpenRouter рядом. Это не идёт в историю и не вставляется в другое окно.",
@@ -253,7 +253,7 @@ const en = {
   navStorage: "Storage",
   navAppearance: "Appearance",
   navAdvanced: "Advanced",
-  navDebug: "Debug",
+  navDebug: "Sandbox",
   navAbout: "About",
   compareIntro:
     "One clip, several OpenRouter models side by side. This does not go into history and is not inserted into another window.",
@@ -491,8 +491,8 @@ export function isLocalBuild(): boolean {
   return import.meta.env.DEV;
 }
 
-export function appDisplayName(copy: Messages, local = isLocalBuild()): string {
-  return local ? copy.appNameLocal : copy.appName;
+export function appDisplayName(copy: Messages, _local = isLocalBuild()): string {
+  return copy.appName;
 }
 
 export function factoryPresetLabel(preset: { id: string; name: string }, copy: Messages): string {

@@ -27,7 +27,7 @@ use crate::app::lifecycle::{
     apply_launch_visibility, attach_context, configure_tray, hide_main_to_tray, reregister_hotkey,
     should_hide_on_launch, show_main, sync_autostart,
 };
-use crate::app::session::AppContext;
+use crate::app::session::{prepare_overlay_window, AppContext};
 use crate::commands::*;
 
 fn init_logging(debug: bool, log_dir: Option<&Path>) {
@@ -89,6 +89,7 @@ pub fn run() {
                 crate::notify::show_error(app.handle(), &err);
             }
             apply_launch_visibility(app.handle(), std::env::args());
+            prepare_overlay_window(app.handle());
             if let Some(window) = app.get_webview_window("main") {
                 let handle = app.handle().clone();
                 window.on_window_event(move |event| {

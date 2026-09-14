@@ -1,4 +1,17 @@
 fn main() {
+    let overlay = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist/overlay.html");
+    if std::env::var("TAURI_ENV_PLATFORM").is_ok() {
+        let html = std::fs::read_to_string(&overlay)
+            .unwrap_or_else(|_| panic!("overlay.html missing from dist"));
+        if !html.contains("overlay-") && !html.contains("/src/overlay.tsx") {
+            panic!("dist/overlay.html is not the overlay entry");
+        }
+    } else if overlay.exists() {
+        let html = std::fs::read_to_string(&overlay).unwrap_or_default();
+        if !html.contains("overlay-") && !html.contains("/src/overlay.tsx") {
+            panic!("dist/overlay.html is not the overlay entry");
+        }
+    }
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "get_session_state",
