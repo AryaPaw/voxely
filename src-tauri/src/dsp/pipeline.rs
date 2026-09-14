@@ -236,20 +236,13 @@ impl DspPipeline {
             }
             match slot.kind {
                 FilterKind::HighPass => {
-                    let mut out = vec![0.0; samples.len()];
-                    self.high_pass.process(&samples, &mut out);
-                    samples = out;
+                    self.high_pass.process_in_place(&mut samples);
                 }
                 FilterKind::Rnnoise => {
                     let mix = self.preset.rnnoise_mix.clamp(0.0, 1.0);
                     if mix <= 0.0 {
                         continue;
                     }
-                    let dry = if mix < 1.0 {
-                        Some(samples.clone())
-                    } else {
-                        None
-                    };
                     let mut out = self.rnnoise.process(&samples);
                     out.extend(self.rnnoise.flush());
                     if out.len() < samples.len() {
@@ -260,12 +253,9 @@ impl DspPipeline {
                     if mix >= 1.0 {
                         samples = out;
                     } else {
-                        let dry = dry.expect("dry mix");
-                        samples = dry
-                            .iter()
-                            .zip(out.iter())
-                            .map(|(dry_s, wet_s)| dry_s * (1.0 - mix) + wet_s * mix)
-                            .collect();
+                        for (dry_s, wet_s) in samples.iter_mut().zip(out.iter()) {
+                            *dry_s = *dry_s * (1.0 - mix) + wet_s * mix;
+                        }
                     }
                 }
                 FilterKind::Gain => apply_gain(&mut samples, self.preset.gain),

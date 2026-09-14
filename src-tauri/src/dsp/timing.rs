@@ -27,6 +27,15 @@ pub fn median_ms(times: &mut [u128]) -> u128 {
     times[times.len() / 2]
 }
 
+pub fn p95_ms(times: &mut [u128]) -> u128 {
+    if times.is_empty() {
+        return 0;
+    }
+    times.sort_unstable();
+    let idx = ((times.len() as f64 - 1.0) * 0.95).ceil() as usize;
+    times[idx.min(times.len() - 1)]
+}
+
 pub fn measure_dsp(preset: DspPreset, samples: &[f32], runs: usize) -> u128 {
     let mut times = Vec::with_capacity(runs);
     let _ = prepare_listen_audio(preset.clone(), samples.to_vec());
@@ -115,6 +124,15 @@ pub fn wait_ms(ms: u128) -> Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn median_and_p95_use_sorted_samples() {
+        let mut samples = [10u128, 1, 2, 3, 4];
+        assert_eq!(median_ms(&mut samples), 3);
+        let mut samples = [1u128, 2, 3, 4, 100];
+        assert_eq!(p95_ms(&mut samples), 100);
+        assert_eq!(p95_ms(&mut []), 0);
+    }
 
     #[test]
     #[ignore]

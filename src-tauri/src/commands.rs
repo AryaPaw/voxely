@@ -1,5 +1,6 @@
 use crate::app::lifecycle::configure_tray;
 use crate::app::machine::{is_cancellable, SessionState};
+use crate::app::overlay::OverlayTimingReport;
 use crate::app::session::{
     current_meter, devices, release_meter_monitor, start_meter_monitor, AppContext,
 };
@@ -9,7 +10,7 @@ use crate::dsp::metrics::SAMPLE_RATE;
 use crate::dsp::obs_mapping::{parse_scene_collection, preset_from_preview, ObsImportPreview};
 use crate::dsp::pipeline::{prepare_listen_preview, DspPreset};
 use crate::error::AppError;
-use crate::history::repository::Recording;
+use crate::history::repository::{Recording, RecordingSummary};
 use crate::history::retention::delete_recording;
 use crate::settings::AppSettings;
 use crate::transcription::openrouter::{list_transcription_models, SttModel};
@@ -17,8 +18,6 @@ use crate::windows_int::credentials::{delete_api_key, has_api_key, set_api_key};
 use crate::windows_int::text_injector::{
     insert_transcript_now, native, resolve_insert_target, NativeHwnd,
 };
-use base64::engine::general_purpose::STANDARD;
-use base64::Engine;
 use std::path::Path;
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -67,6 +66,13 @@ pub fn list_history(ctx: State<'_, Arc<AppContext>>) -> Result<Vec<Recording>, A
 }
 
 #[tauri::command]
+pub fn list_history_summaries(
+    ctx: State<'_, Arc<AppContext>>,
+) -> Result<Vec<RecordingSummary>, AppError> {
+    ctx.history.lock().list_summaries(500)
+}
+
+#[tauri::command]
 pub fn get_recording(
     ctx: State<'_, Arc<AppContext>>,
     id: String,
@@ -75,7 +81,11 @@ pub fn get_recording(
 }
 
 #[tauri::command]
-pub fn delete_history_item(ctx: State<'_, Arc<AppContext>>, id: String) -> Result<(), AppError> {
+pub fn delete_history_item(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppContext>>,
+    id: String,
+) -> Result<(), AppError> {
     let rec = ctx
         .history
         .lock()
@@ -83,17 +93,19 @@ pub fn delete_history_item(ctx: State<'_, Arc<AppContext>>, id: String) -> Resul
         .ok_or_else(|| AppError::StorageFailed("not found".into()))?;
     let root = crate::history::repository::audio_dir(&ctx.data_dir);
     delete_recording(&ctx.history.lock(), &root, &rec)?;
+    ctx.emit_history(&app);
     Ok(())
 }
 
 #[tauri::command]
-pub fn delete_all_history(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
+pub fn delete_all_history(app: AppHandle, ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
     let root = crate::history::repository::audio_dir(&ctx.data_dir);
     let items = ctx.history.lock().list(20_000)?;
     for rec in items {
         let _ = delete_recording(&ctx.history.lock(), &root, &rec);
     }
     ctx.history.lock().delete_all()?;
+    ctx.emit_history(&app);
     Ok(())
 }
 
@@ -112,17 +124,10 @@ pub fn get_meter(app: AppHandle) -> crate::audio::capture::MeterSample {
 pub struct DspPreview {
     pub original_path: String,
     pub processed_path: String,
-    pub original_data_url: String,
-    pub processed_data_url: String,
     pub peak: f32,
     pub rms: f32,
     pub clip_count: u32,
     pub nonce: u64,
-}
-
-fn wav_data_url(path: &Path) -> Result<String, AppError> {
-    let bytes = std::fs::read(path).map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    Ok(format!("data:audio/wav;base64,{}", STANDARD.encode(bytes)))
 }
 
 fn preview_from_original(ctx: &AppContext, original: &Path) -> Result<DspPreview, AppError> {
@@ -141,8 +146,6 @@ fn preview_from_original(ctx: &AppContext, original: &Path) -> Result<DspPreview
     Ok(DspPreview {
         original_path: original_preview.to_string_lossy().into_owned(),
         processed_path: processed_path.to_string_lossy().into_owned(),
-        original_data_url: wav_data_url(&original_preview)?,
-        processed_data_url: wav_data_url(&processed_path)?,
         peak: metrics.peak,
         rms: metrics.rms,
         clip_count: metrics.clip_count,
@@ -397,10 +400,17 @@ pub fn run_retention(ctx: State<'_, Arc<AppContext>>) -> Result<Vec<String>, App
 
 #[tauri::command]
 pub fn overlay_timing(ctx: State<'_, Arc<AppContext>>) -> Option<u128> {
-    ctx.overlay_shown_at
-        .lock()
-        .as_ref()
-        .map(|t| t.elapsed().as_millis())
+    ctx.overlay_timeline.lock().elapsed_ms()
+}
+
+#[tauri::command]
+pub fn overlay_timeline(ctx: State<'_, Arc<AppContext>>) -> OverlayTimingReport {
+    ctx.overlay_timeline.lock().report()
+}
+
+#[tauri::command]
+pub fn overlay_mark_frame(ctx: State<'_, Arc<AppContext>>, phase: String) {
+    ctx.overlay_timeline.lock().mark_phase(&phase);
 }
 
 #[tauri::command]

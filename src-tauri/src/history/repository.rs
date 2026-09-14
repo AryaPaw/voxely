@@ -41,6 +41,26 @@ pub struct Recording {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct RecordingSummary {
+    pub id: String,
+    pub created_at: DateTime<Utc>,
+    pub duration_ms: i64,
+    pub raw_audio_path: Option<String>,
+    pub processed_audio_path: Option<String>,
+    pub transcript: Option<String>,
+    pub status: RecordingStatus,
+    pub provider: String,
+    pub model: String,
+    pub attempt_count: i64,
+    pub last_error_code: Option<String>,
+    pub last_error_message: Option<String>,
+    pub cost: Option<f64>,
+    pub generation_id: Option<String>,
+    pub latency_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptionAttempt {
     pub id: String,
     pub recording_id: String,
@@ -198,6 +218,23 @@ impl HistoryRepo {
             .map_err(|e| AppError::StorageFailed(e.to_string()))
     }
 
+    pub fn list_summaries(&self, limit: i64) -> Result<Vec<RecordingSummary>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, created_at, duration_ms, raw_audio_path, processed_audio_path,
+                    transcript, status, provider, model, attempt_count, last_error_code,
+                    last_error_message, cost, generation_id, latency_ms
+             FROM recordings ORDER BY created_at DESC LIMIT ?1",
+            )
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![limit], row_to_summary)
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::StorageFailed(e.to_string()))
+    }
+
     pub fn delete(&self, id: &str) -> Result<(), AppError> {
         self.conn
             .execute("DELETE FROM recordings WHERE id=?1", params![id])
@@ -312,6 +349,26 @@ fn row_to_recording(row: &rusqlite::Row<'_>) -> rusqlite::Result<Recording> {
     })
 }
 
+fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordingSummary> {
+    Ok(RecordingSummary {
+        id: row.get("id")?,
+        created_at: parse_time(row.get::<_, String>("created_at")?),
+        duration_ms: row.get("duration_ms")?,
+        raw_audio_path: row.get("raw_audio_path")?,
+        processed_audio_path: row.get("processed_audio_path")?,
+        transcript: row.get("transcript")?,
+        status: parse_status(row.get("status")?),
+        provider: row.get("provider")?,
+        model: row.get("model")?,
+        attempt_count: row.get("attempt_count")?,
+        last_error_code: row.get("last_error_code")?,
+        last_error_message: row.get("last_error_message")?,
+        cost: row.get("cost")?,
+        generation_id: row.get("generation_id")?,
+        latency_ms: row.get("latency_ms")?,
+    })
+}
+
 fn parse_time(value: String) -> DateTime<Utc> {
     DateTime::parse_from_rfc3339(&value)
         .map(|t| t.with_timezone(&Utc))
@@ -382,6 +439,25 @@ mod tests {
         assert_eq!(repo.list(10).unwrap().len(), 1);
         repo.delete(&rec.id).unwrap();
         assert!(repo.list(10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn list_summaries_omits_usage_json() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("h.db")).unwrap();
+        let mut rec = new_recording("openai/gpt-transcribe".into());
+        rec.transcript = Some("hello from search".into());
+        rec.usage_json = Some("{\"tokens\":1}".into());
+        repo.insert(&rec).unwrap();
+        let summaries = repo.list_summaries(10).unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(
+            summaries[0].transcript.as_deref(),
+            Some("hello from search")
+        );
+        let encoded = serde_json::to_string(&summaries[0]).unwrap();
+        assert!(!encoded.contains("usageJson"));
+        assert!(!encoded.contains("updatedAt"));
     }
 
     #[test]

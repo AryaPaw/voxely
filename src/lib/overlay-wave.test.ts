@@ -7,6 +7,7 @@ import {
   overlayCancelArmed,
   overlayHoverFromElement,
   OVERLAY_BAR_COUNT,
+  METER_POLL_MS,
 } from "./overlay-wave";
 
 describe("overlayBarHeights", () => {
@@ -134,5 +135,11 @@ describe("drawOverlayWave", () => {
     expect(rects[0] ?? 0).toBeGreaterThan(0);
     expect(rects[4] ?? 0).toBeCloseTo(rects[0] ?? 0);
     expect(rects[3] ?? 0).toBe(20);
+  });
+});
+
+describe("meter poll cadence", () => {
+  it("matches native 16 hops per second", () => {
+    expect(METER_POLL_MS).toBe(62);
   });
 });

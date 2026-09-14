@@ -294,10 +294,8 @@ const FilterPreviewPlayer = memo(function FilterPreviewPlayer({
 }) {
   const originalRef = useRef<HTMLAudioElement>(null);
   const processedRef = useRef<HTMLAudioElement>(null);
-  const originalSrc =
-    preview.originalDataUrl || convertFallback(preview.originalPath, preview.nonce);
-  const processedSrc =
-    preview.processedDataUrl || convertFallback(preview.processedPath, preview.nonce);
+  const originalSrc = convertFallback(preview.originalPath, preview.nonce);
+  const processedSrc = convertFallback(preview.processedPath, preview.nonce);
   const peak = peakDbFs(preview.peak);
   const warning = previewWarning(preview.peak, preview.clipCount, copy.clippingWarning);
 

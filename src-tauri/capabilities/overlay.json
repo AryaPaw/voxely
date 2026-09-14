@@ -14,6 +14,8 @@
     "allow-get-session-state",
     "allow-get-settings",
     "allow-get-meter",
-    "allow-cancel-dictation"
+    "allow-cancel-dictation",
+    "allow-overlay-mark-frame",
+    "allow-overlay-timeline"
   ]
 }

@@ -136,6 +136,7 @@ export async function invoke<T>(cmd: string): Promise<T> {
     case "get_session_state":
       return sessionFromSearch() as T;
     case "list_history":
+    case "list_history_summaries":
       return history as T;
     case "api_key_configured":
       return true as T;

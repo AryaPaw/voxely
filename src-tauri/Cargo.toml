@@ -4,7 +4,7 @@ version = "0.2.5"
 description = "Windows voice dictation with bounded OpenRouter retries"
 authors = ["Voxely"]
 edition = "2021"
-rust-version = "1.77.2"
+rust-version = "1.85.0"
 license = "AGPL-3.0-or-later"
 default-run = "voxely"
 
@@ -32,22 +32,16 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 cpal = "0.15"
 hound = "3"
 rubato = "0.16"
-nnnoiseless = "0.5"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json", "blocking"] }
+nnnoiseless = { version = "0.5", default-features = false }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs"] }
 keyring = { version = "3", features = ["windows-native"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 rtrb = "0.3"
 parking_lot = "0.12"
-bytes = "1"
 httpdate = "1"
-rand = "0.8"
-base64 = "0.22"
-directories = "5"
-once_cell = "1"
-sha2 = "0.10"
 tauri-plugin-notification = "2.4.0"
 
 [target.'cfg(windows)'.dependencies]

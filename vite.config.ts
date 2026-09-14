@@ -21,6 +21,14 @@ export default defineConfig({
     hmr: host ? { protocol: "ws", host, port: 1421 } : undefined,
     watch: { ignored: ["**/src-tauri/**"] },
   },
+  build: {
+    rollupOptions: {
+      input: {
+        main: path.resolve(__dirname, "index.html"),
+        overlay: path.resolve(__dirname, "overlay.html"),
+      },
+    },
+  },
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
@@ -36,6 +44,7 @@ export default defineConfig({
         "src/lib/i18n.ts",
         "src/lib/utils.ts",
         "src/lib/theme.ts",
+        "src/lib/history-sync.ts",
         "src/lib/overlay-wave.ts",
         "src/lib/dsp-level.ts",
         "src/components/settings/SettingsField.tsx",

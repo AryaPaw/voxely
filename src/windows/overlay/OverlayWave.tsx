@@ -5,6 +5,7 @@ import {
   meterPollAllowed,
   overlayBarHeights,
   OVERLAY_BAR_COUNT,
+  METER_POLL_MS,
 } from "../../lib/overlay-wave";
 
 export function OverlayWave({ active }: { active: boolean }) {
@@ -47,7 +48,7 @@ export function OverlayWave({ active }: { active: boolean }) {
         .finally(() => {
           inFlight = false;
         });
-    }, 50);
+    }, METER_POLL_MS);
     return () => window.clearInterval(timer);
   }, [active]);
 

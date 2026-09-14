@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-overlay-mark-frame"
+description = "Enables the overlay_mark_frame command without any pre-configured scope."
+commands.allow = ["overlay_mark_frame"]
+
+[[permission]]
+identifier = "deny-overlay-mark-frame"
+description = "Denies the overlay_mark_frame command without any pre-configured scope."
+commands.deny = ["overlay_mark_frame"]

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { api, type AppSettings, type SessionState } from "../../lib/api";
 import { applyUiLocale, messagesFor, resolveUiLocale } from "../../lib/i18n";
@@ -27,6 +28,10 @@ export function OverlayApp() {
   }
 
   useEffect(() => {
+    void invoke("overlay_mark_frame", { phase: "react" });
+    const frame = window.requestAnimationFrame(() => {
+      void invoke("overlay_mark_frame", { phase: "frame" });
+    });
     void api.settings().then(applySettings);
     void api.session().then(setState);
     const unlistenState = listen<SessionState>("session://state", (event) =>
@@ -36,6 +41,7 @@ export function OverlayApp() {
       applySettings(event.payload),
     );
     return () => {
+      window.cancelAnimationFrame(frame);
       void unlistenState.then((fn) => fn());
       void unlistenSettings.then((fn) => fn());
     };

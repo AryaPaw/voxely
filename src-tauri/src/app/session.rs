@@ -13,7 +13,8 @@ use tauri::{
 
 use crate::app::machine::{apply_event, may_commit_session, SessionEvent, SessionState};
 use crate::app::overlay::{
-    overlay_physical_position, WorkArea, OVERLAY_GAP_PX, OVERLAY_HEIGHT, OVERLAY_WIDTH,
+    overlay_physical_position, OverlayTimeline, WorkArea, OVERLAY_GAP_PX, OVERLAY_HEIGHT,
+    OVERLAY_WIDTH,
 };
 use crate::audio::capture::{
     read_pcm16_wav_with_rate, write_pcm16_wav, CaptureSession, MeterSample,
@@ -44,7 +45,7 @@ pub struct AppContext {
     pub captured_hwnd: Mutex<Option<NativeHwnd>>,
     pub in_flight: Mutex<HashSet<String>>,
     pub client: reqwest::Client,
-    pub overlay_shown_at: Mutex<Option<Instant>>,
+    pub overlay_timeline: Mutex<OverlayTimeline>,
     pub overlay_epoch: Mutex<u64>,
     pub cancel_tx: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     pub session_recording_id: Mutex<Option<String>>,
@@ -90,7 +91,7 @@ impl AppContext {
             captured_hwnd: Mutex::new(None),
             in_flight: Mutex::new(HashSet::new()),
             client,
-            overlay_shown_at: Mutex::new(None),
+            overlay_timeline: Mutex::new(OverlayTimeline::default()),
             overlay_epoch: Mutex::new(0),
             cancel_tx: Mutex::new(None),
             session_recording_id: Mutex::new(None),
@@ -110,6 +111,10 @@ impl AppContext {
     pub fn emit_state(&self, app: &AppHandle) {
         let state = self.state.lock().clone();
         let _ = app.emit("session://state", state);
+    }
+
+    pub fn emit_history(&self, app: &AppHandle) {
+        let _ = app.emit("history://changed", ());
     }
 
     pub fn transition(&self, event: SessionEvent) -> Result<SessionState, AppError> {
@@ -165,6 +170,7 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
         | SessionState::Transcribing { .. }
         | SessionState::RetryWaiting { .. } => {
             fail_active_recording(&ctx, &AppError::Cancelled);
+            ctx.emit_history(app);
             if ctx.transition(SessionEvent::Cancelled).is_err() {
                 return Ok(());
             }
@@ -201,7 +207,7 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     ctx.transition(SessionEvent::StartRequested)?;
     let skip = voxely_window_roots(app);
     *ctx.captured_hwnd.lock() = native::capture_target_excluding(&skip);
-    *ctx.overlay_shown_at.lock() = Some(Instant::now());
+    ctx.overlay_timeline.lock().begin_show();
     show_overlay(app);
     ctx.emit_state(app);
     let settings = ctx.settings.lock().clone();
@@ -326,6 +332,7 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
     if ctx.history.lock().insert(&rec).is_err() {
         return;
     }
+    ctx.emit_history(app);
     let _ = apply_configured_retention(ctx.as_ref());
     let _ = ctx.transition(SessionEvent::Saved);
     ctx.emit_state(app);
@@ -337,12 +344,14 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
             Err(AppError::Cancelled) => {
                 let ctx = app_handle.state::<Arc<AppContext>>();
                 mark_recording_failed(&ctx, &rec.id, &AppError::Cancelled);
+                ctx.emit_history(&app_handle);
                 hide_overlay_now(&app_handle);
             }
             Err(err) => {
                 tracing::error!(error = %err, "pipeline failed");
                 let ctx = app_handle.state::<Arc<AppContext>>();
                 mark_recording_failed(&ctx, &rec.id, &err);
+                ctx.emit_history(&app_handle);
                 let _ = ctx.transition(SessionEvent::Failed(err.clone()));
                 ctx.emit_state(&app_handle);
                 crate::notify::show_error(&app_handle, &err);
@@ -421,6 +430,7 @@ async fn process_and_transcribe_inner(
     rec.updated_at = chrono::Utc::now();
     apply_raw_retention(&mut rec, keep_original, &raw_path);
     ctx.history.lock().update(&rec)?;
+    ctx.emit_history(app);
     let _ = ctx.transition(SessionEvent::Processed);
     ctx.emit_state(app);
 
@@ -432,6 +442,7 @@ async fn process_and_transcribe_inner(
             rec.last_error_code = Some("InvalidApiKey".into());
             rec.updated_at = chrono::Utc::now();
             ctx.history.lock().update(&rec)?;
+            ctx.emit_history(app);
             return Err(AppError::InvalidApiKey);
         }
     };
@@ -442,6 +453,7 @@ async fn process_and_transcribe_inner(
     };
     rec.request_started_at = Some(chrono::Utc::now());
     ctx.history.lock().update(&rec)?;
+    ctx.emit_history(app);
     if *rx.borrow()
         || !may_commit_session(
             started_generation,
@@ -607,27 +619,24 @@ fn position_overlay(window: &WebviewWindow) {
 fn show_overlay(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
     bump_overlay_epoch(&ctx);
+    ctx.overlay_timeline.lock().mark_window_created();
     if let Some(window) = app.get_webview_window("overlay") {
         position_overlay(&window);
         decorate_overlay(&window);
         let _ = window.show();
         return;
     }
-    let builder = WebviewWindowBuilder::new(
-        app,
-        "overlay",
-        WebviewUrl::App("index.html?overlay=1".into()),
-    )
-    .title("Voxely Overlay")
-    .decorations(false)
-    .always_on_top(true)
-    .skip_taskbar(true)
-    .focused(false)
-    .visible(false)
-    .resizable(false)
-    .transparent(true)
-    .shadow(false)
-    .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT);
+    let builder = WebviewWindowBuilder::new(app, "overlay", overlay_url())
+        .title("Voxely Overlay")
+        .decorations(false)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .focused(false)
+        .visible(false)
+        .resizable(false)
+        .transparent(true)
+        .shadow(false)
+        .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT);
     if let Ok(window) = builder.build() {
         position_overlay(&window);
         decorate_overlay(&window);
@@ -643,13 +652,17 @@ fn decorate_overlay(window: &WebviewWindow) {
     }
 }
 
+fn overlay_url() -> WebviewUrl {
+    WebviewUrl::App("overlay.html".into())
+}
+
 fn hide_overlay_now(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
     bump_overlay_epoch(&ctx);
     if let Some(window) = app.get_webview_window("overlay") {
         let _ = window.hide();
     }
-    *ctx.overlay_shown_at.lock() = None;
+    ctx.overlay_timeline.lock().hide();
 }
 
 fn hide_overlay_later(app: AppHandle, delay: Duration) {
@@ -664,7 +677,7 @@ fn hide_overlay_later(app: AppHandle, delay: Duration) {
         if let Some(window) = app.get_webview_window("overlay") {
             let _ = window.hide();
         }
-        *ctx.overlay_shown_at.lock() = None;
+        ctx.overlay_timeline.lock().hide();
         let _ = ctx.transition(SessionEvent::Dismiss);
         ctx.emit_state(&app);
     });
@@ -915,6 +928,7 @@ async fn manual_retry_inner(
             rec.last_error_message = None;
             rec.updated_at = chrono::Utc::now();
             ctx.history.lock().update(&rec)?;
+            ctx.emit_history(app);
             Ok(rec)
         }
         Err(err) => {
@@ -923,6 +937,7 @@ async fn manual_retry_inner(
             rec.last_error_code = Some(err.code().to_string());
             rec.updated_at = chrono::Utc::now();
             ctx.history.lock().update(&rec)?;
+            ctx.emit_history(app);
             Err(err)
         }
     }

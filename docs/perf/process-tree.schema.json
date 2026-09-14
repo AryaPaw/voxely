@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "voxely-perf/v1",
+  "title": "Voxely process-tree performance trial",
+  "type": "object",
+  "required": ["schema", "build", "machine", "scenario", "tree"],
+  "properties": {
+    "schema": { "const": "voxely-perf/v1" },
+    "build": {
+      "type": "object",
+      "required": ["profile", "git", "exe"],
+      "properties": {
+        "profile": { "enum": ["debug", "release"] },
+        "git": { "type": "string" },
+        "exe": { "type": "string" }
+      }
+    },
+    "machine": {
+      "type": "object",
+      "properties": {
+        "computer": { "type": "string" },
+        "os": { "type": "string" }
+      }
+    },
+    "scenario": { "type": "string" },
+    "notes": { "type": "string" },
+    "tree": {
+      "type": "object",
+      "required": ["processCount", "webview2Count", "privateBytes", "workingSet"],
+      "properties": {
+        "processCount": { "type": "integer" },
+        "webview2Count": { "type": "integer" },
+        "privateBytes": { "type": "integer" },
+        "workingSet": { "type": "integer" },
+        "commit": { "type": "integer" },
+        "handles": { "type": "integer" },
+        "threads": { "type": "integer" }
+      }
+    },
+    "processes": { "type": "array" }
+  }
+}

@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use serde::Serialize;
@@ -190,6 +190,23 @@ pub fn preferred_data_dir(roaming: PathBuf) -> PathBuf {
     preferred
 }
 
+pub fn debug_data_dir_override(raw: Option<&str>, roaming: &Path) -> Option<PathBuf> {
+    let raw = raw?;
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return None;
+    }
+    let name = path.file_name()?.to_str()?;
+    if name != "VoxelyPerf" && !name.starts_with("VoxelyPerf-") {
+        return None;
+    }
+    let parent = path.parent()?;
+    if parent != roaming {
+        return None;
+    }
+    Some(path)
+}
+
 pub fn data_dir(app: &AppHandle) -> Result<PathBuf, AppError> {
     let roaming = if let Ok(appdata) = std::env::var("APPDATA") {
         PathBuf::from(appdata)
@@ -201,6 +218,12 @@ pub fn data_dir(app: &AppHandle) -> Result<PathBuf, AppError> {
             .map(PathBuf::from)
             .ok_or_else(|| AppError::StorageFailed("app data parent".into()))?
     };
+    #[cfg(debug_assertions)]
+    if let Some(path) =
+        debug_data_dir_override(std::env::var("VOXELY_DATA_DIR").ok().as_deref(), &roaming)
+    {
+        return Ok(path);
+    }
     Ok(preferred_data_dir(roaming))
 }
 
@@ -219,6 +242,27 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = preferred_data_dir(dir.path().to_path_buf());
         assert_eq!(path.file_name().unwrap(), "Voxely");
+    }
+
+    #[test]
+    fn debug_override_rejects_live_voxely_folder() {
+        let dir = tempdir().unwrap();
+        let roaming = dir.path();
+        assert!(debug_data_dir_override(Some("relative"), roaming).is_none());
+        assert!(
+            debug_data_dir_override(Some(roaming.join("Voxely").to_str().unwrap()), roaming)
+                .is_none()
+        );
+        let ok = roaming.join("VoxelyPerf");
+        assert_eq!(
+            debug_data_dir_override(ok.to_str(), roaming),
+            Some(ok.clone())
+        );
+        let tagged = roaming.join("VoxelyPerf-history-500");
+        assert_eq!(
+            debug_data_dir_override(tagged.to_str(), roaming),
+            Some(tagged)
+        );
     }
 
     #[test]

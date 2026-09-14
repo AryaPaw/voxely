@@ -68,3 +68,51 @@ Dictation logs (no audio, transcript, or API key):
 - `stt_http_ms`
 
 HUD: "Обработка" is capture finalize + DSP + processed WAV. "Расшифровка" is downsample + STT WAV + OpenRouter HTTP.
+
+## Process-tree RAM (WebView2)
+
+Do not treat PE/NSIS size, Criterion DSP times, or a single `voxely.exe` Working Set as WebView2 RAM. The unit is the tree: `voxely.exe` plus owned `msedgewebview2.exe` children. Always pair Private Bytes with Working Set.
+
+Debug and release are separate series. Daily driver: `src-tauri/target/debug/voxely.exe`.
+
+Live `%APPDATA%\Voxely` is never the history 0/100/500 fixture. Debug-only override: `VOXELY_DATA_DIR` must be `%APPDATA%\VoxelyPerf` or `VoxelyPerf-*` under `%APPDATA%`. Release builds ignore the variable.
+
+### Commands
+
+```
+pwsh -File scripts/perf/Get-VoxelyProcessTree.ps1 -Profile debug -Scenario fresh-tray
+pwsh -File scripts/perf/Invoke-VoxelyPerfCampaign.ps1 -Profile debug -Scenario fresh-tray-or-running
+```
+
+JSON schema: `docs/perf/process-tree.schema.json` (`voxely-perf/v1`). Raw trials go to `docs/perf/trials/` (gitignored).
+
+`overlay_timing` is elapsed since overlay show, not first paint. Overlay reports `overlay_mark_frame` after React mount / first animation frame.
+
+Wakeups are WPR/ETW only. CPU% and thread count are not wakeups.
+
+Gates (after three campaigns): RAM regression needs Private Bytes plus a confirming metric; latency needs median and p95 plus an absolute floor. Do not fail a single noisy run.
+
+### Baseline status
+
+N=1 local debug snapshots on AryaPaw-PC (not a 10-30 s settled campaign, not median/p95):
+
+- Long-running session that had already created overlay: tree Private Bytes 411,644,480, Working Set 693,575,680, 8 processes / 7 `msedgewebview2`. `commit` in that JSON used `VirtualMemorySize64` (unusable on x64).
+- Fresh tray after rebuild (overlay never shown): tree Private Bytes 176,709,632, Working Set 402,804,736, Paged commit 176,709,632, 7 processes / 6 `msedgewebview2`. Host `voxely.exe` Private Bytes 5,623,808.
+
+Do not treat those two rows as a before/after of the same scenario. They differ in overlay lifetime and settle time. History 0/100/500, overlay cold/warm, 8 s / 60 s recording, WPR wakeups, and release series are incomplete. Until three campaigns exist, numbers are informational.
+
+Vite production split: `overlay.html` entry 0.20 kB JS (gzip 0.18 kB) plus shared CSS 66.68 kB; `index.html` main 232.78 kB JS (gzip 73.54 kB) plus the same CSS. Overlay no longer parses `MainApp`.
+
+### Overlay / main lifecycle
+
+Default remains hide (not destroy) for both overlay after first dictation and main-in-tray. Destroy is allowed only after a later campaign shows a Private Bytes saving that beats cold-show UX. Vite MPA split is independent of HWND lifecycle.
+
+## Supply chain
+
+Claimed MSRV is `1.85.0` to match the Tauri lock graph (`reqwest` 0.13 via updater). Hosted CI `stable` plus a field check; compiling on 1.85 is `NOT RUN` on this machine (`rustc 1.98.1`).
+
+Removed unused direct Rust crates: `rand`, `sha2`, `directories`, `once_cell`, `bytes`, `base64`. Dropped unused `reqwest` `blocking`, `nnnoiseless` default `bin` features, and `tracing-subscriber` `json`. Frontend dropped unused JS wrappers `@tauri-apps/plugin-opener`, `plugin-process`, `plugin-updater` (Rust plugins stay). `shadcn` stays because `src/styles.css` imports `shadcn/tailwind.css`.
+
+`cargo audit`: `BLOCKED` (subcommand not installed). `bun audit`: moderate Vitest mocker path traversal (`GHSA-82fw-gwwq-j7x9`); production app does not ship Vitest. Vitest 4 is deferred as an isolated major.
+
+Deferred majors (not mixed with HWND/capture): `reqwest` 0.12 vs 0.13 duplicate, `windows` 0.54/0.58/0.61, `cpal` 0.15, `rusqlite` 0.32, `keyring` 3, `rtrb` 0.3, Criterion 0.5.

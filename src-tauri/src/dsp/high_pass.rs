@@ -91,6 +91,21 @@ impl HighPass {
             output[i] = y;
         }
     }
+
+    #[allow(clippy::needless_range_loop)]
+    pub fn process_in_place(&mut self, samples: &mut [f32]) {
+        for i in 0..samples.len() {
+            let x = samples[i];
+            let y = self.b0 * x + self.b1 * self.x1 + self.b2 * self.x2
+                - self.a1 * self.y1
+                - self.a2 * self.y2;
+            self.x2 = self.x1;
+            self.x1 = x;
+            self.y2 = self.y1;
+            self.y1 = y;
+            samples[i] = y;
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -123,6 +138,20 @@ mod tests {
         let mut out = [0.0f32; 64];
         hp.process(&input, &mut out);
         assert!(out.iter().all(|s| s.abs() < 1e-6));
+    }
+
+    #[test]
+    fn high_pass_in_place_matches_out_of_place() {
+        let input: Vec<f32> = (0..128).map(|i| (i as f32 * 0.07).sin() * 0.4).collect();
+        let mut a = HighPass::new(HighPassConfig::default()).unwrap();
+        let mut b = HighPass::new(HighPassConfig::default()).unwrap();
+        let mut out = vec![0.0; input.len()];
+        a.process(&input, &mut out);
+        let mut inplace = input.clone();
+        b.process_in_place(&mut inplace);
+        for (left, right) in out.iter().zip(inplace.iter()) {
+            assert!((left - right).abs() < 1e-6);
+        }
     }
 
     #[test]

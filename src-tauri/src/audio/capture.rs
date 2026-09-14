@@ -18,6 +18,8 @@ use crate::error::AppError;
 
 const QUEUE_CAP: usize = 48_000 * 2;
 pub const MAX_WAV_BYTES: u64 = 20 * 1024 * 1024;
+const CAPTURE_POLL: Duration = Duration::from_millis(16);
+const PENDING_RESERVE_SECONDS: usize = 8;
 
 pub const METER_BINS: usize = 48;
 const METER_HOPS_PER_SEC: u32 = 16;
@@ -232,9 +234,8 @@ fn start_stream_inner(
 
 fn run_monitor(mut built: BuiltCapture, stop: Arc<AtomicBool>) -> Result<CaptureResult, AppError> {
     while !stop.load(Ordering::SeqCst) {
-        let mut dump = Vec::new();
-        drain_consumer(&mut built.consumer, &mut dump)?;
-        thread::sleep(Duration::from_millis(5));
+        drain_discard(&mut built.consumer)?;
+        thread::sleep(CAPTURE_POLL);
     }
     drop(built.stream);
     Ok(CaptureResult {
@@ -250,18 +251,28 @@ fn run_capture(
     dest: PathBuf,
     stop: Arc<AtomicBool>,
 ) -> Result<CaptureResult, AppError> {
-    let mut pending = Vec::new();
+    let mut pending = Vec::with_capacity(SAMPLE_RATE as usize * PENDING_RESERVE_SECONDS);
+    let mut peak_samples = 0usize;
     while !stop.load(Ordering::SeqCst) {
         drain_consumer(&mut built.consumer, &mut pending)?;
-        thread::sleep(Duration::from_millis(5));
+        peak_samples = peak_samples.max(pending.len());
+        thread::sleep(CAPTURE_POLL);
     }
     drop(built.stream);
     thread::sleep(Duration::from_millis(20));
     drain_consumer(&mut built.consumer, &mut pending)?;
+    peak_samples = peak_samples.max(pending.len());
     if built.overflow.load(Ordering::Relaxed) > 0 {
         tracing::warn!(
             drops = built.overflow.load(Ordering::Relaxed),
+            peak_pending_bytes = peak_samples * 4,
             "capture overflow"
+        );
+    } else {
+        tracing::info!(
+            peak_pending_bytes = peak_samples * 4,
+            ring_cap = QUEUE_CAP,
+            "capture buffers"
         );
     }
     let finalize = Instant::now();
@@ -278,6 +289,11 @@ fn run_capture(
         sample_rate: SAMPLE_RATE,
         samples: resampled,
     })
+}
+
+fn drain_discard(consumer: &mut rtrb::Consumer<f32>) -> Result<(), AppError> {
+    while consumer.pop().is_ok() {}
+    Ok(())
 }
 
 fn drain_consumer(
@@ -401,6 +417,15 @@ mod tests {
         let mut pending = Vec::new();
         drain_consumer(&mut consumer, &mut pending).unwrap();
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn monitor_drain_does_not_keep_pcm() {
+        let (mut producer, mut consumer) = RingBuffer::<f32>::new(16);
+        assert!(producer.push(0.25).is_ok());
+        drain_discard(&mut consumer).unwrap();
+        assert!(consumer.pop().is_err());
+        assert_eq!(CAPTURE_POLL, Duration::from_millis(16));
     }
 
     #[test]

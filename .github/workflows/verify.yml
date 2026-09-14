@@ -36,6 +36,13 @@ jobs:
           cargo fmt --all --check
           cargo clippy --locked --all-targets --all-features -- -D warnings
           cargo test --locked --all
+      - name: MSRV field matches Cargo.toml
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          $msrv = (Select-String -Path Cargo.toml -Pattern '^rust-version\s*=').Line.Split('=')[1].Trim().Trim('"')
+          if ($msrv -ne "1.85.0") { throw "expected rust-version 1.85.0, got $msrv" }
+          Write-Host "MSRV $msrv (lock graph requires reqwest 0.13 via Tauri)"
       - name: Version SSOT
         shell: pwsh
         run: ./scripts/check-version.ps1

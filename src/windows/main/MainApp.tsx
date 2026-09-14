@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { reportError } from "../../lib/system-notify";
-import { api, type AppSettings, type Recording, type SessionState } from "../../lib/api";
+import { api, type AppSettings, type Recording } from "../../lib/api";
 import { applyTheme, resolvedTheme, watchSystemTheme } from "../../lib/theme";
 import {
   applyUiLocale,
@@ -11,6 +11,7 @@ import {
   messagesFor,
   resolveUiLocale,
 } from "../../lib/i18n";
+import { HISTORY_CHANGED } from "../../lib/history-sync";
 import { sectionFromSearch } from "../../lib/window-section";
 import { Toaster } from "../../components/ui/sonner";
 import { Button } from "../../components/ui/button";
@@ -72,8 +73,12 @@ export function MainApp() {
         formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
       );
     });
-    const unlisten = listen<SessionState>("session://state", () => {
-      void refreshHistory();
+    const unlistenHistory = listen(HISTORY_CHANGED, () => {
+      void refreshHistory().catch((error: unknown) => {
+        reportError(
+          formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
+        );
+      });
     });
     const unlistenInsert = listen<string>("session://insert", (event) => {
       const locale = resolveUiLocale("auto", navigator.language);
@@ -85,7 +90,7 @@ export function MainApp() {
       }
     });
     return () => {
-      void unlisten.then((fn) => fn());
+      void unlistenHistory.then((fn) => fn());
       void unlistenInsert.then((fn) => fn());
     };
   }, []);

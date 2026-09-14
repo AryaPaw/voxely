@@ -5,6 +5,10 @@ pub const FRAME: usize = DenoiseState::FRAME_SIZE;
 pub struct Rnnoise {
     state: Box<DenoiseState<'static>>,
     leftover: Vec<f32>,
+    work: Vec<f32>,
+    output: Vec<f32>,
+    frame_in: [f32; FRAME],
+    frame_out: [f32; FRAME],
 }
 
 impl Rnnoise {
@@ -12,35 +16,46 @@ impl Rnnoise {
         Self {
             state: DenoiseState::new(),
             leftover: Vec::with_capacity(FRAME),
+            work: Vec::new(),
+            output: Vec::new(),
+            frame_in: [0.0; FRAME],
+            frame_out: [0.0; FRAME],
         }
     }
 
     pub fn reset(&mut self) {
         self.state = DenoiseState::new();
         self.leftover.clear();
+        self.work.clear();
+        self.output.clear();
     }
 
     pub fn process(&mut self, input: &[f32]) -> Vec<f32> {
-        let mut work = Vec::with_capacity(self.leftover.len() + input.len());
-        work.extend_from_slice(&self.leftover);
-        work.extend_from_slice(input);
+        self.process_into(input);
+        self.output.clone()
+    }
+
+    pub fn process_into(&mut self, input: &[f32]) -> &[f32] {
+        self.work.clear();
+        self.work.extend_from_slice(&self.leftover);
+        self.work.extend_from_slice(input);
         self.leftover.clear();
-        let mut output = Vec::with_capacity(work.len());
-        let mut frame_in = [0.0f32; FRAME];
-        let mut frame_out = [0.0f32; FRAME];
+        self.output.clear();
         let mut index = 0;
-        while index + FRAME <= work.len() {
+        while index + FRAME <= self.work.len() {
             for i in 0..FRAME {
-                frame_in[i] = work[index + i] * 32768.0;
+                self.frame_in[i] = self.work[index + i] * 32768.0;
             }
-            let _ = self.state.process_frame(&mut frame_out, &frame_in);
-            for sample in frame_out {
-                output.push((sample / 32768.0).clamp(-1.0, 1.0));
+            let _ = self
+                .state
+                .process_frame(&mut self.frame_out, &self.frame_in);
+            for sample in self.frame_out {
+                self.output.push((sample / 32768.0).clamp(-1.0, 1.0));
             }
             index += FRAME;
         }
-        self.leftover.extend_from_slice(&work[index..]);
-        output
+        self.leftover.extend_from_slice(&self.work[index..]);
+        &self.output
     }
 
     pub fn flush(&mut self) -> Vec<f32> {
@@ -78,5 +93,18 @@ mod tests {
         assert!(out.is_empty() || out.iter().all(|s| s.is_finite()));
         let flushed = denoise.flush();
         assert!(flushed.iter().all(|s| s.is_finite()));
+    }
+
+    #[test]
+    fn reuse_matches_fresh_process() {
+        let mut first = Rnnoise::new();
+        let mut second = Rnnoise::new();
+        let input = vec![0.01f32; FRAME * 3];
+        let a = first.process(&input);
+        let b = second.process_into(&input).to_vec();
+        assert_eq!(a.len(), b.len());
+        for (left, right) in a.iter().zip(b.iter()) {
+            assert!((left - right).abs() < 1e-6);
+        }
     }
 }

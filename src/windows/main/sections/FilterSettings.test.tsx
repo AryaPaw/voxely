@@ -10,8 +10,6 @@ vi.mock("@tauri-apps/api/core", () => ({
       return {
         originalPath: "a.wav",
         processedPath: "b.wav",
-        originalDataUrl: "data:audio/wav;base64,ORIG",
-        processedDataUrl: "data:audio/wav;base64,PROC",
         peak: 0.5,
         rms: 0.1,
         clipCount: 0,
@@ -140,7 +138,7 @@ describe("FilterSettings", () => {
     fireEvent.click(screen.getByRole("button", { name: "After filters" }));
     const clips = document.querySelectorAll("audio");
     expect(clips).toHaveLength(2);
-    expect(clips[0]).toHaveAttribute("src", "data:audio/wav;base64,ORIG");
-    expect(clips[1]).toHaveAttribute("src", "data:audio/wav;base64,PROC");
+    expect(clips[0]).toHaveAttribute("src", "a.wav?n=1");
+    expect(clips[1]).toHaveAttribute("src", "b.wav?n=1");
   });
 });

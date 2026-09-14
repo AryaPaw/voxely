@@ -28,7 +28,9 @@
         "enable": true,
         "scope": [
           "$APPDATA/Voxely/audio/**",
-          "$HOME/AppData/Roaming/Voxely/audio/**"
+          "$HOME/AppData/Roaming/Voxely/audio/**",
+          "$APPDATA/VoxelyPerf/audio/**",
+          "$APPDATA/VoxelyPerf-*/audio/**"
         ]
       }
     }

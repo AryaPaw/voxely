@@ -1,4 +1,5 @@
 export const OVERLAY_BAR_COUNT = 28;
+export const METER_POLL_MS = 62;
 const LERP_TAU_SECONDS = 0.08;
 const IDLE_HALF_PX = 1.5;
 

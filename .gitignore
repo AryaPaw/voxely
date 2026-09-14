@@ -38,6 +38,9 @@ src-tauri/gen
 target
 Cargo.lock.bak
 
+# Perf campaign raw trials (aggregates live in docs/PERFORMANCE.md)
+docs/perf/trials/*.json
+
 # Env secrets
 .env
 .env.*
