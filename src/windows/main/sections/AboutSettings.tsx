@@ -46,7 +46,7 @@ function LinkRow({
   );
 }
 
-export function AboutSettings({ copy, localBuild }: { copy: Messages; localBuild: boolean }) {
+export function AboutSettings({ copy }: { copy: Messages }) {
   const [version, setVersion] = useState("");
   const [checking, setChecking] = useState(false);
   const released = formatReleaseDate(APP_RELEASED_ON, copy.dateLocale);
@@ -65,7 +65,7 @@ export function AboutSettings({ copy, localBuild }: { copy: Messages; localBuild
           className="h-16 w-16 rounded-2xl outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
         />
         <div className="min-w-0">
-          <p className="text-lg font-semibold text-balance">{appDisplayName(copy, localBuild)}</p>
+          <p className="text-lg font-semibold text-balance">{appDisplayName(copy)}</p>
           <p className="text-sm text-pretty text-muted-foreground">{copy.aboutTagline}</p>
           <p className="mt-1 text-sm text-muted-foreground">
             {copy.aboutVersion}{" "}

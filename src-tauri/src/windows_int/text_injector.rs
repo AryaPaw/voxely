@@ -78,6 +78,43 @@ pub fn insertion_mode_queues_keys(mode: &str) -> bool {
     mode != "clipboard"
 }
 
+pub const UNICODE_CHUNK_UNITS_DEFAULT: usize = 16;
+pub const UNICODE_CHUNK_UNITS_MIN: usize = 8;
+pub const UNICODE_CHUNK_UNITS_MAX: usize = 32;
+
+pub fn unicode_chunk_unit_count(remaining_units: usize, chunk: usize) -> usize {
+    remaining_units.min(chunk.clamp(UNICODE_CHUNK_UNITS_MIN, UNICODE_CHUNK_UNITS_MAX))
+}
+
+pub fn adapt_unicode_chunk_size(prev_chunk: usize, wall_ms: u128) -> usize {
+    let current = prev_chunk.clamp(UNICODE_CHUNK_UNITS_MIN, UNICODE_CHUNK_UNITS_MAX);
+    if wall_ms >= 12 {
+        (current / 2).max(UNICODE_CHUNK_UNITS_MIN)
+    } else if wall_ms <= 1 {
+        (current + 8).min(UNICODE_CHUNK_UNITS_MAX)
+    } else {
+        current
+    }
+}
+
+pub fn next_insert_event_offset(sent: u32, remaining: usize) -> Result<usize, &'static str> {
+    if remaining == 0 {
+        return Ok(0);
+    }
+    if sent == 0 {
+        return Err("SendInput delivered no events");
+    }
+    let sent = sent as usize;
+    if sent > remaining {
+        return Err("SendInput over-delivered");
+    }
+    Ok(sent)
+}
+
+pub fn should_retry_full_insert_after(error: &str) -> bool {
+    error != "partial" && error != "aborted"
+}
+
 pub fn resolve_insert_target(
     start: Option<NativeHwnd>,
     live: Option<NativeHwnd>,
@@ -367,6 +404,11 @@ pub mod native {
                     match send_insert_keys(text, class.as_deref(), &abort, hotkey) {
                         Ok(()) => return Ok(()),
                         Err("aborted") => return Err(AppError::Cancelled),
+                        Err("partial") => {
+                            return Err(AppError::TextInsertionFailed(
+                                "SendInput stalled after partial insert".into(),
+                            ));
+                        }
                         Err(reason) => last_reason = reason,
                     }
                 } else {
@@ -427,32 +469,69 @@ pub mod native {
             return Err("aborted");
         }
         let planned = super::plan_insert_units_for_class(text, class);
-        let mut inputs = Vec::with_capacity(planned.len() * 2);
-        for key_plan in planned {
-            match key_plan {
-                super::InsertKey::Unicode(unit) => {
-                    inputs.push(unicode_key(unit, false));
-                    inputs.push(unicode_key(unit, true));
+        let mut chunk = super::UNICODE_CHUNK_UNITS_DEFAULT;
+        let mut index = 0;
+        let mut any_sent = false;
+        while index < planned.len() {
+            if abort() {
+                return Err("aborted");
+            }
+            let take = super::unicode_chunk_unit_count(planned.len() - index, chunk);
+            let slice = &planned[index..index + take];
+            let mut inputs = Vec::with_capacity(slice.len() * 2);
+            for key_plan in slice {
+                match key_plan {
+                    super::InsertKey::Unicode(unit) => {
+                        inputs.push(unicode_key(*unit, false));
+                        inputs.push(unicode_key(*unit, true));
+                    }
+                    super::InsertKey::VirtualKey(vk) => {
+                        inputs.push(key(*vk, false));
+                        inputs.push(key(*vk, true));
+                    }
                 }
-                super::InsertKey::VirtualKey(vk) => {
-                    inputs.push(key(vk, false));
-                    inputs.push(key(vk, true));
+            }
+            let started = std::time::Instant::now();
+            match send_all(&inputs) {
+                Ok(()) => {
+                    any_sent = true;
+                    index += take;
+                    let wall_ms = started.elapsed().as_millis();
+                    chunk = super::adapt_unicode_chunk_size(chunk, wall_ms);
+                    if index < planned.len() {
+                        if wall_ms >= 12 {
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        } else {
+                            std::thread::yield_now();
+                        }
+                    }
+                }
+                Err(reason) => {
+                    if any_sent {
+                        return Err("partial");
+                    }
+                    return Err(reason);
                 }
             }
         }
-        send_all(&inputs)
+        Ok(())
     }
 
     fn send_all(inputs: &[INPUT]) -> Result<(), &'static str> {
         if inputs.is_empty() {
             return Ok(());
         }
-        let sent = unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) };
-        if insert_delivered(sent, true) && sent == inputs.len() as u32 {
-            Ok(())
-        } else {
-            Err("SendInput delivered no events")
+        let mut offset = 0;
+        while offset < inputs.len() {
+            let remaining = &inputs[offset..];
+            let sent = unsafe { SendInput(remaining, std::mem::size_of::<INPUT>() as i32) };
+            let advanced = super::next_insert_event_offset(sent, remaining.len())?;
+            if !insert_delivered(sent, true) {
+                return Err("SendInput delivered no events");
+            }
+            offset += advanced;
         }
+        Ok(())
     }
 
     fn vk_down(vk: u16) -> bool {
@@ -979,6 +1058,24 @@ mod tests {
         assert!(hotkey_wait_complete(0, false, 300));
         assert!(!hotkey_wait_complete(16, true, 300));
         assert!(hotkey_wait_complete(300, true, 300));
+    }
+
+    #[test]
+    fn unicode_chunks_adapt_and_resume_partial_send() {
+        assert_eq!(unicode_chunk_unit_count(3, 16), 3);
+        assert_eq!(unicode_chunk_unit_count(40, 16), 16);
+        assert_eq!(adapt_unicode_chunk_size(16, 20), UNICODE_CHUNK_UNITS_MIN);
+        assert_eq!(adapt_unicode_chunk_size(16, 1), 24);
+        assert_eq!(adapt_unicode_chunk_size(24, 1), UNICODE_CHUNK_UNITS_MAX);
+        assert_eq!(adapt_unicode_chunk_size(16, 4), 16);
+        assert_eq!(next_insert_event_offset(4, 10).unwrap(), 4);
+        assert_eq!(next_insert_event_offset(10, 10).unwrap(), 10);
+        assert!(next_insert_event_offset(0, 10).is_err());
+        assert!(!should_retry_full_insert_after("partial"));
+        assert!(!should_retry_full_insert_after("aborted"));
+        assert!(should_retry_full_insert_after(
+            "SendInput delivered no events"
+        ));
     }
 
     #[test]

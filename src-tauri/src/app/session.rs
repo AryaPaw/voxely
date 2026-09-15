@@ -52,6 +52,7 @@ pub struct AppContext {
     pub hotkeys_suspended: Mutex<bool>,
     pub abort_start: AtomicBool,
     pub session_generation: AtomicU64,
+    pub shortcut_sync_generation: AtomicU64,
     pub preview_capture: Mutex<Option<CaptureSession>>,
     pub compare_capture: Mutex<Option<CaptureSession>>,
     pub compare_cancel: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
@@ -98,6 +99,7 @@ impl AppContext {
             hotkeys_suspended: Mutex::new(false),
             abort_start: AtomicBool::new(false),
             session_generation: AtomicU64::new(0),
+            shortcut_sync_generation: AtomicU64::new(0),
             preview_capture: Mutex::new(None),
             compare_capture: Mutex::new(None),
             compare_cancel: Mutex::new(None),
@@ -111,6 +113,7 @@ impl AppContext {
     pub fn emit_state(&self, app: &AppHandle) {
         let state = self.state.lock().clone();
         let _ = app.emit("session://state", state);
+        crate::app::shortcuts::schedule_sync(app);
     }
 
     pub fn emit_history(&self, app: &AppHandle) {
@@ -681,6 +684,16 @@ pub fn prepare_overlay_window(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("overlay") {
         decorate_overlay(&window);
         position_overlay(&window);
+        return;
+    }
+    match build_overlay_window(app, overlay_url()) {
+        Ok(window) => {
+            decorate_overlay(&window);
+            position_overlay(&window);
+        }
+        Err(err) => {
+            tracing::error!(error = %err, "overlay window failed");
+        }
     }
 }
 
@@ -782,11 +795,11 @@ async fn run_transcription(
     audio_duration: Duration,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<crate::transcription::openrouter::TranscriptionSuccess, AppError> {
-    let ctx = app.state::<Arc<AppContext>>();
+    let client = crate::transcription::openrouter::build_stt_client(policy.connect_timeout)?;
     let recording_id_owned = recording_id.to_string();
     let app_for_progress = app.clone();
     transcribe_file_with_progress(
-        &ctx.client,
+        &client,
         crate::transcription::openrouter::default_base_url(),
         api_key,
         model,

@@ -10,6 +10,33 @@ use crate::transcription::retry::{
 
 const DEFAULT_BASE: &str = "https://openrouter.ai/api/v1";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SttHttpOptions {
+    pub http1_only: bool,
+    pub pool_max_idle_per_host: usize,
+}
+
+pub fn stt_http_options() -> SttHttpOptions {
+    SttHttpOptions {
+        http1_only: true,
+        pool_max_idle_per_host: 0,
+    }
+}
+
+pub fn build_stt_client(connect_timeout: Duration) -> Result<reqwest::Client, AppError> {
+    let opts = stt_http_options();
+    let mut builder = reqwest::Client::builder()
+        .use_rustls_tls()
+        .pool_max_idle_per_host(opts.pool_max_idle_per_host)
+        .connect_timeout(connect_timeout);
+    if opts.http1_only {
+        builder = builder.http1_only();
+    }
+    builder
+        .build()
+        .map_err(|e| AppError::ConnectionFailed(e.to_string()))
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct TranscriptionSuccess {
     pub text: String,
@@ -524,6 +551,14 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, AppError::ResponseMalformed);
+    }
+
+    #[test]
+    fn stt_client_avoids_http2_idle_pool() {
+        let opts = stt_http_options();
+        assert!(opts.http1_only);
+        assert_eq!(opts.pool_max_idle_per_host, 0);
+        assert!(build_stt_client(Duration::from_secs(8)).is_ok());
     }
 
     #[test]

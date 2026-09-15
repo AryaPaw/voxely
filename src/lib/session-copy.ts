@@ -1,6 +1,32 @@
 import type { SessionState } from "./api";
 import { localizedError, messagesFor, type Messages } from "./i18n";
 
+export function overlayRetryDisplayAttempt(failedAttempt: number): number {
+  return failedAttempt + 1;
+}
+
+export function overlaySttAttempt(state: SessionState): number | null {
+  switch (state.kind) {
+    case "transcribing":
+      return state.attempt;
+    case "retryWaiting":
+      return overlayRetryDisplayAttempt(state.attempt);
+    case "idle":
+    case "startingRecording":
+    case "recording":
+    case "stoppingRecording":
+    case "saving":
+    case "processingAudio":
+    case "completed":
+    case "failed":
+      return null;
+    default: {
+      const _never: never = state;
+      return _never;
+    }
+  }
+}
+
 export function overlayLabel(state: SessionState, copy: Messages = messagesFor("ru")): string {
   switch (state.kind) {
     case "idle":
@@ -14,9 +40,13 @@ export function overlayLabel(state: SessionState, copy: Messages = messagesFor("
     case "processingAudio":
       return copy.overlayProcessing;
     case "transcribing":
-      return copy.overlayTranscribing;
-    case "retryWaiting":
-      return copy.overlayRetry.replace("{attempt}", String(state.attempt));
+    case "retryWaiting": {
+      const attempt = overlaySttAttempt(state);
+      if (attempt == null || attempt <= 1) {
+        return copy.overlayTranscribing;
+      }
+      return copy.overlayRetry.replace("{attempt}", String(attempt));
+    }
     case "completed":
       return copy.overlayReady;
     case "failed":
@@ -44,7 +74,7 @@ export function sessionStatusLabel(
       return copy.overlayProcessing;
     case "transcribing":
     case "retryWaiting":
-      return copy.overlayTranscribing;
+      return overlayLabel(state, copy);
     case "completed":
       return copy.overlayReady;
     case "failed":

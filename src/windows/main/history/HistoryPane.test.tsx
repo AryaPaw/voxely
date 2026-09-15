@@ -1,4 +1,5 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { invoke } from "@tauri-apps/api/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Recording } from "../../../lib/api";
 import { messagesFor } from "../../../lib/i18n";
@@ -131,5 +132,22 @@ describe("HistoryPane", () => {
       />,
     );
     expect(screen.getByText("Обработка")).toBeInTheDocument();
+  });
+
+  it("does not fetch audio until listen", async () => {
+    render(
+      <HistoryCard
+        item={recording()}
+        copy={messagesFor("ru")}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    expect(invoke).not.toHaveBeenCalledWith("recording_audio_url", expect.anything());
+    fireEvent.click(screen.getByRole("button", { name: "Слушать" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("recording_audio_url", { id: "1" });
+    });
   });
 });

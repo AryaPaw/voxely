@@ -14,7 +14,7 @@ afterEach(() => cleanup());
 
 describe("AboutSettings", () => {
   it("shows runtime version, author, GitHub and manual update", async () => {
-    render(<AboutSettings copy={messagesFor("en")} localBuild={false} />);
+    render(<AboutSettings copy={messagesFor("en")} />);
     expect(await screen.findByText("0.1.0")).toBeInTheDocument();
     expect(screen.getByText(/2026/)).toBeInTheDocument();
     expect(screen.getByText("Voxely")).toBeInTheDocument();
@@ -28,7 +28,7 @@ describe("AboutSettings", () => {
   });
 
   it("labels the issue action in Russian", async () => {
-    render(<AboutSettings copy={messagesFor("ru")} localBuild={false} />);
+    render(<AboutSettings copy={messagesFor("ru")} />);
     expect(await screen.findByText("0.1.0")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /сообщить о проблеме/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /исходный код/i })).toBeInTheDocument();

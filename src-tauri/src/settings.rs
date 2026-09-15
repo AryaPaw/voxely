@@ -88,9 +88,9 @@ impl RetrySettings {
                 "additional retries must be 0-5".into(),
             ));
         }
-        if self.connect_timeout_ms < 250 {
+        if self.connect_timeout_ms < 8_000 {
             return Err(AppError::RequestValidationFailed(
-                "timeouts must be at least 250ms".into(),
+                "connect timeout must be at least 8000ms".into(),
             ));
         }
         if self.request_timeout_ms < 5_000 {
@@ -198,6 +198,9 @@ impl AppSettings {
             loaded.config_revision = 5;
             let _ = loaded.save(path);
         }
+        if loaded.apply_connect_timeout_floor() {
+            let _ = loaded.save(path);
+        }
         Ok(loaded)
     }
 
@@ -223,8 +226,17 @@ impl AppSettings {
         if self.retry.total_operation_timeout_ms < 180_000 {
             self.retry.total_operation_timeout_ms = 12 * 60 * 1000;
         }
-        if self.retry.connect_timeout_ms < 3_000 {
+        if self.retry.connect_timeout_ms < 8_000 {
             self.retry.connect_timeout_ms = 8_000;
+        }
+    }
+
+    pub fn apply_connect_timeout_floor(&mut self) -> bool {
+        if self.retry.connect_timeout_ms < 8_000 {
+            self.retry.connect_timeout_ms = 8_000;
+            true
+        } else {
+            false
         }
     }
 
@@ -405,6 +417,21 @@ mod tests {
     }
 
     #[test]
+    fn lifts_sub_eight_second_connect_timeout_on_current_revision() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut settings = AppSettings::default();
+        settings.retry.connect_timeout_ms = 4_994;
+        settings.config_revision = 5;
+        std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+        let loaded = AppSettings::load(&path).unwrap();
+        assert_eq!(loaded.retry.connect_timeout_ms, 8_000);
+        let persisted: AppSettings =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(persisted.retry.connect_timeout_ms, 8_000);
+    }
+
+    #[test]
     fn factory_preset_graphs_differ() {
         let fast = DspPreset::stt_fast();
         let quality = DspPreset::stt_optimized();
@@ -430,6 +457,9 @@ mod tests {
     fn retry_rejects_too_many_attempts() {
         let mut s = RetrySettings::default();
         s.additional_retries = 9;
+        assert!(s.validate().is_err());
+        s = RetrySettings::default();
+        s.connect_timeout_ms = 4_994;
         assert!(s.validate().is_err());
     }
 

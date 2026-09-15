@@ -113,6 +113,7 @@ export function TranscriptionSettings({
       <SettingsField label={copy.connectTimeout}>
         <Input
           type="number"
+          min={8000}
           value={settings.retry.connectTimeoutMs}
           onChange={(event) =>
             onChange({

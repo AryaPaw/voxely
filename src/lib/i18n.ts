@@ -77,7 +77,7 @@ const ru = {
   overlaySaving: "Сохранение",
   overlayProcessing: "Обработка",
   overlayTranscribing: "Расшифровка",
-  overlayRetry: "Повтор {attempt}",
+  overlayRetry: "Расшифровка (try {attempt})",
   overlayWaiting: "Ожидание",
   overlayError: "Ошибка",
   overlayCancel: "Отменить запись",
@@ -313,7 +313,7 @@ const en = {
   overlaySaving: "Saving",
   overlayProcessing: "Processing",
   overlayTranscribing: "Transcribing",
-  overlayRetry: "Retry {attempt}",
+  overlayRetry: "Transcribing (try {attempt})",
   overlayWaiting: "Waiting",
   overlayError: "Error",
   overlayCancel: "Cancel recording",
@@ -487,11 +487,7 @@ export function applyUiLocale(locale: UiLocale): void {
 
 export type Messages = typeof ru;
 
-export function isLocalBuild(): boolean {
-  return import.meta.env.DEV;
-}
-
-export function appDisplayName(copy: Messages, _local = isLocalBuild()): string {
+export function appDisplayName(copy: Messages): string {
   return copy.appName;
 }
 

@@ -20,21 +20,6 @@
         "minHeight": 520,
         "center": true,
         "visible": false
-      },
-      {
-        "label": "overlay",
-        "title": "Voxely Overlay",
-        "url": "overlay.html",
-        "width": 320,
-        "height": 72,
-        "visible": false,
-        "decorations": false,
-        "transparent": true,
-        "shadow": false,
-        "alwaysOnTop": true,
-        "skipTaskbar": true,
-        "resizable": false,
-        "focus": false
       }
     ],
     "security": {

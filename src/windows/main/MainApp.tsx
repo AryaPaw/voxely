@@ -250,7 +250,7 @@ export function MainApp() {
                 />
               ) : null}
               {section === "debug" && localBuild ? <DebugSettings copy={copy} /> : null}
-              {section === "about" ? <AboutSettings copy={copy} localBuild={localBuild} /> : null}
+              {section === "about" ? <AboutSettings copy={copy} /> : null}
             </div>
           )}
         </main>

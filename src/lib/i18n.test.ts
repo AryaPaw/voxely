@@ -59,9 +59,8 @@ describe("messagesFor", () => {
   });
 
   it("uses the same product name for local and release chrome", () => {
-    expect(appDisplayName(messagesFor("en"), true)).toBe("Voxely");
-    expect(appDisplayName(messagesFor("ru"), true)).toBe("Voxely");
-    expect(appDisplayName(messagesFor("en"), false)).toBe("Voxely");
+    expect(appDisplayName(messagesFor("en"))).toBe("Voxely");
+    expect(appDisplayName(messagesFor("ru"))).toBe("Voxely");
   });
 
   it("keeps English copy free of Cyrillic except the Russian language name", () => {

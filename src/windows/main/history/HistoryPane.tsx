@@ -121,46 +121,79 @@ export function HistoryCard({
   onRefresh: () => Promise<void>;
 }) {
   const [audioSrc, setAudioSrc] = useState<string | null>(null);
+  const [loadAudio, setLoadAudio] = useState(false);
+  const [audioMissing, setAudioMissing] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
   const [current, setCurrent] = useState(0);
   const [copied, setCopied] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const pendingPlay = useRef(false);
+  const copiedTimer = useRef<number | null>(null);
   const failed = (item.status === "failed" || item.status === "interrupted") && !item.transcript;
   const processing = item.status === "processing" && !item.transcript;
   const canRetry = Boolean(item.rawAudioPath || item.processedAudioPath);
   const processingLabel = item.processedAudioPath ? copy.processing : copy.processingAudio;
 
   useEffect(() => {
+    if (!loadAudio) {
+      return;
+    }
     let cancelled = false;
     void api
       .audioPath(item.id)
       .then((path) => {
-        if (!cancelled) {
-          setAudioSrc(path ? convertFileSrc(path.replace(/\\/g, "/")) : null);
+        if (cancelled) {
+          return;
+        }
+        if (path) {
+          setAudioSrc(convertFileSrc(path.replace(/\\/g, "/")));
+          setAudioMissing(false);
+        } else {
+          setAudioSrc(null);
+          setAudioMissing(true);
         }
       })
       .catch(() => {
         if (!cancelled) {
           setAudioSrc(null);
+          setAudioMissing(true);
         }
       });
     return () => {
       cancelled = true;
     };
-  }, [item.id, item.processedAudioPath, item.rawAudioPath]);
+  }, [loadAudio, item.id, item.processedAudioPath, item.rawAudioPath]);
+
+  useEffect(() => {
+    if (!pendingPlay.current || !audioSrc) {
+      return;
+    }
+    pendingPlay.current = false;
+    void audioRef.current?.play();
+  }, [audioSrc]);
+
+  useEffect(() => {
+    return () => {
+      if (copiedTimer.current !== null) {
+        window.clearTimeout(copiedTimer.current);
+      }
+    };
+  }, []);
 
   function togglePlay() {
     const node = audioRef.current;
-    if (!node) {
+    if (node) {
+      if (node.paused) {
+        void node.play();
+      } else {
+        node.pause();
+      }
       return;
     }
-    if (node.paused) {
-      void node.play();
-    } else {
-      node.pause();
-    }
+    pendingPlay.current = true;
+    setLoadAudio(true);
   }
 
   async function retryTranscription() {
@@ -202,7 +235,13 @@ export function HistoryCard({
               onClick={() => {
                 void api.copy(item.transcript ?? "").then(() => {
                   setCopied(true);
-                  window.setTimeout(() => setCopied(false), 1400);
+                  if (copiedTimer.current !== null) {
+                    window.clearTimeout(copiedTimer.current);
+                  }
+                  copiedTimer.current = window.setTimeout(() => {
+                    copiedTimer.current = null;
+                    setCopied(false);
+                  }, 1400);
                 });
               }}
             >
@@ -288,7 +327,7 @@ export function HistoryCard({
           type="button"
           className="history-play"
           aria-label={playing ? copy.pause : copy.listen}
-          disabled={!audioSrc}
+          disabled={audioMissing || !canRetry}
           onClick={togglePlay}
         >
           {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}

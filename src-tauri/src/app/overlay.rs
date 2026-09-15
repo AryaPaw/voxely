@@ -172,4 +172,14 @@ mod tests {
         timeline.hide();
         assert!(timeline.elapsed_ms().is_none());
     }
+
+    #[test]
+    fn overlay_window_is_not_declared_in_tauri_conf() {
+        let conf = include_str!("../../tauri.conf.json");
+        let session = include_str!("session.rs");
+        assert!(!conf.contains("\"label\": \"overlay\""));
+        assert!(session.contains("overlay.html"));
+        assert!(session.contains(".transparent(true)"));
+        assert!(!session.contains("index.html?overlay="));
+    }
 }

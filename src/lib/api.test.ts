@@ -4,6 +4,8 @@ import {
   historyStatusLabel,
   overlayIsBusy,
   overlayLabel,
+  overlayRetryDisplayAttempt,
+  overlaySttAttempt,
   sessionStatusLabel,
 } from "./session-copy";
 import { formatDuration, formatTime } from "./utils";
@@ -16,7 +18,9 @@ const cases: Array<[SessionState, string]> = [
   [{ kind: "saving" }, "Сохранение"],
   [{ kind: "processingAudio" }, "Обработка"],
   [{ kind: "transcribing", attempt: 1 }, "Расшифровка"],
-  [{ kind: "retryWaiting", attempt: 2, delayMs: 500 }, "Повтор 2"],
+  [{ kind: "transcribing", attempt: 2 }, "Расшифровка (try 2)"],
+  [{ kind: "retryWaiting", attempt: 1, delayMs: 500 }, "Расшифровка (try 2)"],
+  [{ kind: "retryWaiting", attempt: 2, delayMs: 500 }, "Расшифровка (try 3)"],
   [{ kind: "completed" }, "Готово"],
   [
     { kind: "failed", message: "Нет API-ключа OpenRouter", code: "InvalidApiKey" },
@@ -25,6 +29,17 @@ const cases: Array<[SessionState, string]> = [
 ];
 
 describe("overlayLabel", () => {
+  it("numbers HUD retry as the next attempt after a failed STT call", () => {
+    expect(overlayRetryDisplayAttempt(1)).toBe(2);
+    expect(overlayLabel({ kind: "retryWaiting", attempt: 1, delayMs: 80 })).toBe(
+      "Расшифровка (try 2)",
+    );
+    expect(overlayLabel({ kind: "transcribing", attempt: 1 })).toBe("Расшифровка");
+    expect(overlayLabel({ kind: "transcribing", attempt: 2 })).toBe("Расшифровка (try 2)");
+    expect(overlaySttAttempt({ kind: "retryWaiting", attempt: 1, delayMs: 80 })).toBe(2);
+    expect(overlaySttAttempt({ kind: "transcribing", attempt: 2 })).toBe(2);
+  });
+
   it.each(cases)("%j", (state, label) => {
     expect(overlayLabel(state)).toBe(label);
   });
@@ -65,7 +80,7 @@ describe("sessionStatusLabel", () => {
     expect(sessionStatusLabel({ kind: "processingAudio" })).toBe("Обработка");
     expect(sessionStatusLabel({ kind: "transcribing", attempt: 1 })).toBe("Расшифровка");
     expect(sessionStatusLabel({ kind: "retryWaiting", attempt: 2, delayMs: 1 })).toBe(
-      "Расшифровка",
+      "Расшифровка (try 3)",
     );
     expect(sessionStatusLabel({ kind: "completed" })).toBe("Готово");
     expect(sessionStatusLabel({ kind: "failed", message: "x", code: "InvalidApiKey" })).toBe(

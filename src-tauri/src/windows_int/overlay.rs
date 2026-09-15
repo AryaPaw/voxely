@@ -1,9 +1,7 @@
 use crate::app::overlay::WorkArea;
 
 #[cfg(windows)]
-fn work_area_from_monitor(
-    monitor: windows::Win32::Graphics::Gdi::HMONITOR,
-) -> Option<WorkArea> {
+fn work_area_from_monitor(monitor: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<WorkArea> {
     unsafe {
         use windows::Win32::Foundation::{BOOL, RECT};
         use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
@@ -57,9 +55,7 @@ pub fn work_area_for_hwnd(raw: isize) -> Option<WorkArea> {
 #[cfg(windows)]
 pub fn work_area_for_foreground(skip_roots: &[usize]) -> Option<WorkArea> {
     unsafe {
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetAncestor, GetForegroundWindow, GA_ROOT,
-        };
+        use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT};
 
         let hwnd = GetForegroundWindow();
         if hwnd.0.is_null() {

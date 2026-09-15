@@ -34,17 +34,20 @@ pub fn app_display_name(_locale: &str) -> &'static str {
     "Voxely"
 }
 
-pub fn window_title() -> &'static str {
-    if is_local_build() {
-        "Voxely (sandbox)"
+pub fn window_title(locale: &str) -> &'static str {
+    if !is_local_build() {
+        return "Voxely";
+    }
+    if locale.to_ascii_lowercase().starts_with("ru") {
+        "Voxely (локальная версия)"
     } else {
-        "Voxely"
+        "Voxely (local)"
     }
 }
 
-fn apply_app_identity(app: &AppHandle, _locale: &str) {
+fn apply_app_identity(app: &AppHandle, locale: &str) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_title(window_title());
+        let _ = window.set_title(window_title(locale));
     }
     if let Some(tray) = app.tray_by_id("main") {
         let _ = tray.set_tooltip(Some(app_display_name("en")));
@@ -293,11 +296,13 @@ mod tests {
     }
 
     #[test]
-    fn window_title_marks_sandbox_only_on_local_builds() {
+    fn window_title_marks_local_build_not_sandbox() {
         if is_local_build() {
-            assert_eq!(window_title(), "Voxely (sandbox)");
+            assert_eq!(window_title("ru"), "Voxely (локальная версия)");
+            assert_eq!(window_title("en"), "Voxely (local)");
         } else {
-            assert_eq!(window_title(), "Voxely");
+            assert_eq!(window_title("ru"), "Voxely");
+            assert_eq!(window_title("en"), "Voxely");
         }
         assert_eq!(app_display_name("en"), "Voxely");
         assert_eq!(app_display_name("ru"), "Voxely");
