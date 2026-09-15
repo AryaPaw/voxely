@@ -97,8 +97,55 @@ pub fn apply_overlay_exstyle(raw: isize) {
     }
 }
 
+#[cfg(windows)]
+pub fn show_noactivate(raw: isize) {
+    set_click_through(raw, false);
+    unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
+        let hwnd = HWND(raw as *mut core::ffi::c_void);
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+    }
+    apply_overlay_exstyle(raw);
+}
+
+#[cfg(windows)]
+pub fn hide(raw: isize) {
+    set_click_through(raw, true);
+    unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+        let hwnd = HWND(raw as *mut core::ffi::c_void);
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+#[cfg(windows)]
+fn set_click_through(raw: isize, through: bool) {
+    unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TRANSPARENT,
+        };
+        let hwnd = HWND(raw as *mut core::ffi::c_void);
+        let mut ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        if through {
+            ex |= WS_EX_TRANSPARENT.0 as i32;
+        } else {
+            ex &= !(WS_EX_TRANSPARENT.0 as i32);
+        }
+        SetWindowLongW(hwnd, GWL_EXSTYLE, ex);
+    }
+}
+
 #[cfg(not(windows))]
 pub fn apply_overlay_exstyle(_raw: isize) {}
+
+#[cfg(not(windows))]
+pub fn show_noactivate(_raw: isize) {}
+
+#[cfg(not(windows))]
+pub fn hide(_raw: isize) {}
 
 #[cfg(not(windows))]
 pub fn work_area_for_cursor() -> Option<WorkArea> {

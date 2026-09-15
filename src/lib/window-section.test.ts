@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { sectionFromSearch } from "./window-section";
+import { sectionFromNavigatePayload, sectionFromSearch } from "./window-section";
 
 describe("sectionFromSearch", () => {
   it("opens history by default", () => {
@@ -16,5 +16,10 @@ describe("sectionFromSearch", () => {
 
   it("ignores unknown section names", () => {
     expect(sectionFromSearch("?section=not-a-page")).toBe("history");
+  });
+
+  it("maps a toast navigation payload to history", () => {
+    expect(sectionFromNavigatePayload("history")).toBe("history");
+    expect(sectionFromNavigatePayload("about")).toBe("about");
   });
 });

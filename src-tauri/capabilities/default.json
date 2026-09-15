@@ -47,7 +47,6 @@
     "allow-import-obs-preset",
     "allow-parse-obs-json",
     "allow-copy-transcript",
-    "allow-insert-transcript",
     "allow-run-retention",
     "allow-overlay-timing",
     "allow-overlay-timeline",

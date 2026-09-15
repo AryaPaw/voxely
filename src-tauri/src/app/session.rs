@@ -16,6 +16,9 @@ use crate::app::overlay::{
     overlay_physical_position, OverlayTimeline, WorkArea, OVERLAY_GAP_PX, OVERLAY_HEIGHT,
     OVERLAY_WIDTH,
 };
+use crate::app::overlay_controller::{
+    delayed_hide_is_stale, next_overlay_revision, overlay_snapshot, OverlaySnapshot,
+};
 use crate::audio::capture::{
     read_pcm16_wav_with_rate, write_pcm16_wav, CaptureSession, MeterSample,
 };
@@ -34,7 +37,8 @@ use crate::transcription::openrouter::{
 use crate::windows_int::credentials::get_api_key;
 use crate::windows_int::overlay::{work_area_for_cursor, work_area_for_hwnd};
 use crate::windows_int::text_injector::{
-    insert_should_abort, insert_transcript_now, native, resolve_insert_target, NativeHwnd,
+    insert_outcome_event, insert_should_abort, insert_transcript_now, native, CapturedTarget,
+    NativeHwnd,
 };
 
 pub struct AppContext {
@@ -44,11 +48,12 @@ pub struct AppContext {
     pub state: Mutex<SessionState>,
     pub capture: Mutex<Option<CaptureSession>>,
     pub history: Mutex<HistoryRepo>,
-    pub captured_hwnd: Mutex<Option<NativeHwnd>>,
+    pub captured_target: Mutex<Option<CapturedTarget>>,
+    pub overlay_revision: std::sync::atomic::AtomicU64,
+    pub overlay_visible: AtomicBool,
     pub in_flight: Mutex<HashSet<String>>,
     pub transport: Mutex<OpenRouterTransport>,
     pub overlay_timeline: Mutex<OverlayTimeline>,
-    pub overlay_epoch: Mutex<u64>,
     pub cancel_tx: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
     pub session_recording_id: Mutex<Option<String>>,
     pub hotkeys_suspended: Mutex<bool>,
@@ -88,11 +93,12 @@ impl AppContext {
             state: Mutex::new(SessionState::Idle),
             capture: Mutex::new(None),
             history: Mutex::new(history),
-            captured_hwnd: Mutex::new(None),
+            captured_target: Mutex::new(None),
+            overlay_revision: AtomicU64::new(0),
+            overlay_visible: AtomicBool::new(false),
             in_flight: Mutex::new(HashSet::new()),
             transport: Mutex::new(transport),
             overlay_timeline: Mutex::new(OverlayTimeline::default()),
-            overlay_epoch: Mutex::new(0),
             cancel_tx: Mutex::new(None),
             session_recording_id: Mutex::new(None),
             hotkeys_suspended: Mutex::new(false),
@@ -109,9 +115,22 @@ impl AppContext {
         })
     }
 
+    pub fn overlay_snapshot(&self) -> OverlaySnapshot {
+        overlay_snapshot(
+            self.overlay_revision.load(Ordering::SeqCst),
+            self.overlay_visible.load(Ordering::SeqCst),
+            self.state.lock().clone(),
+        )
+    }
+
+    pub fn emit_overlay(&self, app: &AppHandle) {
+        let _ = app.emit("overlay://snapshot", self.overlay_snapshot());
+    }
+
     pub fn emit_state(&self, app: &AppHandle) {
         let state = self.state.lock().clone();
         let _ = app.emit("session://state", state);
+        self.emit_overlay(app);
         crate::app::shortcuts::schedule_sync(app);
     }
 
@@ -168,9 +187,10 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
             }
             *ctx.session_recording_id.lock() = None;
             ctx.abort_start.store(true, Ordering::SeqCst);
+            *ctx.captured_target.lock() = None;
             ctx.emit_state(app);
             play_cancel_cue(&ctx);
-            hide_overlay_later(app.clone(), Duration::from_millis(16));
+            hide_overlay_now(app);
             Ok(())
         }
         SessionState::StoppingRecording
@@ -185,7 +205,7 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
             }
             ctx.emit_state(app);
             play_cancel_cue(&ctx);
-            hide_overlay_later(app.clone(), Duration::from_millis(16));
+            hide_overlay_now(app);
             Ok(())
         }
         _ => Ok(()),
@@ -215,7 +235,8 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     *ctx.cancel_tx.lock() = Some(tx);
     ctx.transition(SessionEvent::StartRequested)?;
     let skip = voxely_window_roots(app);
-    *ctx.captured_hwnd.lock() = native::capture_target_excluding(&skip);
+    let generation = ctx.session_generation.load(Ordering::SeqCst);
+    *ctx.captured_target.lock() = native::capture_session_target(&skip, generation);
     ctx.overlay_timeline.lock().begin_show();
     show_overlay(app);
     ctx.emit_state(app);
@@ -272,7 +293,7 @@ fn finish_capture_start(app: &AppHandle, started: Result<CaptureSession, AppErro
             let _ = ctx.transition(SessionEvent::CaptureFailed(err.clone()));
             ctx.emit_state(app);
             crate::notify::show_error(app, &err);
-            hide_overlay_later(app.clone(), Duration::from_millis(2000));
+            schedule_error_overlay_hide(app.clone(), Duration::from_millis(2000));
         }
     }
 }
@@ -288,10 +309,6 @@ fn spawn_openrouter_prewarm(ctx: &AppContext) {
 
 fn stop_recording(app: &AppHandle) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
-    native::wait_for_keys_up(
-        &crate::windows_int::text_injector::hotkey_keys_to_release(&ctx.settings.lock().hotkey),
-        Duration::from_millis(300),
-    );
     let Some(session) = ctx.capture.lock().take() else {
         ctx.abort_start.store(true, Ordering::SeqCst);
         let _ = ctx.transition(SessionEvent::Cancelled);
@@ -319,7 +336,7 @@ fn stop_recording(app: &AppHandle) -> Result<(), AppError> {
                 let _ = ctx.transition(SessionEvent::SaveFailed(err.clone()));
                 ctx.emit_state(&handle);
                 crate::notify::show_error(&handle, &err);
-                hide_overlay_later(handle, Duration::from_millis(2000));
+                schedule_error_overlay_hide(handle, Duration::from_millis(2000));
             });
         }
     });
@@ -348,7 +365,11 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
             .to_string(),
     );
     *ctx.session_recording_id.lock() = Some(rec.id.clone());
-    if ctx.history.lock().insert(&rec).is_err() {
+    if let Err(err) = ctx.history.lock().insert(&rec) {
+        let _ = ctx.transition(SessionEvent::SaveFailed(err.clone()));
+        ctx.emit_state(app);
+        crate::notify::show_error(app, &err);
+        schedule_error_overlay_hide(app.clone(), Duration::from_millis(2000));
         return;
     }
     ctx.emit_history(app);
@@ -374,7 +395,7 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
                 let _ = ctx.transition(SessionEvent::Failed(err.clone()));
                 ctx.emit_state(&app_handle);
                 crate::notify::show_error(&app_handle, &err);
-                hide_overlay_later(app_handle, Duration::from_millis(2000));
+                schedule_error_overlay_hide(app_handle, Duration::from_millis(2000));
             }
         }
     });
@@ -521,65 +542,7 @@ async fn process_and_transcribe_inner(
             ctx.history.lock().update(&rec)?;
             ctx.emit_history(app);
             tracing::info!(stt_http_ms = success.latency_ms, "stt http");
-            let _ = ctx.transition(SessionEvent::Succeeded);
-            ctx.emit_state(app);
-            *ctx.session_recording_id.lock() = None;
-            let mode = ctx.settings.lock().insertion_mode.clone();
-            let hotkey = ctx.settings.lock().hotkey.clone();
-            let start_hwnd = *ctx.captured_hwnd.lock();
-            let text = success.text.clone();
-            let app_clone = app.clone();
-            let commit_generation = started_generation;
-            let _ = app.clone().run_on_main_thread(move || {
-                let ctx = app_clone.state::<Arc<AppContext>>();
-                if !may_commit_session(
-                    commit_generation,
-                    ctx.session_generation.load(Ordering::SeqCst),
-                    false,
-                ) {
-                    return;
-                }
-                hide_overlay_now(&app_clone);
-                let overlay = overlay_native_hwnd(&app_clone);
-                let main = native_hwnd_for_label(&app_clone, "main");
-                let skip = voxely_window_roots(&app_clone);
-                let _ = ctx.transition(SessionEvent::Dismiss);
-                ctx.emit_state(&app_clone);
-                let insert_app = app_clone.clone();
-                thread::spawn(move || {
-                    std::thread::sleep(Duration::from_millis(16));
-                    let abort_app = insert_app.clone();
-                    let abort = {
-                        let abort_app = abort_app.clone();
-                        move || {
-                            let ctx = abort_app.state::<Arc<AppContext>>();
-                            insert_should_abort(
-                                commit_generation,
-                                ctx.session_generation.load(Ordering::SeqCst),
-                            )
-                        }
-                    };
-                    if abort() {
-                        return;
-                    }
-                    let live = native::capture_target_excluding(&skip);
-                    let captured = resolve_insert_target(start_hwnd, live, overlay, main);
-                    let result =
-                        insert_transcript_now(&mode, captured, overlay, &text, abort, &hotkey);
-                    let notify = insert_app.clone();
-                    let _ = insert_app.run_on_main_thread(move || match result {
-                        Ok("copied") => {
-                            let _ = notify.emit("session://insert", "copied");
-                        }
-                        Ok(_) => {}
-                        Err(AppError::Cancelled) => {}
-                        Err(err) => {
-                            crate::notify::show_error(&notify, &err);
-                            let _ = notify.emit("session://insert", err.code());
-                        }
-                    });
-                });
-            });
+            publish_stt_success(app, ctx.as_ref(), started_generation, success.text.clone());
             Ok(())
         }
         Err(AppError::Cancelled) => Err(AppError::Cancelled),
@@ -592,6 +555,75 @@ async fn process_and_transcribe_inner(
             Err(err)
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SttSuccessStep {
+    EmitHistory,
+    HideOverlay,
+    PublishIdle,
+    SpawnInsert,
+}
+
+pub fn stt_success_steps() -> [SttSuccessStep; 4] {
+    [
+        SttSuccessStep::EmitHistory,
+        SttSuccessStep::HideOverlay,
+        SttSuccessStep::PublishIdle,
+        SttSuccessStep::SpawnInsert,
+    ]
+}
+
+fn publish_stt_success(app: &AppHandle, ctx: &AppContext, started_generation: u64, text: String) {
+    debug_assert_eq!(
+        stt_success_steps(),
+        [
+            SttSuccessStep::EmitHistory,
+            SttSuccessStep::HideOverlay,
+            SttSuccessStep::PublishIdle,
+            SttSuccessStep::SpawnInsert,
+        ]
+    );
+    hide_overlay_now(app);
+    let _ = ctx.transition(SessionEvent::Succeeded);
+    let _ = ctx.transition(SessionEvent::Dismiss);
+    ctx.emit_state(app);
+    *ctx.session_recording_id.lock() = None;
+    let mode = ctx.settings.lock().insertion_mode.clone();
+    let hotkey = ctx.settings.lock().hotkey.clone();
+    let captured = *ctx.captured_target.lock();
+    *ctx.captured_target.lock() = None;
+    let app_clone = app.clone();
+    let overlay_root = overlay_native_hwnd(app).map(|h| h.value);
+    let main_root = native_hwnd_for_label(app, "main").map(|h| h.value);
+    thread::spawn(move || {
+        let abort = {
+            let abort_app = app_clone.clone();
+            move || {
+                let ctx = abort_app.state::<Arc<AppContext>>();
+                insert_should_abort(
+                    started_generation,
+                    ctx.session_generation.load(Ordering::SeqCst),
+                )
+            }
+        };
+        let outcome = insert_transcript_now(
+            &mode,
+            captured,
+            overlay_root,
+            main_root,
+            &text,
+            abort,
+            &hotkey,
+        );
+        let notify = app_clone.clone();
+        let _ = app_clone.run_on_main_thread(move || {
+            crate::notify::notify_insert_outcome(&notify, outcome);
+            if let Some(event) = insert_outcome_event(outcome) {
+                let _ = notify.emit("session://insert", event);
+            }
+        });
+    });
 }
 
 fn overlay_native_hwnd(app: &AppHandle) -> Option<NativeHwnd> {
@@ -614,7 +646,8 @@ fn voxely_window_roots(app: &AppHandle) -> Vec<usize> {
 }
 
 fn bump_overlay_epoch(ctx: &AppContext) {
-    *ctx.overlay_epoch.lock() += 1;
+    let next = next_overlay_revision(ctx.overlay_revision.load(Ordering::SeqCst));
+    ctx.overlay_revision.store(next, Ordering::SeqCst);
 }
 
 fn overlay_work_area(window: &WebviewWindow) -> WorkArea {
@@ -625,8 +658,8 @@ fn overlay_work_area(window: &WebviewWindow) -> WorkArea {
         bottom: 1040,
     };
     if let Some(ctx) = window.try_state::<Arc<AppContext>>() {
-        if let Some(hwnd) = *ctx.captured_hwnd.lock() {
-            if let Some(work) = work_area_for_hwnd(hwnd.value as isize) {
+        if let Some(target) = *ctx.captured_target.lock() {
+            if let Some(work) = work_area_for_hwnd(target.hwnd as isize) {
                 return work;
             }
         }
@@ -648,21 +681,32 @@ fn position_overlay(window: &WebviewWindow) {
     let _ = window.set_position(Position::Physical(PhysicalPosition::new(x, y)));
 }
 
+fn reveal_overlay(window: &WebviewWindow) {
+    position_overlay(window);
+    decorate_overlay(window);
+    let _ = window.set_ignore_cursor_events(false);
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        crate::windows_int::overlay::show_noactivate(hwnd.0 as isize);
+        return;
+    }
+    let _ = window.show();
+}
+
 fn show_overlay(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
     bump_overlay_epoch(&ctx);
+    ctx.overlay_visible.store(true, Ordering::SeqCst);
     ctx.overlay_timeline.lock().mark_window_created();
     if let Some(window) = app.get_webview_window("overlay") {
-        position_overlay(&window);
-        decorate_overlay(&window);
-        let _ = window.show();
+        reveal_overlay(&window);
+        ctx.emit_overlay(app);
         return;
     }
     match build_overlay_window(app, overlay_url()) {
         Ok(window) => {
-            position_overlay(&window);
-            decorate_overlay(&window);
-            let _ = window.show();
+            reveal_overlay(&window);
+            ctx.emit_overlay(app);
         }
         Err(err) => {
             tracing::error!(error = %err, "overlay window failed");
@@ -714,31 +758,59 @@ pub fn prepare_overlay_window(app: &AppHandle) {
     }
 }
 
+fn hide_overlay_hwnd(window: &WebviewWindow) {
+    let _ = window.set_ignore_cursor_events(true);
+    #[cfg(windows)]
+    if let Ok(hwnd) = window.hwnd() {
+        crate::windows_int::overlay::hide(hwnd.0 as isize);
+    }
+    let _ = window.hide();
+}
+
 fn hide_overlay_now(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
     bump_overlay_epoch(&ctx);
+    ctx.overlay_visible.store(false, Ordering::SeqCst);
     if let Some(window) = app.get_webview_window("overlay") {
-        let _ = window.hide();
+        hide_overlay_hwnd(&window);
     }
     ctx.overlay_timeline.lock().hide();
+    ctx.emit_overlay(app);
 }
 
-fn hide_overlay_later(app: AppHandle, delay: Duration) {
+fn schedule_error_overlay_hide(app: AppHandle, delay: Duration) {
     let ctx = app.state::<Arc<AppContext>>();
-    let expected = *ctx.overlay_epoch.lock();
+    let expected = ctx.overlay_revision.load(Ordering::SeqCst);
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(delay).await;
         let ctx = app.state::<Arc<AppContext>>();
-        if *ctx.overlay_epoch.lock() != expected {
+        if delayed_hide_is_stale(expected, ctx.overlay_revision.load(Ordering::SeqCst)) {
             return;
         }
-        if let Some(window) = app.get_webview_window("overlay") {
-            let _ = window.hide();
-        }
-        ctx.overlay_timeline.lock().hide();
+        hide_overlay_now(&app);
         let _ = ctx.transition(SessionEvent::Dismiss);
         ctx.emit_state(&app);
     });
+}
+
+pub fn shutdown_session(app: &AppHandle) {
+    let ctx = app.state::<Arc<AppContext>>();
+    ctx.session_generation.fetch_add(1, Ordering::SeqCst);
+    ctx.abort_start.store(true, Ordering::SeqCst);
+    if let Some(tx) = ctx.cancel_tx.lock().take() {
+        let _ = tx.send(true);
+    }
+    if let Some(session) = ctx.capture.lock().take() {
+        thread::spawn(move || {
+            if let Ok(result) = session.stop() {
+                let _ = std::fs::remove_file(result.path);
+            }
+        });
+    }
+    *ctx.captured_target.lock() = None;
+    hide_overlay_now(app);
+    let _ = ctx.transition(SessionEvent::Shutdown);
+    ctx.emit_state(app);
 }
 
 fn recover_stale_processing(
@@ -1072,24 +1144,21 @@ mod tests {
 
     #[test]
     fn live_stt_success_notifies_history_ui() {
-        let src = include_str!("session.rs");
-        let live = src
-            .split("async fn process_and_transcribe_inner")
-            .nth(1)
-            .and_then(|rest| rest.split("fn overlay_native_hwnd").next())
-            .expect("live STT function");
-        let after_completed = live
-            .split("rec.status = RecordingStatus::Completed")
-            .nth(1)
-            .expect("completed assignment");
-        let until_insert = after_completed
-            .split("insert_transcript_now")
-            .next()
-            .expect("insert follows success");
-        assert!(
-            until_insert.contains("emit_history"),
-            "completed dictation must emit history://changed so the last row does not stay processing"
+        assert_eq!(
+            stt_success_steps(),
+            [
+                SttSuccessStep::EmitHistory,
+                SttSuccessStep::HideOverlay,
+                SttSuccessStep::PublishIdle,
+                SttSuccessStep::SpawnInsert,
+            ]
         );
+        assert!(stt_success_steps()
+            .windows(2)
+            .any(|pair| pair == [SttSuccessStep::EmitHistory, SttSuccessStep::HideOverlay]));
+        assert_eq!(stt_success_steps()[1], SttSuccessStep::HideOverlay);
+        assert_eq!(stt_success_steps()[2], SttSuccessStep::PublishIdle);
+        assert_eq!(stt_success_steps()[3], SttSuccessStep::SpawnInsert);
     }
 
     #[test]

@@ -63,7 +63,7 @@ pub fn run() {
             if should_hide_on_launch(&args) {
                 return;
             }
-            show_main(app, "/");
+            show_main(app, "history");
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_autostart::init(
@@ -107,6 +107,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_session_state,
+            get_overlay_snapshot,
             get_settings,
             save_settings,
             list_history,
@@ -132,7 +133,6 @@ pub fn run() {
             import_obs_preset,
             parse_obs_json,
             copy_transcript,
-            insert_transcript,
             run_retention,
             overlay_timing,
             overlay_timeline,
@@ -156,9 +156,14 @@ pub fn run() {
             play_cue,
             preview_error_notification
         ])
-        .run(tauri::generate_context!())
+        .build(tauri::generate_context!())
         .unwrap_or_else(|err| {
             tracing::error!(error = %err, "failed to start");
             std::process::exit(1);
+        })
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                crate::app::session::shutdown_session(app);
+            }
         });
 }

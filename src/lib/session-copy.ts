@@ -30,7 +30,7 @@ export function overlaySttAttempt(state: SessionState): number | null {
 export function overlayLabel(state: SessionState, copy: Messages = messagesFor("ru")): string {
   switch (state.kind) {
     case "idle":
-      return copy.overlayReady;
+      return "";
     case "startingRecording":
     case "recording":
       return copy.overlayRecording;
@@ -48,7 +48,7 @@ export function overlayLabel(state: SessionState, copy: Messages = messagesFor("
       return copy.overlayRetry.replace("{attempt}", String(attempt));
     }
     case "completed":
-      return copy.overlayReady;
+      return "";
     case "failed":
       return localizedError(state.code, copy, state.message);
     default: {
@@ -79,6 +79,38 @@ export function sessionStatusLabel(
       return copy.overlayReady;
     case "failed":
       return copy.overlayError;
+    default: {
+      const _never: never = state;
+      return _never;
+    }
+  }
+}
+
+export function overlayHudLabel(
+  visible: boolean,
+  state: SessionState,
+  copy: Messages = messagesFor("ru"),
+): string {
+  if (!visible) {
+    return "";
+  }
+  return overlayLabel(state, copy);
+}
+
+export function overlayHudVisible(state: SessionState): boolean {
+  switch (state.kind) {
+    case "idle":
+    case "completed":
+      return false;
+    case "startingRecording":
+    case "recording":
+    case "stoppingRecording":
+    case "saving":
+    case "processingAudio":
+    case "transcribing":
+    case "retryWaiting":
+    case "failed":
+      return true;
     default: {
       const _never: never = state;
       return _never;

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Manager, PhysicalPosition, Position};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Position};
 
 use tauri_plugin_autostart::ManagerExt;
 
@@ -13,6 +13,16 @@ use crate::app::session::AppContext;
 use crate::app::shortcuts::sync_shortcuts;
 use crate::error::AppError;
 use crate::windows_int::overlay::{work_area_for_cursor, work_area_for_foreground};
+
+pub const GITHUB_REPO_URL: &str = "https://github.com/AryaPaw/voxely";
+pub const GITHUB_ISSUES_URL: &str = "https://github.com/AryaPaw/voxely/issues";
+
+pub fn github_page_url(page: Option<&str>) -> &'static str {
+    match page {
+        Some("issues") => GITHUB_ISSUES_URL,
+        _ => GITHUB_REPO_URL,
+    }
+}
 
 pub fn is_local_build() -> bool {
     cfg!(debug_assertions)
@@ -91,8 +101,11 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
-            "open" => show_main(app, "/"),
-            "quit" => app.exit(0),
+            "open" => show_main(app, "history"),
+            "quit" => {
+                crate::app::session::shutdown_session(app);
+                app.exit(0);
+            }
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -102,7 +115,7 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
                 ..
             } = event
             {
-                show_main(tray.app_handle(), "/");
+                show_main(tray.app_handle(), "history");
             }
         })
         .build(app)
@@ -140,16 +153,26 @@ pub fn apply_launch_visibility(app: &AppHandle, args: impl IntoIterator<Item = i
         return;
     }
     center_main_window(app);
-    show_main(app, "/");
+    show_main(app, "history");
 }
 
-pub fn show_main(app: &AppHandle, _route: &str) {
+pub fn main_section_from_route(route: &str) -> &str {
+    let trimmed = route.trim().trim_start_matches('/');
+    if trimmed.is_empty() || trimmed == "history" {
+        return "history";
+    }
+    trimmed
+}
+
+pub fn show_main(app: &AppHandle, route: &str) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_skip_taskbar(false);
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
     }
+    let section = main_section_from_route(route);
+    let _ = app.emit("app://navigate", section);
 }
 
 pub fn sync_autostart(app: &AppHandle, start_with_windows: bool) {
@@ -292,6 +315,13 @@ mod tests {
     }
 
     #[test]
+    fn github_urls_cover_repo_and_issues() {
+        assert_eq!(GITHUB_REPO_URL, "https://github.com/AryaPaw/voxely");
+        assert_eq!(github_page_url(Some("issues")), GITHUB_ISSUES_URL);
+        assert_eq!(github_page_url(None), GITHUB_REPO_URL);
+    }
+
+    #[test]
     fn tray_labels_follow_locale() {
         assert_eq!(tray_labels("en"), ("Open", "Quit"));
         assert_eq!(tray_labels("ru"), ("Открыть", "Выход"));
@@ -322,6 +352,9 @@ mod tests {
         ]));
         assert!(!should_hide_on_launch(["voxely.exe"]));
         assert!(!should_hide_on_launch(["voxely.exe", "--open"]));
+        assert_eq!(main_section_from_route("/"), "history");
+        assert_eq!(main_section_from_route("history"), "history");
+        assert_eq!(main_section_from_route("/history"), "history");
     }
 
     #[test]

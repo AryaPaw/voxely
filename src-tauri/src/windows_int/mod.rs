@@ -9,5 +9,6 @@ pub mod escape_hook {
 
     pub fn uninstall() {}
 }
+pub mod insert_engine;
 pub mod overlay;
 pub mod text_injector;

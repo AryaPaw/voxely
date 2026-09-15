@@ -1,6 +1,7 @@
 use crate::app::lifecycle::configure_tray;
 use crate::app::machine::{is_cancellable, SessionState};
 use crate::app::overlay::OverlayTimingReport;
+use crate::app::overlay_controller::OverlaySnapshot;
 use crate::app::session::{
     current_meter, devices, release_meter_monitor, start_meter_monitor, AppContext,
 };
@@ -15,16 +16,19 @@ use crate::history::retention::delete_recording;
 use crate::settings::AppSettings;
 use crate::transcription::openrouter::{list_transcription_models, SttModel};
 use crate::windows_int::credentials::{delete_api_key, has_api_key, set_api_key};
-use crate::windows_int::text_injector::{
-    insert_transcript_now, native, resolve_insert_target, NativeHwnd,
-};
+use crate::windows_int::text_injector::native;
 use std::path::Path;
 use std::sync::Arc;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, State};
 
 #[tauri::command]
 pub fn get_session_state(ctx: State<'_, Arc<AppContext>>) -> SessionState {
     ctx.state.lock().clone()
+}
+
+#[tauri::command]
+pub fn get_overlay_snapshot(ctx: State<'_, Arc<AppContext>>) -> OverlaySnapshot {
+    ctx.overlay_snapshot()
 }
 
 #[tauri::command]
@@ -371,45 +375,9 @@ pub fn copy_transcript(text: String) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-pub async fn insert_transcript(app: AppHandle, text: String) -> Result<(), AppError> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let ctx = app.state::<Arc<AppContext>>();
-        let mode = ctx.settings.lock().insertion_mode.clone();
-        let hotkey = ctx.settings.lock().hotkey.clone();
-        let start = *ctx.captured_hwnd.lock();
-        let overlay = app.get_webview_window("overlay").and_then(|window| {
-            window.hwnd().ok().map(|hwnd| NativeHwnd {
-                value: hwnd.0 as usize,
-            })
-        });
-        let main = app.get_webview_window("main").and_then(|window| {
-            window.hwnd().ok().map(|hwnd| NativeHwnd {
-                value: hwnd.0 as usize,
-            })
-        });
-        let skip: Vec<usize> = [overlay, main]
-            .into_iter()
-            .flatten()
-            .map(|hwnd| hwnd.value)
-            .collect();
-        let live = native::capture_target_excluding(&skip);
-        let captured = resolve_insert_target(start, live, overlay, main);
-        match insert_transcript_now(&mode, captured, overlay, &text, || false, &hotkey) {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                crate::notify::show_error(&app, &err);
-                Err(err)
-            }
-        }
-    })
-    .await
-    .map_err(|e| AppError::TextInsertionFailed(e.to_string()))?
-}
-
-#[tauri::command]
 pub fn open_github(page: Option<String>) -> Result<(), AppError> {
     tauri_plugin_opener::open_url(
-        crate::windows_int::text_injector::github_page_url(page.as_deref()),
+        crate::app::lifecycle::github_page_url(page.as_deref()),
         None::<&str>,
     )
     .map_err(|e| AppError::StorageFailed(e.to_string()))

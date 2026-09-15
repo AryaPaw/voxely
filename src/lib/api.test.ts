@@ -2,16 +2,19 @@ import { describe, expect, it } from "vitest";
 import type { SessionState } from "./api";
 import {
   historyStatusLabel,
+  overlayHudLabel,
+  overlayHudVisible,
   overlayIsBusy,
   overlayLabel,
   overlayRetryDisplayAttempt,
   overlaySttAttempt,
   sessionStatusLabel,
 } from "./session-copy";
+import { acceptOverlayRevision } from "./overlay-snapshot";
 import { formatDuration, formatTime } from "./utils";
 
 const cases: Array<[SessionState, string]> = [
-  [{ kind: "idle" }, "Готово"],
+  [{ kind: "idle" }, ""],
   [{ kind: "startingRecording" }, "Запись"],
   [{ kind: "recording" }, "Запись"],
   [{ kind: "stoppingRecording" }, "Сохранение"],
@@ -21,7 +24,7 @@ const cases: Array<[SessionState, string]> = [
   [{ kind: "transcribing", attempt: 2 }, "Расшифровка (try 2)"],
   [{ kind: "retryWaiting", attempt: 1, delayMs: 500 }, "Расшифровка (try 2)"],
   [{ kind: "retryWaiting", attempt: 2, delayMs: 500 }, "Расшифровка (try 3)"],
-  [{ kind: "completed" }, "Готово"],
+  [{ kind: "completed" }, ""],
   [
     { kind: "failed", message: "Нет API-ключа OpenRouter", code: "InvalidApiKey" },
     "Нет API-ключа OpenRouter",
@@ -48,6 +51,20 @@ describe("overlayLabel", () => {
     expect(overlayLabel({ kind: "failed", message: "legacy", code: "InvalidApiKey" })).toBe(
       "Нет API-ключа OpenRouter",
     );
+  });
+});
+
+describe("overlayHudVisible", () => {
+  it("hides idle and completed so the HUD never shows Ready", () => {
+    expect(overlayHudVisible({ kind: "idle" })).toBe(false);
+    expect(overlayHudVisible({ kind: "completed" })).toBe(false);
+    expect(overlayHudVisible({ kind: "recording" })).toBe(true);
+    expect(overlayHudVisible({ kind: "failed", message: "x", code: "InvalidApiKey" })).toBe(true);
+    expect(overlayHudLabel(false, { kind: "idle" })).toBe("");
+    expect(overlayHudLabel(false, { kind: "recording" })).toBe("");
+    expect(overlayHudLabel(true, { kind: "recording" })).toBe("Запись");
+    expect(acceptOverlayRevision(1, 2)).toBe(true);
+    expect(acceptOverlayRevision(4, 4)).toBe(false);
   });
 });
 

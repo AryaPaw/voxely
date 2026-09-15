@@ -180,8 +180,15 @@ export interface RuntimeInfo {
   buildDate: string;
 }
 
+export type OverlaySnapshot = {
+  revision: number;
+  visible: boolean;
+  state: SessionState;
+};
+
 export const api = {
   session: () => ipc<SessionState>("get_session_state"),
+  overlaySnapshot: () => ipc<OverlaySnapshot>("get_overlay_snapshot"),
   settings: () => ipc<AppSettings>("get_settings"),
   runtimeInfo: () => ipc<RuntimeInfo>("get_runtime_info"),
   saveSettings: (settings: AppSettings) => ipc<AppSettings>("save_settings", { settings }),
@@ -213,7 +220,6 @@ export const api = {
   importObs: (sourceName: string, presetName: string) =>
     ipc("import_obs_preset", { sourceName, presetName }),
   copy: (text: string) => ipc<void>("copy_transcript", { text }),
-  insert: (text: string) => ipc<void>("insert_transcript", { text }),
   audioPath: (id: string) => ipc<string | null>("recording_audio_url", { id }),
   openAudioDir: () => ipc<void>("open_audio_dir"),
   openGithub: (page?: string) => ipc<void>("open_github", { page }),

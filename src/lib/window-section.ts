@@ -1,5 +1,7 @@
 import type { Section } from "../windows/main/sectionNav";
 
+export const APP_NAVIGATE = "app://navigate";
+
 const SECTIONS: Section[] = [
   "history",
   "compare",
@@ -28,4 +30,8 @@ export function sectionFromSearch(search: string, localBuild = false): Section {
     return value;
   }
   return "history";
+}
+
+export function sectionFromNavigatePayload(payload: string, localBuild = false): Section {
+  return sectionFromSearch(`?section=${encodeURIComponent(payload)}`, localBuild);
 }

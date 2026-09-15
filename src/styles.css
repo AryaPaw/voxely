@@ -207,6 +207,10 @@ html:has(.overlay-shell) #root {
   overflow: hidden;
 }
 
+.overlay-shell-hidden {
+  pointer-events: none;
+}
+
 .overlay-pill {
   appearance: none;
   position: relative;

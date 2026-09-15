@@ -1,20 +1,28 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { api, type AppSettings, type SessionState } from "../../lib/api";
+import { api, type AppSettings, type OverlaySnapshot, type SessionState } from "../../lib/api";
 import { applyUiLocale, messagesFor, resolveUiLocale } from "../../lib/i18n";
-import { overlayIsBusy, overlayLabel } from "../../lib/session-copy";
+import { overlayHudLabel, overlayIsBusy } from "../../lib/session-copy";
+import { acceptOverlayRevision } from "../../lib/overlay-snapshot";
 import { overlayCancelArmed, overlayHoverFromElement } from "../../lib/overlay-wave";
 import { applyTheme, watchSystemTheme } from "../../lib/theme";
 import { OverlayWave } from "./OverlayWave";
 
+const HIDDEN: OverlaySnapshot = {
+  revision: 0,
+  visible: false,
+  state: { kind: "idle" },
+};
+
 export function OverlayApp() {
   const pillRef = useRef<HTMLButtonElement>(null);
-  const [state, setState] = useState<SessionState>({ kind: "idle" });
+  const [snapshot, setSnapshot] = useState<OverlaySnapshot>(HIDDEN);
   const [elapsed, setElapsed] = useState(0);
   const [hovered, setCancelHover] = useState(false);
   const [copy, setCopy] = useState(() => messagesFor("ru"));
   const [theme, setTheme] = useState("dark");
+  const state: SessionState = snapshot.state;
   const recording = state.kind === "recording" || state.kind === "startingRecording";
   const busy = overlayIsBusy(state);
   const cancelReady = overlayCancelArmed(busy, hovered);
@@ -33,16 +41,38 @@ export function OverlayApp() {
       void invoke("overlay_mark_frame", { phase: "frame" });
     });
     void api.settings().then(applySettings);
-    void api.session().then(setState);
-    const unlistenState = listen<SessionState>("session://state", (event) =>
-      setState(event.payload),
-    );
+    let revision = 0;
+    let unlistenFn: (() => void) | undefined;
+    let cancelled = false;
+    const unlistenState = listen<OverlaySnapshot>("overlay://snapshot", (event) => {
+      if (!acceptOverlayRevision(revision, event.payload.revision)) {
+        return;
+      }
+      revision = event.payload.revision;
+      setSnapshot(event.payload);
+    }).then(async (fn) => {
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlistenFn = fn;
+      const initial = await api.overlaySnapshot();
+      if (cancelled) {
+        return;
+      }
+      if (acceptOverlayRevision(revision, initial.revision)) {
+        revision = initial.revision;
+        setSnapshot(initial);
+      }
+    });
     const unlistenSettings = listen<AppSettings>("settings://changed", (event) =>
       applySettings(event.payload),
     );
     return () => {
+      cancelled = true;
       window.cancelAnimationFrame(frame);
-      void unlistenState.then((fn) => fn());
+      unlistenFn?.();
+      void unlistenState;
       void unlistenSettings.then((fn) => fn());
     };
   }, []);
@@ -95,10 +125,14 @@ export function OverlayApp() {
     }
   }
 
-  const status = overlayLabel(state, copy);
+  const status = overlayHudLabel(snapshot.visible, state, copy);
   const showDots = busy && !cancelReady && !recording;
   const clock = recording && !cancelReady ? formatClock(elapsed) : "";
   const cancelHint = cancelReady ? copy.overlayCancel : busy ? copy.overlayCancelAria : status;
+
+  if (!snapshot.visible) {
+    return <div className="overlay-shell overlay-shell-hidden" aria-hidden="true" />;
+  }
 
   return (
     <div className="overlay-shell">

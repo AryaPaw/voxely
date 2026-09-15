@@ -8,6 +8,9 @@ vi.mock("@tauri-apps/api/core", () => ({
     if (cmd === "get_settings") {
       return { theme: "light", uiLanguage: "en", notifications: true };
     }
+    if (cmd === "get_overlay_snapshot") {
+      return { revision: 1, visible: true, state: { kind: "recording" } };
+    }
     if (cmd === "get_session_state") {
       return { kind: "recording" };
     }

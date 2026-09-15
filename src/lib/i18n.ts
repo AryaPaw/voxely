@@ -142,7 +142,8 @@ const ru = {
   insertClipboard: "Только буфер обмена",
   insertHint:
     "Unicode вставляет расшифровку в окно, где вы говорили. «Только буфер» копирует текст и не вставляет его: вставьте сами.",
-  copiedInsert: "Скопировано, вставьте сами",
+  copiedInsert: "Текст скопирован, вставьте вручную",
+  copiedPartial: "Вставка прервана, часть текста могла вставиться; полный текст скопирован",
   debugLogs: "Отладочные логи",
   openLogs: "Открыть логи",
   openSettingsFolder: "Открыть папку настроек",
@@ -381,7 +382,9 @@ const en = {
   insertClipboard: "Clipboard only",
   insertHint:
     "Unicode inserts the transcript into the window where you spoke. Clipboard only copies the text; paste it yourself.",
-  copiedInsert: "Copied, paste it yourself",
+  copiedInsert: "Text copied. Paste it yourself.",
+  copiedPartial:
+    "Insert interrupted. Some text may already be in the field. Full transcript copied.",
   debugLogs: "Debug logs",
   openLogs: "Open logs",
   openSettingsFolder: "Open settings folder",

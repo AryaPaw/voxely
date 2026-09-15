@@ -22,6 +22,7 @@ fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "get_session_state",
+            "get_overlay_snapshot",
             "get_settings",
             "save_settings",
             "list_history",
@@ -47,7 +48,6 @@ fn main() {
             "import_obs_preset",
             "parse_obs_json",
             "copy_transcript",
-            "insert_transcript",
             "run_retention",
             "overlay_timing",
             "overlay_timeline",

@@ -12,7 +12,11 @@ import {
   resolveUiLocale,
 } from "../../lib/i18n";
 import { HISTORY_CHANGED } from "../../lib/history-sync";
-import { sectionFromSearch } from "../../lib/window-section";
+import {
+  APP_NAVIGATE,
+  sectionFromNavigatePayload,
+  sectionFromSearch,
+} from "../../lib/window-section";
 import { Toaster } from "../../components/ui/sonner";
 import { Button } from "../../components/ui/button";
 import { HistoryPane } from "./history/HistoryPane";
@@ -91,6 +95,8 @@ export function MainApp() {
       const nextCopy = messagesFor(locale);
       if (event.payload === "copied") {
         toast.success(nextCopy.copiedInsert);
+      } else if (event.payload === "partial") {
+        toast.warning(nextCopy.copiedPartial);
       } else {
         toast.error(localizedError(event.payload, nextCopy));
       }
@@ -100,6 +106,15 @@ export function MainApp() {
       void unlistenInsert.then((fn) => fn());
     };
   }, []);
+
+  useEffect(() => {
+    const unlistenNavigate = listen<string>(APP_NAVIGATE, (event) => {
+      setSection(sectionFromNavigatePayload(event.payload, localBuild));
+    });
+    return () => {
+      void unlistenNavigate.then((fn) => fn());
+    };
+  }, [localBuild]);
 
   useEffect(() => {
     if (!settings) {
