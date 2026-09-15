@@ -503,6 +503,7 @@ async fn process_and_transcribe_inner(
             rec.completed_at = Some(chrono::Utc::now());
             rec.updated_at = chrono::Utc::now();
             ctx.history.lock().update(&rec)?;
+            ctx.emit_history(app);
             tracing::info!(stt_http_ms = success.latency_ms, "stt http");
             let _ = ctx.transition(SessionEvent::Succeeded);
             ctx.emit_state(app);
@@ -1049,6 +1050,28 @@ fn write_stt_upload(listen_path: &Path) -> Result<PathBuf, AppError> {
 mod tests {
     use super::*;
     use crate::history::repository::{new_recording, RecordingStatus};
+
+    #[test]
+    fn live_stt_success_notifies_history_ui() {
+        let src = include_str!("session.rs");
+        let live = src
+            .split("async fn process_and_transcribe_inner")
+            .nth(1)
+            .and_then(|rest| rest.split("fn overlay_native_hwnd").next())
+            .expect("live STT function");
+        let after_completed = live
+            .split("rec.status = RecordingStatus::Completed")
+            .nth(1)
+            .expect("completed assignment");
+        let until_insert = after_completed
+            .split("insert_transcript_now")
+            .next()
+            .expect("insert follows success");
+        assert!(
+            until_insert.contains("emit_history"),
+            "completed dictation must emit history://changed so the last row does not stay processing"
+        );
+    }
 
     #[test]
     fn second_transcription_claim_is_busy() {
