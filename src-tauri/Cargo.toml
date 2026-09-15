@@ -1,6 +1,6 @@
 [package]
 name = "voxely"
-version = "0.2.6"
+version = "0.2.7"
 description = "Windows voice dictation with bounded OpenRouter retries"
 authors = ["Voxely"]
 edition = "2021"
