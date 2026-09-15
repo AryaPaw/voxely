@@ -28,7 +28,9 @@ use crate::history::repository::{
 };
 use crate::history::retention::{apply_retention, cleanup_orphans, Retention};
 use crate::settings::AppSettings;
-use crate::transcription::openrouter::{transcribe_file_with_progress, SttProgress};
+use crate::transcription::openrouter::{
+    transcribe_file_with_progress, OpenRouterTransport, SttProgress,
+};
 use crate::windows_int::credentials::get_api_key;
 use crate::windows_int::overlay::{work_area_for_cursor, work_area_for_hwnd};
 use crate::windows_int::text_injector::{
@@ -44,7 +46,7 @@ pub struct AppContext {
     pub history: Mutex<HistoryRepo>,
     pub captured_hwnd: Mutex<Option<NativeHwnd>>,
     pub in_flight: Mutex<HashSet<String>>,
-    pub client: reqwest::Client,
+    pub transport: Mutex<OpenRouterTransport>,
     pub overlay_timeline: Mutex<OverlayTimeline>,
     pub overlay_epoch: Mutex<u64>,
     pub cancel_tx: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
@@ -78,10 +80,7 @@ impl AppContext {
             Retention::from_setting(&settings.retention),
             settings.storage_limit_bytes(),
         )?;
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .map_err(|e| AppError::ConnectionFailed(e.to_string()))?;
+        let transport = OpenRouterTransport::new(settings.retry.to_policy().connect_timeout)?;
         Ok(Self {
             settings_path,
             data_dir,
@@ -91,7 +90,7 @@ impl AppContext {
             history: Mutex::new(history),
             captured_hwnd: Mutex::new(None),
             in_flight: Mutex::new(HashSet::new()),
-            client,
+            transport: Mutex::new(transport),
             overlay_timeline: Mutex::new(OverlayTimeline::default()),
             overlay_epoch: Mutex::new(0),
             cancel_tx: Mutex::new(None),
@@ -126,6 +125,13 @@ impl AppContext {
             .map_err(|e| AppError::IllegalTransition(e.to_string()))?;
         *guard = next.clone();
         Ok(next)
+    }
+
+    pub fn clone_transport_client(&self) -> Result<reqwest::Client, AppError> {
+        let timeout = self.settings.lock().retry.to_policy().connect_timeout;
+        let mut transport = self.transport.lock();
+        transport.sync(timeout)?;
+        Ok(transport.client())
     }
 }
 
@@ -259,6 +265,7 @@ fn finish_capture_start(app: &AppHandle, started: Result<CaptureSession, AppErro
                 return;
             }
             ctx.emit_state(app);
+            spawn_openrouter_prewarm(&ctx);
         }
         Err(err) => {
             tracing::error!(error = %err, "capture start failed");
@@ -268,6 +275,15 @@ fn finish_capture_start(app: &AppHandle, started: Result<CaptureSession, AppErro
             hide_overlay_later(app.clone(), Duration::from_millis(2000));
         }
     }
+}
+
+fn spawn_openrouter_prewarm(ctx: &AppContext) {
+    let Ok(client) = ctx.clone_transport_client() else {
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        crate::transcription::openrouter::prewarm_connection(&client).await;
+    });
 }
 
 fn stop_recording(app: &AppHandle) -> Result<(), AppError> {
@@ -796,7 +812,10 @@ async fn run_transcription(
     audio_duration: Duration,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<crate::transcription::openrouter::TranscriptionSuccess, AppError> {
-    let client = crate::transcription::openrouter::build_stt_client(policy.connect_timeout)?;
+    let client = {
+        let ctx = app.state::<Arc<AppContext>>();
+        ctx.clone_transport_client()?
+    };
     let recording_id_owned = recording_id.to_string();
     let app_for_progress = app.clone();
     transcribe_file_with_progress(

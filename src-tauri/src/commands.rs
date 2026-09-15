@@ -57,6 +57,9 @@ fn persist_settings(
     }
     crate::app::lifecycle::sync_autostart(app, settings.start_with_windows);
     let _ = configure_tray(app);
+    ctx.transport
+        .lock()
+        .sync(settings.retry.to_policy().connect_timeout)?;
     Ok(settings)
 }
 
@@ -222,8 +225,23 @@ pub fn stop_input_meter(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError>
 
 #[tauri::command]
 pub async fn check_for_updates(app: AppHandle) -> Result<String, AppError> {
-    let outcome = crate::updates::check_and_maybe_install(&app, true).await;
+    let outcome = crate::updates::check_updates(&app, true).await;
     Ok(outcome.as_str().into())
+}
+
+#[tauri::command]
+pub async fn install_update(app: AppHandle) -> Result<String, AppError> {
+    let outcome = crate::updates::install_available_update(&app).await;
+    Ok(outcome.as_str().into())
+}
+
+#[tauri::command]
+pub fn show_system_notification(
+    app: AppHandle,
+    title: String,
+    body: String,
+) -> Result<(), AppError> {
+    crate::notify::show_if_enabled(&app, &title, &body)
 }
 
 #[tauri::command]
@@ -243,14 +261,14 @@ pub fn store_api_key(key: String) -> Result<bool, AppError> {
 #[tauri::command]
 pub async fn test_openrouter(ctx: State<'_, Arc<AppContext>>) -> Result<u32, AppError> {
     let key = crate::windows_int::credentials::get_api_key()?.ok_or(AppError::InvalidApiKey)?;
-    let models = list_transcription_models(&ctx.client, &key).await?;
+    let models = list_transcription_models(&ctx.clone_transport_client()?, &key).await?;
     Ok(models.len() as u32)
 }
 
 #[tauri::command]
 pub async fn discover_models(ctx: State<'_, Arc<AppContext>>) -> Result<Vec<SttModel>, AppError> {
     let key = crate::windows_int::credentials::get_api_key()?.ok_or(AppError::InvalidApiKey)?;
-    list_transcription_models(&ctx.client, &key).await
+    list_transcription_models(&ctx.clone_transport_client()?, &key).await
 }
 
 #[tauri::command]
@@ -353,35 +371,39 @@ pub fn copy_transcript(text: String) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-pub fn insert_transcript(app: AppHandle, text: String) -> Result<(), AppError> {
-    let ctx = app.state::<Arc<AppContext>>();
-    let mode = ctx.settings.lock().insertion_mode.clone();
-    let hotkey = ctx.settings.lock().hotkey.clone();
-    let start = *ctx.captured_hwnd.lock();
-    let overlay = app.get_webview_window("overlay").and_then(|window| {
-        window.hwnd().ok().map(|hwnd| NativeHwnd {
-            value: hwnd.0 as usize,
-        })
-    });
-    let main = app.get_webview_window("main").and_then(|window| {
-        window.hwnd().ok().map(|hwnd| NativeHwnd {
-            value: hwnd.0 as usize,
-        })
-    });
-    let skip: Vec<usize> = [overlay, main]
-        .into_iter()
-        .flatten()
-        .map(|hwnd| hwnd.value)
-        .collect();
-    let live = native::capture_target_excluding(&skip);
-    let captured = resolve_insert_target(start, live, overlay, main);
-    match insert_transcript_now(&mode, captured, overlay, &text, || false, &hotkey) {
-        Ok(_) => Ok(()),
-        Err(err) => {
-            crate::notify::show_error(&app, &err);
-            Err(err)
+pub async fn insert_transcript(app: AppHandle, text: String) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let ctx = app.state::<Arc<AppContext>>();
+        let mode = ctx.settings.lock().insertion_mode.clone();
+        let hotkey = ctx.settings.lock().hotkey.clone();
+        let start = *ctx.captured_hwnd.lock();
+        let overlay = app.get_webview_window("overlay").and_then(|window| {
+            window.hwnd().ok().map(|hwnd| NativeHwnd {
+                value: hwnd.0 as usize,
+            })
+        });
+        let main = app.get_webview_window("main").and_then(|window| {
+            window.hwnd().ok().map(|hwnd| NativeHwnd {
+                value: hwnd.0 as usize,
+            })
+        });
+        let skip: Vec<usize> = [overlay, main]
+            .into_iter()
+            .flatten()
+            .map(|hwnd| hwnd.value)
+            .collect();
+        let live = native::capture_target_excluding(&skip);
+        let captured = resolve_insert_target(start, live, overlay, main);
+        match insert_transcript_now(&mode, captured, overlay, &text, || false, &hotkey) {
+            Ok(_) => Ok(()),
+            Err(err) => {
+                crate::notify::show_error(&app, &err);
+                Err(err)
+            }
         }
-    }
+    })
+    .await
+    .map_err(|e| AppError::TextInsertionFailed(e.to_string()))?
 }
 
 #[tauri::command]

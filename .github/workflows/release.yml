@@ -49,6 +49,9 @@ jobs:
             $version = $tag.TrimStart("v")
           }
           echo "version=$version" >> $env:GITHUB_OUTPUT
+      - name: Build date from CI
+        shell: pwsh
+        run: echo "VOXELY_BUILD_DATE=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))" >> $env:GITHUB_ENV
       - name: Version SSOT
         shell: pwsh
         run: ./scripts/check-version.ps1 -Expected "${{ steps.ver.outputs.version }}"
@@ -59,6 +62,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          VOXELY_BUILD_DATE: ${{ env.VOXELY_BUILD_DATE }}
         with:
           includeUpdaterJson: false
       - name: Installer smoke

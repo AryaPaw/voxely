@@ -155,35 +155,109 @@ pub fn error_chain(err: &(dyn std::error::Error + 'static)) -> String {
     out
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportCategory {
+    TlsTrust,
+    ConnectEof,
+    Timeout,
+    Reset,
+    Http,
+    Other,
+}
+
+impl TransportCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TlsTrust => "tls_trust",
+            Self::ConnectEof => "connect_eof",
+            Self::Timeout => "timeout",
+            Self::Reset => "reset",
+            Self::Http => "http",
+            Self::Other => "other",
+        }
+    }
+}
+
+pub fn transport_category(message: &str) -> TransportCategory {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("unknown issuer")
+        || lower.contains("unknownissuer")
+        || lower.contains("invalid certificate")
+        || lower.contains("invalid peer certificate")
+        || lower.contains("certificate verify")
+        || lower.contains("unknown ca")
+        || lower.contains("notvalidforname")
+        || lower.contains("webpki::error")
+    {
+        TransportCategory::TlsTrust
+    } else if lower.contains("handshake eof")
+        || (lower.contains("tls") && lower.contains("eof"))
+        || (lower.contains("handshake") && lower.contains("eof"))
+    {
+        TransportCategory::ConnectEof
+    } else if lower.contains("timed out") || lower.contains("timeout") {
+        TransportCategory::Timeout
+    } else if lower.contains("connection reset") || lower.contains("reset by peer") {
+        TransportCategory::Reset
+    } else {
+        TransportCategory::Other
+    }
+}
+
+pub fn error_category(error: &AppError) -> &'static str {
+    match error {
+        AppError::RequestTimeout => TransportCategory::Timeout.as_str(),
+        AppError::RateLimited | AppError::ProviderUnavailable | AppError::OpenRouterServerError => {
+            TransportCategory::Http.as_str()
+        }
+        AppError::ConnectionFailed(message) => transport_category(message).as_str(),
+        AppError::NetworkUnavailable => TransportCategory::Other.as_str(),
+        _ => TransportCategory::Other.as_str(),
+    }
+}
+
+pub fn is_connect_stage_eof(error: &AppError) -> bool {
+    matches!(
+        error,
+        AppError::ConnectionFailed(message)
+            if transport_category(message) == TransportCategory::ConnectEof
+    )
+}
+
 pub fn classify_io(message: &str) -> ClassifiedError {
     let lower = message.to_ascii_lowercase();
-    let retryable = lower.contains("timed out")
-        || lower.contains("timeout")
-        || lower.contains("connection refused")
-        || lower.contains("connection reset")
-        || lower.contains("dns")
-        || lower.contains("network")
-        || lower.contains("unreachable")
-        || lower.contains("temporarily")
-        || lower.contains("tls")
-        || lower.contains("reset by peer")
-        || lower.contains("error sending request")
-        || lower.contains("error trying to connect")
-        || lower.contains("tcp connect");
+    let category = transport_category(message);
+    let retryable = match category {
+        TransportCategory::TlsTrust => false,
+        TransportCategory::ConnectEof | TransportCategory::Timeout | TransportCategory::Reset => {
+            true
+        }
+        TransportCategory::Http | TransportCategory::Other => {
+            lower.contains("timed out")
+                || lower.contains("timeout")
+                || lower.contains("connection refused")
+                || lower.contains("connection reset")
+                || lower.contains("dns")
+                || lower.contains("network")
+                || lower.contains("unreachable")
+                || lower.contains("temporarily")
+                || lower.contains("tls")
+                || lower.contains("reset by peer")
+                || lower.contains("error sending request")
+                || lower.contains("error trying to connect")
+                || lower.contains("tcp connect")
+        }
+    };
     ClassifiedError {
         class: if retryable {
             RetryClass::Retryable
         } else {
             RetryClass::Terminal
         },
-        error: if retryable {
-            if lower.contains("timed out") || lower.contains("timeout") {
-                AppError::RequestTimeout
-            } else if lower.contains("dns") || lower.contains("network") {
-                AppError::NetworkUnavailable
-            } else {
-                AppError::ConnectionFailed(message.to_string())
-            }
+        error: if category == TransportCategory::Timeout {
+            AppError::RequestTimeout
+        } else if retryable && (lower.contains("dns") || lower.contains("network")) {
+            AppError::NetworkUnavailable
         } else {
             AppError::ConnectionFailed(message.to_string())
         },
@@ -278,7 +352,12 @@ impl RetryScheduler {
         if remaining.is_zero() {
             return AttemptDecision::GiveUp(AppError::RetryDeadlineExceeded);
         }
-        let mut delay = backoff_delay(&self.policy, self.attempts_used, jitter_ratio);
+        let mut delay = if is_connect_stage_eof(&classified.error) {
+            let jitter = (0.08_f64 * jitter_ratio.clamp(0.0, 1.0)).max(0.0);
+            Duration::from_secs_f64(0.08 + jitter)
+        } else {
+            backoff_delay(&self.policy, self.attempts_used, jitter_ratio)
+        };
         if let Some(retry_after) = classified.retry_after {
             delay = delay.max(retry_after);
         }
@@ -333,6 +412,47 @@ mod tests {
         );
         assert_eq!(classified.class, RetryClass::Retryable);
         assert!(matches!(classified.error, AppError::ConnectionFailed(_)));
+    }
+
+    #[test]
+    fn tls_handshake_eof_is_retryable_connect_stage() {
+        let classified = classify_io("error sending request: connection error: tls handshake eof");
+        assert_eq!(classified.class, RetryClass::Retryable);
+        assert!(is_connect_stage_eof(&classified.error));
+        assert_eq!(error_category(&classified.error), "connect_eof");
+    }
+
+    #[test]
+    fn certificate_trust_errors_are_terminal() {
+        let classified = classify_io("invalid peer certificate: UnknownIssuer");
+        assert_eq!(classified.class, RetryClass::Terminal);
+        assert_eq!(error_category(&classified.error), "tls_trust");
+    }
+
+    #[test]
+    fn connect_eof_uses_fast_backoff() {
+        let policy = RetryPolicy::default();
+        let start = Instant::now();
+        let mut scheduler = RetryScheduler::new(policy, start);
+        let _ = scheduler.start_attempt(start, Duration::from_secs(1));
+        let classified = classify_io("tls handshake eof");
+        let decision = scheduler.after_failure(&classified, start, 0.0);
+        match decision {
+            AttemptDecision::Wait { delay, .. } => {
+                assert!(delay <= Duration::from_millis(200));
+            }
+            other => panic!("expected wait, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn http_and_timeout_categories() {
+        assert_eq!(error_category(&AppError::RequestTimeout), "timeout");
+        assert_eq!(error_category(&AppError::OpenRouterServerError), "http");
+        assert_eq!(
+            transport_category("operation timed out"),
+            TransportCategory::Timeout
+        );
     }
 
     #[test]

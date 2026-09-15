@@ -177,6 +177,7 @@ export type CueKind = "start" | "stop" | "cancel";
 
 export interface RuntimeInfo {
   localBuild: boolean;
+  buildDate: string;
 }
 
 export const api = {
@@ -196,6 +197,7 @@ export const api = {
   startFilterSample: () => ipc<void>("start_filter_sample"),
   stopFilterSample: () => ipc<DspPreview>("stop_filter_sample"),
   checkForUpdates: () => ipc<string>("check_for_updates"),
+  installUpdate: () => ipc<string>("install_update"),
   keyConfigured: () => ipc<boolean>("api_key_configured"),
   storeKey: (key: string) => ipc<boolean>("store_api_key", { key }),
   testConnection: () => ipc<number>("test_openrouter"),

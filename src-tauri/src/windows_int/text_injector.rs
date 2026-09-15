@@ -78,20 +78,32 @@ pub fn insertion_mode_queues_keys(mode: &str) -> bool {
     mode != "clipboard"
 }
 
-pub const UNICODE_CHUNK_UNITS_DEFAULT: usize = 16;
-pub const UNICODE_CHUNK_UNITS_MIN: usize = 8;
-pub const UNICODE_CHUNK_UNITS_MAX: usize = 32;
+pub const UNICODE_CHUNK_UNITS_DEFAULT: usize = 512;
+pub const UNICODE_CHUNK_UNITS_MIN: usize = 256;
+pub const UNICODE_CHUNK_UNITS_MAX: usize = 1024;
 
 pub fn unicode_chunk_unit_count(remaining_units: usize, chunk: usize) -> usize {
     remaining_units.min(chunk.clamp(UNICODE_CHUNK_UNITS_MIN, UNICODE_CHUNK_UNITS_MAX))
 }
 
+pub fn unicode_batch_spans(total_units: usize, chunk: usize) -> Vec<(usize, usize)> {
+    let chunk = chunk.clamp(UNICODE_CHUNK_UNITS_MIN, UNICODE_CHUNK_UNITS_MAX);
+    let mut spans = Vec::new();
+    let mut start = 0;
+    while start < total_units {
+        let end = (start + chunk).min(total_units);
+        spans.push((start, end));
+        start = end;
+    }
+    spans
+}
+
 pub fn adapt_unicode_chunk_size(prev_chunk: usize, wall_ms: u128) -> usize {
     let current = prev_chunk.clamp(UNICODE_CHUNK_UNITS_MIN, UNICODE_CHUNK_UNITS_MAX);
-    if wall_ms >= 12 {
-        (current / 2).max(UNICODE_CHUNK_UNITS_MIN)
-    } else if wall_ms <= 1 {
-        (current + 8).min(UNICODE_CHUNK_UNITS_MAX)
+    if wall_ms >= 80 {
+        UNICODE_CHUNK_UNITS_MIN
+    } else if wall_ms <= 8 {
+        UNICODE_CHUNK_UNITS_MAX
     } else {
         current
     }
@@ -108,6 +120,9 @@ pub fn next_insert_event_offset(sent: u32, remaining: usize) -> Result<usize, &'
     if sent > remaining {
         return Err("SendInput over-delivered");
     }
+    if sent % 2 == 1 {
+        return Err("odd SendInput count");
+    }
     Ok(sent)
 }
 
@@ -123,12 +138,12 @@ pub fn resolve_insert_target(
 ) -> Option<NativeHwnd> {
     let overlay_root = overlay.map(|hwnd| hwnd.value);
     let main_root = main.map(|hwnd| hwnd.value);
-    if let Some(live) = live {
-        if !capture_skips_voxely_roots(live.value, overlay_root, main_root) {
-            return Some(live);
+    if let Some(start) = start {
+        if !capture_skips_voxely_roots(start.value, overlay_root, main_root) {
+            return Some(start);
         }
     }
-    start.filter(|hwnd| !capture_skips_voxely_roots(hwnd.value, overlay_root, main_root))
+    live.filter(|hwnd| !capture_skips_voxely_roots(hwnd.value, overlay_root, main_root))
 }
 
 pub fn hotkey_wait_complete(elapsed_ms: u32, still_down: bool, timeout_ms: u32) -> bool {
@@ -383,11 +398,17 @@ pub mod native {
                     last_reason = "foreground is not captured window";
                     break;
                 }
-                let _guard = attach_input(target);
-                if may_restore_foreground(target, overlay_root) {
-                    let _ = restore_foreground(target);
+                let restored = {
+                    let _guard = attach_input(target);
+                    if may_restore_foreground(target, overlay_root) {
+                        restore_foreground(target)
+                    } else {
+                        false
+                    }
+                };
+                if restored {
+                    std::thread::sleep(std::time::Duration::from_millis(16));
                 }
-                std::thread::sleep(std::time::Duration::from_millis(16));
                 if abort() {
                     return Err(AppError::Cancelled);
                 }
@@ -401,7 +422,8 @@ pub mod native {
                 let focus_root = hwnd_root_value(thread_focus_hwnd(target).unwrap_or(target));
                 if should_send_key_paste(captured_root, foreground_root, focus_root) {
                     let class = window_class_name(target);
-                    match send_insert_keys(text, class.as_deref(), &abort, hotkey) {
+                    let focus_attempts = 1u32;
+                    match send_insert_keys(text, class.as_deref(), &abort, hotkey, focus_attempts) {
                         Ok(()) => return Ok(()),
                         Err("aborted") => return Err(AppError::Cancelled),
                         Err("partial") => {
@@ -451,6 +473,7 @@ pub mod native {
         class: Option<&str>,
         abort: impl Fn() -> bool,
         hotkey: &str,
+        focus_attempts: u32,
     ) -> Result<(), &'static str> {
         if abort() {
             return Err("aborted");
@@ -472,6 +495,9 @@ pub mod native {
         let mut chunk = super::UNICODE_CHUNK_UNITS_DEFAULT;
         let mut index = 0;
         let mut any_sent = false;
+        let mut batches = 0u32;
+        let mut last_sent = 0u32;
+        let insert_started = std::time::Instant::now();
         while index < planned.len() {
             if abort() {
                 return Err("aborted");
@@ -495,16 +521,11 @@ pub mod native {
             match send_all(&inputs) {
                 Ok(()) => {
                     any_sent = true;
+                    batches += 1;
+                    last_sent = inputs.len() as u32;
                     index += take;
                     let wall_ms = started.elapsed().as_millis();
                     chunk = super::adapt_unicode_chunk_size(chunk, wall_ms);
-                    if index < planned.len() {
-                        if wall_ms >= 12 {
-                            std::thread::sleep(std::time::Duration::from_millis(1));
-                        } else {
-                            std::thread::yield_now();
-                        }
-                    }
                 }
                 Err(reason) => {
                     if any_sent {
@@ -514,6 +535,15 @@ pub mod native {
                 }
             }
         }
+        tracing::debug!(
+            insert_ms = insert_started.elapsed().as_millis() as u64,
+            units = planned.len() as u64,
+            batches,
+            class = class.unwrap_or(""),
+            focus_attempts,
+            sent = last_sent,
+            "unicode insert"
+        );
         Ok(())
     }
 
@@ -1027,18 +1057,22 @@ mod tests {
     }
 
     #[test]
-    fn insert_follows_live_focus_not_start_capture() {
+    fn insert_stays_on_start_capture() {
         let desktop = NativeHwnd { value: 1 };
         let field = NativeHwnd { value: 2 };
         let overlay = NativeHwnd { value: 3 };
         let main = NativeHwnd { value: 4 };
         assert_eq!(
             resolve_insert_target(Some(desktop), Some(field), Some(overlay), Some(main)),
-            Some(field)
+            Some(desktop)
         );
         assert_eq!(
             resolve_insert_target(Some(desktop), Some(overlay), Some(overlay), Some(main)),
             Some(desktop)
+        );
+        assert_eq!(
+            resolve_insert_target(Some(overlay), Some(field), Some(overlay), Some(main)),
+            Some(field)
         );
         assert_eq!(
             resolve_insert_target(Some(overlay), Some(overlay), Some(overlay), Some(main)),
@@ -1062,20 +1096,26 @@ mod tests {
 
     #[test]
     fn unicode_chunks_adapt_and_resume_partial_send() {
-        assert_eq!(unicode_chunk_unit_count(3, 16), 3);
-        assert_eq!(unicode_chunk_unit_count(40, 16), 16);
-        assert_eq!(adapt_unicode_chunk_size(16, 20), UNICODE_CHUNK_UNITS_MIN);
-        assert_eq!(adapt_unicode_chunk_size(16, 1), 24);
-        assert_eq!(adapt_unicode_chunk_size(24, 1), UNICODE_CHUNK_UNITS_MAX);
-        assert_eq!(adapt_unicode_chunk_size(16, 4), 16);
+        assert_eq!(unicode_chunk_unit_count(3, 512), 3);
+        assert_eq!(unicode_chunk_unit_count(2000, 512), 512);
+        assert_eq!(adapt_unicode_chunk_size(512, 80), UNICODE_CHUNK_UNITS_MIN);
+        assert_eq!(adapt_unicode_chunk_size(256, 1), UNICODE_CHUNK_UNITS_MAX);
+        assert_eq!(adapt_unicode_chunk_size(512, 20), 512);
         assert_eq!(next_insert_event_offset(4, 10).unwrap(), 4);
         assert_eq!(next_insert_event_offset(10, 10).unwrap(), 10);
         assert!(next_insert_event_offset(0, 10).is_err());
+        assert!(next_insert_event_offset(3, 10).is_err());
         assert!(!should_retry_full_insert_after("partial"));
         assert!(!should_retry_full_insert_after("aborted"));
         assert!(should_retry_full_insert_after(
             "SendInput delivered no events"
         ));
+        assert_eq!(unicode_batch_spans(600, 512), vec![(0, 512), (512, 600)]);
+        let thumbs = utf16_code_units("👍");
+        assert_eq!(thumbs.len(), 2);
+        assert_eq!(unicode_batch_spans(thumbs.len(), 256), vec![(0, 2)]);
+        let planned = plan_insert_units("a\r\nb\t👍");
+        assert!(matches!(planned[1], InsertKey::Unicode(0x0A)));
     }
 
     #[test]

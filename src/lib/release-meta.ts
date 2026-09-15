@@ -1,5 +1,3 @@
-export const APP_RELEASED_ON = "2026-09-13";
-
 export function formatReleaseDate(isoDay: string, locale: string): string {
   const date = new Date(`${isoDay}T00:00:00Z`);
   return new Intl.DateTimeFormat(locale, {

@@ -1,8 +1,15 @@
 # Release process
 
-Do not bump `package.json`, `src-tauri/Cargo.toml`, or `src-tauri/tauri.conf.json` until the version is confirmed.
+Version number SSOT is `package.json`. `src-tauri/tauri.conf.json` points at that file. `Cargo.toml` is synced by the setter, not edited by hand.
 
-Proposed next version after 0.2.7: `0.2.8` (patch) unless a user-visible feature lands.
+```text
+pwsh -File scripts/set-version.ps1 -To 0.2.9
+pwsh -File scripts/set-version.ps1 -To patch
+```
+
+Do not bump until the user confirms the number. Do not write a calendar date into source: About uses the compile-time build day from `VOXELY_BUILD_DATE`, `SOURCE_DATE_EPOCH`, git `%cs`, or UTC today.
+
+Do not create tags or GitHub Releases unless asked.
 
 ## Secrets
 

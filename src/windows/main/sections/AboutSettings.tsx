@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { api } from "../../../lib/api";
 import { reportError } from "../../../lib/system-notify";
 import { formatInvokeError, updateToast, type Messages, appDisplayName } from "../../../lib/i18n";
-import { APP_RELEASED_ON, formatReleaseDate } from "../../../lib/release-meta";
+import { formatReleaseDate } from "../../../lib/release-meta";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
 import { SECTION_ICONS, sectionLabel } from "../sectionNav";
@@ -48,11 +48,15 @@ function LinkRow({
 
 export function AboutSettings({ copy }: { copy: Messages }) {
   const [version, setVersion] = useState("");
+  const [buildDate, setBuildDate] = useState("");
   const [checking, setChecking] = useState(false);
-  const released = formatReleaseDate(APP_RELEASED_ON, copy.dateLocale);
+  const [installing, setInstalling] = useState(false);
+  const [updateReady, setUpdateReady] = useState(false);
+  const released = buildDate ? formatReleaseDate(buildDate, copy.dateLocale) : "";
 
   useEffect(() => {
     void getVersion().then(setVersion);
+    void api.runtimeInfo().then((info) => setBuildDate(info.buildDate));
   }, []);
 
   return (
@@ -70,19 +74,24 @@ export function AboutSettings({ copy }: { copy: Messages }) {
           <p className="mt-1 text-sm text-muted-foreground">
             {copy.aboutVersion}{" "}
             <span className="tabular-nums text-foreground">{version || "…"}</span>
-            <span className="mx-2 opacity-50">|</span>
-            {released}
+            {released ? (
+              <>
+                <span className="mx-2 opacity-50">|</span>
+                {released}
+              </>
+            ) : null}
           </p>
         </div>
       </div>
-      <div className="mb-6 max-w-lg">
+      <div className="mb-6 flex max-w-lg flex-wrap gap-2">
         <Button
           variant="outline"
-          disabled={checking}
+          disabled={checking || installing}
           onClick={async () => {
             setChecking(true);
             try {
               const code = await api.checkForUpdates();
+              setUpdateReady(code === "available");
               toast.success(updateToast(code, copy));
             } catch (error) {
               reportError(formatInvokeError(error, copy));
@@ -93,6 +102,27 @@ export function AboutSettings({ copy }: { copy: Messages }) {
         >
           {checking ? copy.checking : copy.checkUpdates}
         </Button>
+        {updateReady ? (
+          <Button
+            disabled={checking || installing}
+            onClick={async () => {
+              setInstalling(true);
+              try {
+                const code = await api.installUpdate();
+                if (code === "installed" || code === "none") {
+                  setUpdateReady(false);
+                }
+                toast.success(updateToast(code, copy));
+              } catch (error) {
+                reportError(formatInvokeError(error, copy));
+              } finally {
+                setInstalling(false);
+              }
+            }}
+          >
+            {installing ? copy.installing : copy.installUpdate}
+          </Button>
+        ) : null}
       </div>
       <div className="mb-6 max-w-lg overflow-hidden rounded-xl border border-border">
         <LinkRow

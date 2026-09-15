@@ -1,20 +1,9 @@
-import {
-  isPermissionGranted,
-  requestPermission,
-  sendNotification,
-} from "@tauri-apps/plugin-notification";
+import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 
 export async function sendSystemError(title: string, body: string): Promise<boolean> {
   try {
-    let granted = await isPermissionGranted();
-    if (!granted) {
-      granted = (await requestPermission()) === "granted";
-    }
-    if (!granted) {
-      return false;
-    }
-    sendNotification({ title, body });
+    await invoke("show_system_notification", { title, body });
     return true;
   } catch {
     return false;

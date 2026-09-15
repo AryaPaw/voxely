@@ -67,7 +67,29 @@ Dictation logs (no audio, transcript, or API key):
 - `stt_write_ms`
 - `stt_http_ms`
 
+Insert logs (debug, no transcript):
+
+- `insert_ms`
+- UTF-16 `units`
+- `batches`
+- window `class`
+- `focus_attempts`
+- last `SendInput` `sent`
+
+Unicode insert uses bounded batches of 256-1024 planned units. History insert runs on a worker thread.
+
 HUD: "Обработка" is capture finalize + DSP + processed WAV. "Расшифровка" is downsample + STT WAV + OpenRouter HTTP.
+
+## VPN transport campaign (2026-09-15)
+
+Debug exe: `src-tauri/target/debug/voxely.exe`, PID 74368, path matches, `CreationDate` 18:11:30 after `LastWriteTime` 18:10:39. Main HWND present, title `Voxely (local)`.
+
+Public probes to `GET https://openrouter.ai/api/v1/models` (no API key, no audio):
+
+- 20 independent curl processes (new TLS each time): 13 x HTTP 200 in 0.33-0.54 s; 7 x Schannel handshake fail at ~5.02 s (`num_connects=1`). Failures are still connect-stage EOF, not HTTP 5xx.
+- 20 sequential `fetch` calls in one Bun process (connection reuse): 20/20 HTTP 200. First 259 ms, then 75-105 ms. p50 84 ms, p95 105 ms. No handshake-eof after the first success.
+
+Ten live dictations through Voxely and timed Unicode insert into Notepad/Cursor were not driven from this session (microphone and GUI insert automation). Unit tests cover 503 then 200, pool fingerprint, captured-start HWND, 256-1024 batches, and even SendInput boundaries.
 
 ## Process-tree RAM (WebView2)
 

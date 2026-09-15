@@ -56,6 +56,8 @@
     "allow-start-filter-sample",
     "allow-stop-filter-sample",
     "allow-check-for-updates",
+    "allow-install-update",
+    "allow-show-system-notification",
     "allow-recording-audio-url",
     "allow-cancel-dictation",
     "allow-set-hotkey-capture",

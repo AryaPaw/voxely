@@ -26,6 +26,9 @@ jobs:
         with:
           toolchain: stable
           components: rustfmt, clippy
+      - name: Build date from CI
+        shell: pwsh
+        run: echo "VOXELY_BUILD_DATE=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))" >> $env:GITHUB_ENV
       - name: Install frontend
         run: bun install --frozen-lockfile
       - name: Frontend checks

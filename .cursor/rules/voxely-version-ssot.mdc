@@ -1,0 +1,22 @@
+---
+description: One version number in package.json. About date comes from the build, never from source. Use scripts/set-version.ps1.
+alwaysApply: true
+---
+
+# voxely-version-ssot
+
+`package.json` `version` is the only version number you type.
+
+`src-tauri/tauri.conf.json` `version` must stay the path `../package.json`. Cargo is synced by `scripts/set-version.ps1`.
+
+About must not store `APP_RELEASED_ON` or any other calendar day in git. The running app reads compile-time `VOXELY_BUILD_DATE` (CI UTC day, else git `%cs`, else UTC today). This repo ships on GitHub Actions, not GitLab CI.
+
+To bump, after the user confirms the number:
+
+```text
+pwsh -File scripts/set-version.ps1 -To X.Y.Z
+```
+
+or `-To patch|minor|major`. Then `pwsh -File scripts/check-version.ps1`.
+
+Do not hand-edit Cargo.toml, Cargo.lock, tauri.conf.json, RELEASE.md, or frontend files for a version bump. Do not tag or push unless asked.

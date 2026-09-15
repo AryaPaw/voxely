@@ -57,6 +57,7 @@ fn init_logging(debug: bool, log_dir: Option<&Path>) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    crate::notify::apply_windows_app_identity();
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if should_hide_on_launch(&args) {
@@ -140,6 +141,8 @@ pub fn run() {
             start_filter_sample,
             stop_filter_sample,
             check_for_updates,
+            install_update,
+            show_system_notification,
             recording_audio_url,
             cancel_dictation,
             set_hotkey_capture,

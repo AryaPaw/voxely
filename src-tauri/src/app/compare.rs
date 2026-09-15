@@ -12,7 +12,7 @@ use crate::dsp::metrics::{SAMPLE_RATE, STT_SAMPLE_RATE};
 use crate::dsp::pipeline::{prepare_listen_audio, samples_for_stt};
 use crate::error::AppError;
 use crate::history::repository::audio_dir;
-use crate::transcription::openrouter::{build_stt_client, transcribe_file, TranscriptionSuccess};
+use crate::transcription::openrouter::{transcribe_file, TranscriptionSuccess};
 use crate::transcription::retry::RetryPolicy;
 use crate::windows_int::credentials::get_api_key;
 
@@ -251,6 +251,7 @@ async fn run_compare_inner(app: AppHandle) -> Result<CompareState, AppError> {
         Some(settings.language.clone())
     };
     let base = crate::transcription::openrouter::default_base_url().to_string();
+    let client = ctx.clone_transport_client()?;
     let mut set = tokio::task::JoinSet::new();
     for (index, model) in models.into_iter().enumerate() {
         let key = key.clone();
@@ -259,11 +260,8 @@ async fn run_compare_inner(app: AppHandle) -> Result<CompareState, AppError> {
         let policy = policy.clone();
         let rx = tx.subscribe();
         let base = base.clone();
+        let client = client.clone();
         set.spawn(async move {
-            let client = match build_stt_client(policy.connect_timeout) {
-                Ok(client) => client,
-                Err(err) => return (index, model, Err(err)),
-            };
             let outcome = transcribe_file(
                 &client,
                 &base,

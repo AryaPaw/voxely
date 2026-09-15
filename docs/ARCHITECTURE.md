@@ -6,9 +6,9 @@ Voxely is a Windows-first Tauri 2 desktop app. The WebView is only UI. Recording
 
 1. Global hotkey Pressed (not Released, not key repeat) toggles the session state machine.
 2. Capture callback writes PCM into a bounded ring buffer. A writer thread persists WAV. No network in the audio callback.
-3. After stop, a DSP worker reads raw audio, writes processed WAV, then OpenRouter multipart STT runs with a bounded retry scheduler.
+3. After stop, a DSP worker reads raw audio, writes processed WAV, then OpenRouter multipart STT runs on the process-wide pooled HTTP/1.1 client with a bounded retry scheduler.
 4. Processed WAV is the retry source of truth.
-5. Text insertion uses the HWND captured at record start. If the foreground window changed, History is updated and nothing is typed into a new app.
+5. Text insertion uses UTF-16 `KEYEVENTF_UNICODE` into the HWND captured at record start. If the live foreground is a different app, that app is not typed into. Clipboard mode copies only and never sends Ctrl+V.
 6. Session generation invalidates late STT results after cancel or a new start.
 7. Updates use the official Tauri updater. Install is deferred while dictation is cancellable.
 
@@ -19,7 +19,7 @@ Voxely is a Windows-first Tauri 2 desktop app. The WebView is only UI. Recording
 - `app`: lifecycle, tray, hotkey, session machine
 - `audio`: devices, capture, resample, WAV
 - `dsp`: filters, presets, OBS mapping
-- `transcription`: OpenRouter client + retry policy
+- `transcription`: one `OpenRouterTransport` (HTTP/1.1, idle pool 2) plus retry policy
 - `history`: SQLite + retention
 - `windows_int`: credentials, injector
 - `updates`: Tauri updater coordinator and version policy

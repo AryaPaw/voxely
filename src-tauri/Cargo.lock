@@ -6212,7 +6212,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "voxely"
-version = "0.2.7"
+version = "0.2.8"
 dependencies = [
  "approx",
  "chrono",
@@ -6223,6 +6223,7 @@ dependencies = [
  "httpmock",
  "keyring",
  "nnnoiseless",
+ "notify-rust",
  "parking_lot",
  "proptest",
  "reqwest 0.12.28",

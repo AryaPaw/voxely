@@ -68,6 +68,8 @@ const ru = {
   uiEn: "English",
   autoUpdate: "Автообновления",
   checkUpdates: "Проверить обновления",
+  installUpdate: "Установить обновление",
+  installing: "Установка…",
   checking: "Проверка…",
   startWithWindows: "Запускать вместе с Windows",
   closeToTray: "Сворачивать в трей",
@@ -304,6 +306,8 @@ const en = {
   uiEn: "English",
   autoUpdate: "Automatic updates",
   checkUpdates: "Check for updates",
+  installUpdate: "Install update",
+  installing: "Installing…",
   checking: "Checking…",
   startWithWindows: "Start with Windows",
   closeToTray: "Minimize to tray",
@@ -586,6 +590,8 @@ export function updateToast(code: string, copy: Messages): string {
   switch (code) {
     case "none":
       return copy.updateNone;
+    case "available":
+      return copy.updateAvailable;
     case "installed":
       return copy.updateInstalled;
     case "busy":

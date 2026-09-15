@@ -22,11 +22,13 @@ pub fn is_local_build() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeInfo {
     pub local_build: bool,
+    pub build_date: String,
 }
 
 pub fn runtime_info() -> RuntimeInfo {
     RuntimeInfo {
         local_build: is_local_build(),
+        build_date: env!("VOXELY_BUILD_DATE").to_string(),
     }
 }
 
@@ -307,6 +309,9 @@ mod tests {
         assert_eq!(app_display_name("en"), "Voxely");
         assert_eq!(app_display_name("ru"), "Voxely");
         assert_eq!(runtime_info().local_build, is_local_build());
+        let day = &runtime_info().build_date;
+        assert_eq!(day.len(), 10);
+        assert!(day.as_bytes()[4] == b'-' && day.as_bytes()[7] == b'-');
     }
 
     #[test]

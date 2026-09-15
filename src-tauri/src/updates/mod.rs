@@ -21,6 +21,7 @@ const UPDATE_CHECK_ATTEMPTS: u32 = 3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateCode {
     None,
+    Available,
     Installed,
     Busy,
     Deferred,
@@ -31,6 +32,7 @@ impl UpdateCode {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::None => "none",
+            Self::Available => "available",
             Self::Installed => "installed",
             Self::Busy => "busy",
             Self::Deferred => "deferred",
@@ -41,6 +43,14 @@ impl UpdateCode {
 
 pub fn should_poll_updates(local_build: bool, auto_enabled: bool) -> bool {
     auto_enabled && !local_build
+}
+
+pub fn install_on_discovery(manual_check: bool) -> bool {
+    !manual_check
+}
+
+pub fn should_defer_update(install: bool, busy: bool) -> bool {
+    install && !install_allowed(busy)
 }
 
 pub fn update_error_retryable(message: &str) -> bool {
@@ -55,7 +65,31 @@ pub fn update_error_retryable(message: &str) -> bool {
         || lower.contains("failed to check")
 }
 
+pub async fn check_updates(app: &AppHandle, force: bool) -> UpdateCode {
+    run_update(app, force, false).await
+}
+
+pub async fn install_available_update(app: &AppHandle) -> UpdateCode {
+    let outcome = run_update(app, true, true).await;
+    if outcome == UpdateCode::Installed {
+        app.restart();
+    }
+    outcome
+}
+
 pub async fn check_and_maybe_install(app: &AppHandle, force: bool) -> UpdateCode {
+    install_available_update_if_enabled(app, force).await
+}
+
+async fn install_available_update_if_enabled(app: &AppHandle, force: bool) -> UpdateCode {
+    let outcome = run_update(app, force, true).await;
+    if outcome == UpdateCode::Installed {
+        app.restart();
+    }
+    outcome
+}
+
+async fn run_update(app: &AppHandle, force: bool, install: bool) -> UpdateCode {
     let ctx = app.state::<Arc<AppContext>>();
     let mut gate = ctx.update_gate.lock().await;
     if *gate {
@@ -63,28 +97,25 @@ pub async fn check_and_maybe_install(app: &AppHandle, force: bool) -> UpdateCode
     }
     *gate = true;
     drop(gate);
-    let outcome = run_check(app, force).await;
+    let outcome = run_check(app, force, install).await;
     *ctx.update_gate.lock().await = false;
-    if outcome == UpdateCode::Installed {
-        app.restart();
-    }
     outcome
 }
 
-async fn run_check(app: &AppHandle, force: bool) -> UpdateCode {
+async fn run_check(app: &AppHandle, force: bool, install: bool) -> UpdateCode {
     let ctx = app.state::<Arc<AppContext>>();
     let settings = ctx.settings.lock().clone();
     if !force && !settings.auto_update_enabled {
         return UpdateCode::None;
     }
     let busy = is_cancellable(&ctx.state.lock()) || crate::app::compare::compare_busy(&ctx);
-    if !install_allowed(busy) {
+    if should_defer_update(install, busy) {
         return UpdateCode::Deferred;
     }
     let mut delay = Duration::from_millis(400);
     let mut last_err = String::new();
     for attempt in 1..=UPDATE_CHECK_ATTEMPTS {
-        match try_check(app).await {
+        match try_check(app, install).await {
             Ok(code) => return code,
             Err(err) => {
                 last_err = err;
@@ -106,7 +137,7 @@ async fn run_check(app: &AppHandle, force: bool) -> UpdateCode {
     UpdateCode::Failed
 }
 
-async fn try_check(app: &AppHandle) -> Result<UpdateCode, String> {
+async fn try_check(app: &AppHandle, install: bool) -> Result<UpdateCode, String> {
     let updater = match build_updater(app) {
         Ok(updater) => updater,
         Err(err) => return Err(err),
@@ -116,6 +147,9 @@ async fn try_check(app: &AppHandle) -> Result<UpdateCode, String> {
             let prerelease = update.version.contains('-');
             if !is_newer_stable(current_version(), &update.version, prerelease) {
                 return Ok(UpdateCode::None);
+            }
+            if !install {
+                return Ok(UpdateCode::Available);
             }
             match update.download_and_install(|_, _| {}, || {}).await {
                 Ok(()) => Ok(UpdateCode::Installed),
@@ -160,7 +194,10 @@ pub fn spawn_background_loop(app: AppHandle) {
                 let outcome = check_and_maybe_install(&app, false).await;
                 match outcome {
                     UpdateCode::Installed => return,
-                    UpdateCode::Deferred | UpdateCode::Busy | UpdateCode::Failed => {
+                    UpdateCode::Deferred
+                    | UpdateCode::Busy
+                    | UpdateCode::Failed
+                    | UpdateCode::Available => {
                         tokio::time::sleep(Duration::from_secs(120)).await;
                     }
                     UpdateCode::None => {
@@ -183,6 +220,16 @@ mod tests {
         assert!(!should_poll_updates(true, true));
         assert!(should_poll_updates(false, true));
         assert!(!should_poll_updates(false, false));
+    }
+
+    #[test]
+    fn manual_check_does_not_auto_install() {
+        assert!(!install_on_discovery(true));
+        assert!(install_on_discovery(false));
+        assert_eq!(UpdateCode::Available.as_str(), "available");
+        assert!(!should_defer_update(false, true));
+        assert!(should_defer_update(true, true));
+        assert!(!should_defer_update(true, false));
     }
 
     #[test]

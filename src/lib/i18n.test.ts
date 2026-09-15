@@ -104,6 +104,10 @@ describe("messagesFor", () => {
       expect(localizedError(code, messagesFor("ru")).length).toBeGreaterThan(0);
     }
     expect(updateToast("none", messagesFor("en"))).toBe("No updates");
+    expect(updateToast("available", messagesFor("en"))).toBe("An update is available");
+    expect(updateToast("available", messagesFor("ru"))).toBe("Доступно обновление");
+    expect(messagesFor("en").installUpdate).toBe("Install update");
+    expect(messagesFor("ru").installUpdate).toBe("Установить обновление");
     expect(updateToast("installed", messagesFor("en"))).toBe("Update installed. Restarting…");
     expect(updateToast("busy", messagesFor("en"))).toBe("An update is already running");
     expect(updateToast("deferred", messagesFor("ru"))).toBe(

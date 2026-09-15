@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::AppError;
 use crate::transcription::retry::{
-    classify_http, classify_io, error_chain, parse_retry_after, truncated_body, AttemptDecision,
-    ClassifiedError, RetryPolicy, RetryScheduler,
+    classify_http, classify_io, error_category, error_chain, parse_retry_after, truncated_body,
+    AttemptDecision, ClassifiedError, RetryClass, RetryPolicy, RetryScheduler,
 };
 
 const DEFAULT_BASE: &str = "https://openrouter.ai/api/v1";
@@ -19,7 +19,7 @@ pub struct SttHttpOptions {
 pub fn stt_http_options() -> SttHttpOptions {
     SttHttpOptions {
         http1_only: true,
-        pool_max_idle_per_host: 0,
+        pool_max_idle_per_host: 2,
     }
 }
 
@@ -35,6 +35,53 @@ pub fn build_stt_client(connect_timeout: Duration) -> Result<reqwest::Client, Ap
     builder
         .build()
         .map_err(|e| AppError::ConnectionFailed(e.to_string()))
+}
+
+pub struct OpenRouterTransport {
+    client: reqwest::Client,
+    connect_timeout: Duration,
+    generation: u64,
+}
+
+impl OpenRouterTransport {
+    pub fn new(connect_timeout: Duration) -> Result<Self, AppError> {
+        Ok(Self {
+            client: build_stt_client(connect_timeout)?,
+            connect_timeout,
+            generation: 1,
+        })
+    }
+
+    pub fn sync(&mut self, connect_timeout: Duration) -> Result<(), AppError> {
+        if self.connect_timeout != connect_timeout {
+            self.client = build_stt_client(connect_timeout)?;
+            self.connect_timeout = connect_timeout;
+            self.generation = self.generation.saturating_add(1);
+        }
+        Ok(())
+    }
+
+    pub fn client(&self) -> reqwest::Client {
+        self.client.clone()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
+    pub fn connect_timeout(&self) -> Duration {
+        self.connect_timeout
+    }
+}
+
+pub async fn prewarm_connection(client: &reqwest::Client) {
+    let url = format!("{DEFAULT_BASE}/models");
+    match client.get(url).timeout(Duration::from_secs(8)).send().await {
+        Ok(response) => {
+            tracing::debug!(status = response.status().as_u16(), "openrouter prewarm")
+        }
+        Err(err) => tracing::debug!(error = %error_chain(&err), "openrouter prewarm failed"),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -156,7 +203,9 @@ pub async fn transcribe_file_with_progress(
                         tracing::warn!(
                             attempt,
                             status = classified.http_status,
-                            retryable = classified.class == crate::transcription::retry::RetryClass::Retryable,
+                            category = error_category(&classified.error),
+                            retryable = classified.class == RetryClass::Retryable,
+                            latency_ms = started.elapsed().as_millis() as u64,
                             error = %classified.error,
                             "stt attempt failed"
                         );
@@ -239,6 +288,7 @@ async fn one_attempt(
         }
     }
     let url = format!("{}/audio/transcriptions", base_url.trim_end_matches('/'));
+    let attempt_started = Instant::now();
     let request = client
         .post(url)
         .bearer_auth(api_key)
@@ -251,11 +301,21 @@ async fn one_attempt(
         .timeout(timeout)
         .build()
         .map_err(|e| classify_io(&error_chain(&e)))?;
-    let _ = connect_timeout;
-    let response = client
-        .execute(request)
-        .await
-        .map_err(|e| classify_io(&error_chain(&e)))?;
+    tracing::debug!(
+        connect_timeout_ms = connect_timeout.as_millis() as u64,
+        request_timeout_ms = timeout.as_millis() as u64,
+        "stt http execute"
+    );
+    let response = client.execute(request).await.map_err(|e| {
+        let classified = classify_io(&error_chain(&e));
+        tracing::info!(
+            latency_ms = attempt_started.elapsed().as_millis() as u64,
+            category = error_category(&classified.error),
+            retryable = classified.class == RetryClass::Retryable,
+            "stt transport attempt failed"
+        );
+        classified
+    })?;
     let status = response.status().as_u16();
     let generation_id = response
         .headers()
@@ -459,21 +519,23 @@ mod tests {
     #[tokio::test]
     async fn retries_503_then_success() {
         let server = MockServer::start();
-        server.mock(|when, then| {
+        let mut busy = server.mock(|when, then| {
             when.method(POST).path("/audio/transcriptions");
             then.status(503).body("busy");
         });
-        // httpmock last matching? use sequence via when body - simpler: first two fail using Expectation
         let dir = tempfile::tempdir().unwrap();
         let path = wav_fixture(dir.path());
         let client = reqwest::Client::new();
         let (_tx, rx) = tokio::sync::watch::channel(false);
         let mut policy = RetryPolicy::default();
-        policy.additional_retries = 0;
+        policy.additional_retries = 2;
+        policy.initial_retry_delay = Duration::from_millis(20);
+        policy.max_retry_delay = Duration::from_millis(50);
         policy.total_operation_timeout = Duration::from_secs(5);
-        let err = transcribe_file(
+        let base = server.base_url();
+        let transcribe = transcribe_file(
             &client,
-            &server.base_url(),
+            &base,
             "k",
             "openai/gpt-transcribe",
             None,
@@ -481,13 +543,44 @@ mod tests {
             policy,
             Duration::from_millis(200),
             rx,
-        )
-        .await
-        .unwrap_err();
-        assert!(matches!(
-            err,
-            AppError::ProviderUnavailable | AppError::RetryDeadlineExceeded
-        ));
+        );
+        let switch = async {
+            loop {
+                if busy.hits() >= 1 {
+                    busy.delete();
+                    server.mock(|when, then| {
+                        when.method(POST).path("/audio/transcriptions");
+                        then.status(200)
+                            .json_body(serde_json::json!({"text": "ok"}));
+                    });
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        let (result, _) = tokio::join!(transcribe, switch);
+        let result = result.unwrap();
+        assert_eq!(result.text, "ok");
+        assert!(result.attempt >= 2);
+    }
+
+    #[test]
+    fn stt_client_reuses_idle_http1_pool() {
+        let opts = stt_http_options();
+        assert!(opts.http1_only);
+        assert_eq!(opts.pool_max_idle_per_host, 2);
+        assert!(build_stt_client(Duration::from_secs(8)).is_ok());
+    }
+
+    #[test]
+    fn transport_rebuilds_only_when_connect_timeout_changes() {
+        let mut transport = OpenRouterTransport::new(Duration::from_secs(8)).unwrap();
+        assert_eq!(transport.generation(), 1);
+        transport.sync(Duration::from_secs(8)).unwrap();
+        assert_eq!(transport.generation(), 1);
+        transport.sync(Duration::from_secs(3)).unwrap();
+        assert_eq!(transport.generation(), 2);
+        assert_eq!(transport.connect_timeout(), Duration::from_secs(3));
     }
 
     #[tokio::test]
@@ -551,14 +644,6 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, AppError::ResponseMalformed);
-    }
-
-    #[test]
-    fn stt_client_avoids_http2_idle_pool() {
-        let opts = stt_http_options();
-        assert!(opts.http1_only);
-        assert_eq!(opts.pool_max_idle_per_host, 0);
-        assert!(build_stt_client(Duration::from_secs(8)).is_ok());
     }
 
     #[test]

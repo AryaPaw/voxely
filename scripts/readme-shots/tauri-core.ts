@@ -130,7 +130,7 @@ export async function invoke<T>(cmd: string): Promise<T> {
     case "get_settings":
       return settings as T;
     case "get_runtime_info":
-      return { localBuild: false } as T;
+      return { localBuild: false, buildDate: "2026-09-15" } as T;
     case "save_settings":
       return settings as T;
     case "get_session_state":
@@ -181,7 +181,9 @@ export async function invoke<T>(cmd: string): Promise<T> {
         nonce: 1,
       } as T;
     case "check_for_updates":
-      return "upToDate" as T;
+      return "none" as T;
+    case "install_update":
+      return "installed" as T;
     case "discover_models":
       return [{ id: "openai/gpt-transcribe", name: "GPT Transcribe" }] as T;
     default:

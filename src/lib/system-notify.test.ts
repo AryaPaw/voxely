@@ -9,56 +9,36 @@ vi.mock("sonner", () => ({
   },
 }));
 
-const isPermissionGranted = vi.fn();
-const requestPermission = vi.fn();
-const sendNotification = vi.fn();
+const invoke = vi.fn();
 
-vi.mock("@tauri-apps/plugin-notification", () => ({
-  isPermissionGranted: () => isPermissionGranted(),
-  requestPermission: () => requestPermission(),
-  sendNotification: (payload: { title: string; body: string }) => sendNotification(payload),
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (cmd: string, args?: { title: string; body: string }) => invoke(cmd, args),
 }));
 
 describe("sendSystemError", () => {
   beforeEach(() => {
-    isPermissionGranted.mockReset();
-    requestPermission.mockReset();
-    sendNotification.mockReset();
+    invoke.mockReset();
     vi.mocked(toast.error).mockReset();
   });
 
-  it("sends a Windows toast when permission is already granted", async () => {
-    isPermissionGranted.mockResolvedValue(true);
+  it("sends a Windows toast through the native host", async () => {
+    invoke.mockResolvedValue(undefined);
     await expect(sendSystemError("Voxely", "Нет сети")).resolves.toBe(true);
-    expect(sendNotification).toHaveBeenCalledWith({ title: "Voxely", body: "Нет сети" });
-    expect(requestPermission).not.toHaveBeenCalled();
-  });
-
-  it("requests permission once when it is missing", async () => {
-    isPermissionGranted.mockResolvedValue(false);
-    requestPermission.mockResolvedValue("granted");
-    await expect(sendSystemError("Voxely", "fail")).resolves.toBe(true);
-    expect(requestPermission).toHaveBeenCalled();
-    expect(sendNotification).toHaveBeenCalled();
-  });
-
-  it("skips the toast when permission is denied", async () => {
-    isPermissionGranted.mockResolvedValue(false);
-    requestPermission.mockResolvedValue("denied");
-    await expect(sendSystemError("Voxely", "fail")).resolves.toBe(false);
-    expect(sendNotification).not.toHaveBeenCalled();
+    expect(invoke).toHaveBeenCalledWith("show_system_notification", {
+      title: "Voxely",
+      body: "Нет сети",
+    });
   });
 
   it("swallows plugin failures in tests and the web shell", async () => {
-    isPermissionGranted.mockRejectedValue(new Error("no backend"));
+    invoke.mockRejectedValue(new Error("no backend"));
     await expect(sendSystemError("Voxely", "fail")).resolves.toBe(false);
   });
 });
 
 describe("reportError", () => {
   beforeEach(() => {
-    isPermissionGranted.mockResolvedValue(true);
-    sendNotification.mockReset();
+    invoke.mockResolvedValue(undefined);
     vi.mocked(toast.error).mockReset();
   });
 
@@ -66,7 +46,7 @@ describe("reportError", () => {
     reportError("Не удалось сохранить данные");
     expect(toast.error).toHaveBeenCalledWith("Не удалось сохранить данные");
     await vi.waitFor(() => {
-      expect(sendNotification).toHaveBeenCalledWith({
+      expect(invoke).toHaveBeenCalledWith("show_system_notification", {
         title: "Voxely",
         body: "Не удалось сохранить данные",
       });
