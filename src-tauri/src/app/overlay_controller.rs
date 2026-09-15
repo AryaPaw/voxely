@@ -10,6 +10,36 @@ pub struct OverlaySnapshot {
     pub state: SessionState,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct OverlayLifecycle {
+    pub revision: u64,
+    pub epoch: u64,
+    pub visible: bool,
+}
+
+impl OverlayLifecycle {
+    pub fn publish(&mut self) -> u64 {
+        self.revision = next_overlay_revision(self.revision);
+        self.revision
+    }
+
+    pub fn show(&mut self) -> u64 {
+        self.epoch = next_overlay_revision(self.epoch);
+        self.visible = true;
+        self.publish()
+    }
+
+    pub fn hide(&mut self) -> u64 {
+        self.epoch = next_overlay_revision(self.epoch);
+        self.visible = false;
+        self.publish()
+    }
+
+    pub fn snapshot(&self, state: SessionState) -> OverlaySnapshot {
+        overlay_snapshot(self.revision, self.visible, state)
+    }
+}
+
 pub fn next_overlay_revision(current: u64) -> u64 {
     current.saturating_add(1)
 }
@@ -76,5 +106,46 @@ mod tests {
             message: "x".into(),
             code: "InvalidApiKey".into(),
         }));
+    }
+
+    #[test]
+    fn hud_status_publish_advances_revision_without_touching_epoch() {
+        let mut life = OverlayLifecycle::default();
+        let shown = life.show();
+        assert_eq!(shown, 1);
+        assert_eq!(life.epoch, 1);
+        assert!(life.visible);
+
+        let recording = life.snapshot(SessionState::Recording);
+        let transcribing_rev = life.publish();
+        let transcribing = life.snapshot(SessionState::Transcribing { attempt: 1 });
+
+        assert!(accept_overlay_revision(
+            recording.revision,
+            transcribing.revision
+        ));
+        assert_eq!(transcribing_rev, 2);
+        assert_eq!(life.epoch, 1);
+        assert_eq!(
+            transcribing.state,
+            SessionState::Transcribing { attempt: 1 }
+        );
+        assert!(transcribing.visible);
+    }
+
+    #[test]
+    fn error_hide_epoch_survives_failed_status_publish() {
+        let mut life = OverlayLifecycle::default();
+        life.show();
+        let expected = life.epoch;
+        life.publish();
+        life.snapshot(SessionState::Failed {
+            message: "x".into(),
+            code: "InvalidApiKey".into(),
+        });
+        assert!(!delayed_hide_is_stale(expected, life.epoch));
+        life.hide();
+        assert!(delayed_hide_is_stale(expected, life.epoch));
+        assert!(!life.visible);
     }
 }

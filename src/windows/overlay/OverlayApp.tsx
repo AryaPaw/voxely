@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { api, type AppSettings, type OverlaySnapshot, type SessionState } from "../../lib/api";
 import { applyUiLocale, messagesFor, resolveUiLocale } from "../../lib/i18n";
 import { overlayHudLabel, overlayIsBusy } from "../../lib/session-copy";
-import { acceptOverlayRevision } from "../../lib/overlay-snapshot";
+import { acceptOverlayRevision, applyOverlaySnapshot } from "../../lib/overlay-snapshot";
 import { overlayCancelArmed, overlayHoverFromElement } from "../../lib/overlay-wave";
 import { applyTheme, watchSystemTheme } from "../../lib/theme";
 import { OverlayWave } from "./OverlayWave";
@@ -49,7 +49,7 @@ export function OverlayApp() {
         return;
       }
       revision = event.payload.revision;
-      setSnapshot(event.payload);
+      setSnapshot((current) => applyOverlaySnapshot(current, event.payload));
     }).then(async (fn) => {
       if (cancelled) {
         fn();

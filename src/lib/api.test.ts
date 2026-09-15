@@ -63,6 +63,8 @@ describe("overlayHudVisible", () => {
     expect(overlayHudLabel(false, { kind: "idle" })).toBe("");
     expect(overlayHudLabel(false, { kind: "recording" })).toBe("");
     expect(overlayHudLabel(true, { kind: "recording" })).toBe("Запись");
+    expect(overlayHudLabel(true, { kind: "saving" })).toBe("Сохранение");
+    expect(overlayHudLabel(true, { kind: "transcribing", attempt: 1 })).toBe("Расшифровка");
     expect(acceptOverlayRevision(1, 2)).toBe(true);
     expect(acceptOverlayRevision(4, 4)).toBe(false);
   });

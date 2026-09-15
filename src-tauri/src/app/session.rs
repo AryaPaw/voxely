@@ -16,9 +16,7 @@ use crate::app::overlay::{
     overlay_physical_position, OverlayTimeline, WorkArea, OVERLAY_GAP_PX, OVERLAY_HEIGHT,
     OVERLAY_WIDTH,
 };
-use crate::app::overlay_controller::{
-    delayed_hide_is_stale, next_overlay_revision, overlay_snapshot, OverlaySnapshot,
-};
+use crate::app::overlay_controller::{delayed_hide_is_stale, OverlayLifecycle, OverlaySnapshot};
 use crate::audio::capture::{
     read_pcm16_wav_with_rate, write_pcm16_wav, CaptureSession, MeterSample,
 };
@@ -49,8 +47,7 @@ pub struct AppContext {
     pub capture: Mutex<Option<CaptureSession>>,
     pub history: Mutex<HistoryRepo>,
     pub captured_target: Mutex<Option<CapturedTarget>>,
-    pub overlay_revision: std::sync::atomic::AtomicU64,
-    pub overlay_visible: AtomicBool,
+    pub overlay: Mutex<OverlayLifecycle>,
     pub in_flight: Mutex<HashSet<String>>,
     pub transport: Mutex<OpenRouterTransport>,
     pub overlay_timeline: Mutex<OverlayTimeline>,
@@ -94,8 +91,7 @@ impl AppContext {
             capture: Mutex::new(None),
             history: Mutex::new(history),
             captured_target: Mutex::new(None),
-            overlay_revision: AtomicU64::new(0),
-            overlay_visible: AtomicBool::new(false),
+            overlay: Mutex::new(OverlayLifecycle::default()),
             in_flight: Mutex::new(HashSet::new()),
             transport: Mutex::new(transport),
             overlay_timeline: Mutex::new(OverlayTimeline::default()),
@@ -116,11 +112,7 @@ impl AppContext {
     }
 
     pub fn overlay_snapshot(&self) -> OverlaySnapshot {
-        overlay_snapshot(
-            self.overlay_revision.load(Ordering::SeqCst),
-            self.overlay_visible.load(Ordering::SeqCst),
-            self.state.lock().clone(),
-        )
+        self.overlay.lock().snapshot(self.state.lock().clone())
     }
 
     pub fn emit_overlay(&self, app: &AppHandle) {
@@ -130,6 +122,7 @@ impl AppContext {
     pub fn emit_state(&self, app: &AppHandle) {
         let state = self.state.lock().clone();
         let _ = app.emit("session://state", state);
+        self.overlay.lock().publish();
         self.emit_overlay(app);
         crate::app::shortcuts::schedule_sync(app);
     }
@@ -645,11 +638,6 @@ fn voxely_window_roots(app: &AppHandle) -> Vec<usize> {
         .collect()
 }
 
-fn bump_overlay_epoch(ctx: &AppContext) {
-    let next = next_overlay_revision(ctx.overlay_revision.load(Ordering::SeqCst));
-    ctx.overlay_revision.store(next, Ordering::SeqCst);
-}
-
 fn overlay_work_area(window: &WebviewWindow) -> WorkArea {
     let fallback = WorkArea {
         left: 0,
@@ -695,8 +683,7 @@ fn reveal_overlay(window: &WebviewWindow) {
 
 fn show_overlay(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
-    bump_overlay_epoch(&ctx);
-    ctx.overlay_visible.store(true, Ordering::SeqCst);
+    ctx.overlay.lock().show();
     ctx.overlay_timeline.lock().mark_window_created();
     if let Some(window) = app.get_webview_window("overlay") {
         reveal_overlay(&window);
@@ -769,8 +756,7 @@ fn hide_overlay_hwnd(window: &WebviewWindow) {
 
 fn hide_overlay_now(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
-    bump_overlay_epoch(&ctx);
-    ctx.overlay_visible.store(false, Ordering::SeqCst);
+    ctx.overlay.lock().hide();
     if let Some(window) = app.get_webview_window("overlay") {
         hide_overlay_hwnd(&window);
     }
@@ -780,11 +766,11 @@ fn hide_overlay_now(app: &AppHandle) {
 
 fn schedule_error_overlay_hide(app: AppHandle, delay: Duration) {
     let ctx = app.state::<Arc<AppContext>>();
-    let expected = ctx.overlay_revision.load(Ordering::SeqCst);
+    let expected = ctx.overlay.lock().epoch;
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(delay).await;
         let ctx = app.state::<Arc<AppContext>>();
-        if delayed_hide_is_stale(expected, ctx.overlay_revision.load(Ordering::SeqCst)) {
+        if delayed_hide_is_stale(expected, ctx.overlay.lock().epoch) {
             return;
         }
         hide_overlay_now(&app);

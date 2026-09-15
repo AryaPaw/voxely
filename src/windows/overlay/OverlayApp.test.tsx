@@ -1,7 +1,10 @@
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { OverlaySnapshot } from "../../lib/api";
 import { OverlayApp } from "./OverlayApp";
+
+const overlayHandlers: Array<(event: { payload: OverlaySnapshot }) => void> = [];
 
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(async (cmd: string) => {
@@ -21,10 +24,18 @@ vi.mock("@tauri-apps/api/core", () => ({
   }),
 }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async () => () => undefined),
+  listen: vi.fn(async (event: string, handler: (event: { payload: OverlaySnapshot }) => void) => {
+    if (event === "overlay://snapshot") {
+      overlayHandlers.push(handler);
+    }
+    return () => undefined;
+  }),
 }));
 
-afterEach(() => cleanup());
+afterEach(() => {
+  cleanup();
+  overlayHandlers.length = 0;
+});
 
 describe("OverlayApp", () => {
   it("names cancel as cancel and uses theme tokens", async () => {
@@ -45,5 +56,23 @@ describe("OverlayApp", () => {
     expect(invoke).toHaveBeenCalledWith("cancel_dictation");
     fireEvent.mouseLeave(pill);
     expect(document.documentElement.lang).toBe("en");
+  });
+
+  it("BUG-HUD-R1 keeps recording until a newer overlay revision arrives", async () => {
+    render(<OverlayApp />);
+    expect(await screen.findByText("Recording")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(overlayHandlers.length).toBeGreaterThan(0);
+    });
+    overlayHandlers[0]({
+      payload: { revision: 1, visible: true, state: { kind: "transcribing", attempt: 1 } },
+    });
+    expect(screen.getByText("Recording")).toBeInTheDocument();
+    overlayHandlers[0]({
+      payload: { revision: 2, visible: true, state: { kind: "transcribing", attempt: 1 } },
+    });
+    await waitFor(() => {
+      expect(screen.getByText("Transcribing")).toBeInTheDocument();
+    });
   });
 });
