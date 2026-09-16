@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::AppError;
 use crate::transcription::retry::{
-    classify_http, classify_io, error_category, error_chain, parse_retry_after, truncated_body,
-    AttemptDecision, ClassifiedError, RetryClass, RetryPolicy, RetryScheduler,
+    classify_http, classify_io, classify_reqwest, error_category, error_chain, parse_retry_after,
+    truncated_body, AttemptDecision, ClassifiedError, RetryClass, RetryPolicy, RetryScheduler,
 };
 
 const DEFAULT_BASE: &str = "https://openrouter.ai/api/v1";
@@ -40,7 +40,6 @@ pub fn build_stt_client(connect_timeout: Duration) -> Result<reqwest::Client, Ap
 pub struct OpenRouterTransport {
     client: reqwest::Client,
     connect_timeout: Duration,
-    generation: u64,
 }
 
 impl OpenRouterTransport {
@@ -48,7 +47,6 @@ impl OpenRouterTransport {
         Ok(Self {
             client: build_stt_client(connect_timeout)?,
             connect_timeout,
-            generation: 1,
         })
     }
 
@@ -56,7 +54,6 @@ impl OpenRouterTransport {
         if self.connect_timeout != connect_timeout {
             self.client = build_stt_client(connect_timeout)?;
             self.connect_timeout = connect_timeout;
-            self.generation = self.generation.saturating_add(1);
         }
         Ok(())
     }
@@ -65,23 +62,92 @@ impl OpenRouterTransport {
         self.client.clone()
     }
 
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
     pub fn connect_timeout(&self) -> Duration {
         self.connect_timeout
     }
 }
 
+const PREWARM_BODY_LIMIT: usize = 256 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrewarmOutcome {
+    Ready {
+        status: u16,
+        latency_ms: u64,
+    },
+    Failed {
+        category: &'static str,
+        latency_ms: u64,
+    },
+}
+
 pub async fn prewarm_connection(client: &reqwest::Client) {
-    let url = format!("{DEFAULT_BASE}/models");
-    match client.get(url).timeout(Duration::from_secs(8)).send().await {
-        Ok(response) => {
-            tracing::debug!(status = response.status().as_u16(), "openrouter prewarm")
+    match prewarm_connection_at(client, DEFAULT_BASE).await {
+        PrewarmOutcome::Ready { status, latency_ms } => {
+            tracing::debug!(status, latency_ms, "openrouter prewarm ready");
         }
-        Err(err) => tracing::debug!(error = %error_chain(&err), "openrouter prewarm failed"),
+        PrewarmOutcome::Failed {
+            category,
+            latency_ms,
+        } => {
+            tracing::debug!(category, latency_ms, "openrouter prewarm failed");
+        }
     }
+}
+
+pub async fn prewarm_connection_at(client: &reqwest::Client, base_url: &str) -> PrewarmOutcome {
+    let started = Instant::now();
+    let base = base_url.trim_end_matches('/');
+    let models = format!("{base}/models");
+    let filtered = format!("{base}/models?output_modalities=transcription");
+    match send_prewarm(client, &models, reqwest::Method::HEAD).await {
+        Ok(status) if status != 405 && status != 501 => {
+            return PrewarmOutcome::Ready {
+                status,
+                latency_ms: elapsed_ms(started),
+            };
+        }
+        Ok(_) | Err(_) => {}
+    }
+    match send_prewarm(client, &filtered, reqwest::Method::GET).await {
+        Ok(status) => PrewarmOutcome::Ready {
+            status,
+            latency_ms: elapsed_ms(started),
+        },
+        Err(err) => PrewarmOutcome::Failed {
+            category: error_category(&classify_reqwest(&err).error),
+            latency_ms: elapsed_ms(started),
+        },
+    }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+async fn send_prewarm(
+    client: &reqwest::Client,
+    url: &str,
+    method: reqwest::Method,
+) -> Result<u16, reqwest::Error> {
+    let response = client
+        .request(method, url)
+        .timeout(Duration::from_secs(8))
+        .send()
+        .await?;
+    let status = response.status().as_u16();
+    finish_prewarm_body(response).await;
+    Ok(status)
+}
+
+async fn finish_prewarm_body(response: reqwest::Response) {
+    if let Some(len) = response.content_length() {
+        if len > PREWARM_BODY_LIMIT as u64 {
+            drop(response);
+            return;
+        }
+    }
+    let _ = response.bytes().await;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -297,14 +363,14 @@ async fn one_attempt(
         .multipart(form)
         .timeout(timeout)
         .build()
-        .map_err(|e| classify_io(&error_chain(&e)))?;
+        .map_err(|e| classify_reqwest(&e))?;
     tracing::debug!(
         connect_timeout_ms = connect_timeout.as_millis() as u64,
         request_timeout_ms = timeout.as_millis() as u64,
         "stt http execute"
     );
     let response = client.execute(request).await.map_err(|e| {
-        let classified = classify_io(&error_chain(&e));
+        let classified = classify_reqwest(&e);
         tracing::info!(
             latency_ms = attempt_started.elapsed().as_millis() as u64,
             category = error_category(&classified.error),
@@ -324,10 +390,7 @@ async fn one_attempt(
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| parse_retry_after(v, chrono::Utc::now()));
-    let body = response
-        .text()
-        .await
-        .map_err(|e| classify_io(&error_chain(&e)))?;
+    let body = response.text().await.map_err(|e| classify_reqwest(&e))?;
     if !(200..300).contains(&status) {
         let snippet = truncated_body(&body);
         tracing::warn!(status, body = %snippet, "stt http error");
@@ -483,6 +546,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reports_waiting_then_second_attempt_after_retryable_failure() {
+        let server = MockServer::start();
+        let mut busy = server.mock(|when, then| {
+            when.method(POST).path("/audio/transcriptions");
+            then.status(503).body("busy");
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = wav_fixture(dir.path());
+        let client = reqwest::Client::new();
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let mut policy = RetryPolicy::default();
+        policy.additional_retries = 3;
+        policy.initial_retry_delay = Duration::from_millis(20);
+        policy.max_retry_delay = Duration::from_millis(50);
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let events_for_cb = events.clone();
+        let base = server.base_url();
+        let transcribe = transcribe_file_with_progress(
+            &client,
+            &base,
+            "k",
+            "openai/gpt-transcribe",
+            None,
+            &path,
+            policy,
+            Duration::from_millis(200),
+            rx,
+            move |progress| events_for_cb.lock().unwrap().push(progress),
+        );
+        let switch = async {
+            loop {
+                if busy.hits() >= 1 {
+                    busy.delete();
+                    server.mock(|when, then| {
+                        when.method(POST).path("/audio/transcriptions");
+                        then.status(200)
+                            .json_body(serde_json::json!({"text": "ok"}));
+                    });
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        };
+        let (result, _) = tokio::join!(transcribe, switch);
+        assert_eq!(result.unwrap().text, "ok");
+        let recorded = events.lock().unwrap().clone();
+        assert!(matches!(recorded.first(), Some(SttProgress::Attempt(1))));
+        assert!(matches!(
+            recorded.get(1),
+            Some(SttProgress::Waiting { attempt: 1, .. })
+        ));
+        assert!(matches!(recorded.get(2), Some(SttProgress::Attempt(2))));
+    }
+
+    #[tokio::test]
     async fn no_retry_on_401() {
         let server = MockServer::start();
         let mock = server.mock(|when, then| {
@@ -563,18 +681,85 @@ mod tests {
         let opts = stt_http_options();
         assert!(opts.http1_only);
         assert_eq!(opts.pool_max_idle_per_host, 2);
-        assert!(build_stt_client(Duration::from_secs(8)).is_ok());
+        let client = build_stt_client(Duration::from_secs(8)).expect("production STT client");
+        drop(client);
     }
 
     #[test]
     fn transport_rebuilds_only_when_connect_timeout_changes() {
         let mut transport = OpenRouterTransport::new(Duration::from_secs(8)).unwrap();
-        assert_eq!(transport.generation(), 1);
         transport.sync(Duration::from_secs(8)).unwrap();
-        assert_eq!(transport.generation(), 1);
+        assert_eq!(transport.connect_timeout(), Duration::from_secs(8));
         transport.sync(Duration::from_secs(3)).unwrap();
-        assert_eq!(transport.generation(), 2);
         assert_eq!(transport.connect_timeout(), Duration::from_secs(3));
+    }
+
+    async fn serve_keep_alive_http(
+        listener: tokio::net::TcpListener,
+        accepted: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                continue;
+            };
+            accepted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tokio::spawn(handle_keep_alive_conn(stream));
+        }
+    }
+
+    async fn handle_keep_alive_conn(mut stream: tokio::net::TcpStream) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 2048];
+        loop {
+            let n = match stream.read(&mut tmp).await {
+                Ok(0) => return,
+                Ok(n) => n,
+                Err(_) => return,
+            };
+            buf.extend_from_slice(&tmp[..n]);
+            while let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                let header = String::from_utf8_lossy(&buf[..end]);
+                let is_head = header.starts_with("HEAD ");
+                buf.drain(..end + 4);
+                let body = b"{\"data\":[]}";
+                let mut response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                    body.len()
+                );
+                if !is_head {
+                    response.push_str(std::str::from_utf8(body).unwrap());
+                }
+                if stream.write_all(response.as_bytes()).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn prewarm_and_follow_up_reuse_one_http1_socket() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let accepted_for_server = accepted.clone();
+        tokio::spawn(serve_keep_alive_http(listener, accepted_for_server));
+        let client = build_stt_client(Duration::from_secs(2)).unwrap();
+        let base = format!("http://{addr}");
+        let outcome = prewarm_connection_at(&client, &base).await;
+        assert!(
+            matches!(outcome, PrewarmOutcome::Ready { status: 200, .. }),
+            "prewarm outcome {outcome:?}"
+        );
+        let follow = client.get(format!("{base}/models")).send().await.unwrap();
+        assert_eq!(follow.status().as_u16(), 200);
+        let _ = follow.bytes().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            accepted.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "prewarm and follow-up must share one HTTP/1 socket"
+        );
     }
 
     #[tokio::test]

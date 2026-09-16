@@ -224,6 +224,35 @@ pub fn is_connect_stage_eof(error: &AppError) -> bool {
     )
 }
 
+fn is_connect_stage_timeout(lower: &str) -> bool {
+    lower.contains("handshake")
+        || lower.contains("error trying to connect")
+        || lower.contains("tcp connect")
+        || lower.contains("connection timed out")
+        || (lower.contains("connect") && lower.contains("timeout"))
+}
+
+pub fn classify_reqwest(err: &reqwest::Error) -> ClassifiedError {
+    let message = error_chain(err);
+    if err.is_timeout() {
+        if err.is_connect() || is_connect_stage_timeout(&message.to_ascii_lowercase()) {
+            return ClassifiedError {
+                class: RetryClass::Retryable,
+                error: AppError::ConnectionFailed(message),
+                http_status: None,
+                retry_after: None,
+            };
+        }
+        return ClassifiedError {
+            class: RetryClass::Retryable,
+            error: AppError::RequestTimeout,
+            http_status: None,
+            retry_after: None,
+        };
+    }
+    classify_io(&message)
+}
+
 pub fn classify_io(message: &str) -> ClassifiedError {
     let lower = message.to_ascii_lowercase();
     let category = transport_category(message);
@@ -255,7 +284,11 @@ pub fn classify_io(message: &str) -> ClassifiedError {
             RetryClass::Terminal
         },
         error: if category == TransportCategory::Timeout {
-            AppError::RequestTimeout
+            if is_connect_stage_timeout(&lower) {
+                AppError::ConnectionFailed(message.to_string())
+            } else {
+                AppError::RequestTimeout
+            }
         } else if retryable && (lower.contains("dns") || lower.contains("network")) {
             AppError::NetworkUnavailable
         } else {
@@ -420,6 +453,35 @@ mod tests {
         assert_eq!(classified.class, RetryClass::Retryable);
         assert!(is_connect_stage_eof(&classified.error));
         assert_eq!(error_category(&classified.error), "connect_eof");
+        match classified.error {
+            AppError::ConnectionFailed(message) => {
+                assert!(message.contains("tls handshake eof"));
+            }
+            other => panic!("expected ConnectionFailed, got {other}"),
+        }
+    }
+
+    #[test]
+    fn connect_stage_timeout_is_connection_failed_not_request_timeout() {
+        let classified = classify_io(
+            "error sending request for url (https://openrouter.ai/api/v1/audio/transcriptions): error trying to connect: tcp connect error: connection timed out",
+        );
+        assert_eq!(classified.class, RetryClass::Retryable);
+        match classified.error {
+            AppError::ConnectionFailed(message) => {
+                assert!(message.contains("connection timed out"));
+            }
+            other => panic!("expected ConnectionFailed, got {other}"),
+        }
+    }
+
+    #[test]
+    fn total_request_timeout_stays_request_timeout() {
+        let classified = classify_io(
+            "error sending request for url (https://openrouter.ai/api/v1/audio/transcriptions): operation timed out",
+        );
+        assert_eq!(classified.error, AppError::RequestTimeout);
+        assert_eq!(classified.error.user_message(), "Превышено время ожидания");
     }
 
     #[test]

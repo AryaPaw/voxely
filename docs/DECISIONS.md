@@ -20,7 +20,7 @@ A dedicated `RetryScheduler` owns attempts. Defaults:
 
 Retry-After is honored but never past the remaining deadline.
 
-All live STT, History retry, Compare, and connection checks share one process `OpenRouterTransport`: HTTP/1.1, rustls, idle pool of 2. The client is rebuilt only when the connect-timeout fingerprint changes. Recording start may prewarm TLS with `GET /models` and no API key.
+All live STT, History retry, Compare, and connection checks share one process `OpenRouterTransport`: HTTP/1.1, rustls, idle pool of 2. The client is rebuilt only when the connect timeout changes. Recording start prewarms with completed `HEAD /models` (GET fallback with a bounded body) so HTTP/1 can return the socket to the pool. Prewarm does not use an API key. Connect-stage TLS EOF and connect timeouts stay `ConnectionFailed`; only a total request timeout is `RequestTimeout`.
 
 ## Alternatives
 
@@ -30,7 +30,7 @@ TCP-level connectivity ping loops: rejected; the STT request is the source of tr
 
 Per-job `reqwest::Client` with `pool_max_idle_per_host(0)`: rejected; it forced a new TLS handshake on every attempt.
 
-Switching to Schannel/`native-tls`: rejected for the VPN handshake-eof; Schannel failed the same way.
+Switching to Schannel/`native-tls`: rejected. Windows curl/Schannel A/B reproduced the same ~5.02 s TLS handshake failure against OpenRouter; the peer close is outside rustls.
 
 Idempotency-Key: not documented by OpenRouter for STT, so retries remain bounded and may double-bill if the server succeeded and the response was lost.
 

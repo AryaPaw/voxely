@@ -104,18 +104,6 @@ impl AppError {
             Self::Interrupted => "Interrupted",
         }
     }
-
-    pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
-            Self::NetworkUnavailable
-                | Self::ConnectionFailed(_)
-                | Self::RequestTimeout
-                | Self::RateLimited
-                | Self::ProviderUnavailable
-                | Self::OpenRouterServerError
-        )
-    }
 }
 
 #[cfg(test)]
