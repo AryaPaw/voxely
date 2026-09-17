@@ -4,7 +4,7 @@ version = "0.2.11"
 description = "Windows voice dictation with bounded OpenRouter retries"
 authors = ["Voxely"]
 edition = "2021"
-rust-version = "1.85.0"
+rust-version = "1.89.0"
 license = "AGPL-3.0-or-later"
 default-run = "voxely"
 

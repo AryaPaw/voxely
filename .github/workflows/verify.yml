@@ -22,13 +22,26 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
+      - name: Read MSRV
+        id: msrv
+        working-directory: src-tauri
+        shell: pwsh
+        run: |
+          $line = Select-String -Path Cargo.toml -Pattern '^rust-version\s*=\s*"([^"]+)"' | Select-Object -First 1
+          if (-not $line) { throw "Cargo.toml rust-version not found" }
+          $version = $line.Matches[0].Groups[1].Value
+          echo "version=$version" >> $env:GITHUB_OUTPUT
+          Write-Host "MSRV $version"
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
         with:
-          toolchain: 1.85.0
-          components: rustfmt, clippy
+          toolchain: ${{ steps.msrv.outputs.version }}
       - name: MSRV compile
         working-directory: src-tauri
         run: cargo build --locked --all-targets
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
       - name: Build date from CI
         shell: pwsh
         run: echo "VOXELY_BUILD_DATE=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))" >> $env:GITHUB_ENV
@@ -47,13 +60,6 @@ jobs:
         run: |
           cargo install cargo-llvm-cov --locked --version 0.6.16
           ./scripts/check-rust-coverage.ps1
-      - name: MSRV field matches Cargo.toml
-        working-directory: src-tauri
-        shell: pwsh
-        run: |
-          $msrv = (Select-String -Path Cargo.toml -Pattern '^rust-version\s*=').Line.Split('=')[1].Trim().Trim('"')
-          if ($msrv -ne "1.85.0") { throw "expected rust-version 1.85.0, got $msrv" }
-          Write-Host "MSRV $msrv (lock graph requires reqwest 0.13 via Tauri)"
       - name: Version SSOT
         shell: pwsh
         run: ./scripts/check-version.ps1
