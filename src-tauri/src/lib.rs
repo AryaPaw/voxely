@@ -15,12 +15,10 @@ mod transcription;
 mod updates;
 mod windows_int;
 
-use std::path::Path;
 use std::sync::Arc;
 
 use tauri::Manager;
 use tauri_plugin_autostart::MacosLauncher;
-use tracing_subscriber::EnvFilter;
 
 use crate::app::lifecycle::{
     apply_launch_visibility, attach_context, configure_tray, hide_main_to_tray, reregister_hotkey,
@@ -28,31 +26,6 @@ use crate::app::lifecycle::{
 };
 use crate::app::session::{prepare_overlay_window, AppContext};
 use crate::commands::*;
-
-fn init_logging(debug: bool, log_dir: Option<&Path>) {
-    let filter = if debug {
-        "info,voxely_lib=debug"
-    } else {
-        "warn,voxely_lib=info"
-    };
-    let subscriber = tracing_subscriber::fmt().with_env_filter(EnvFilter::new(filter));
-    if let Some(dir) = log_dir {
-        let _ = std::fs::create_dir_all(dir);
-        let file_appender = match crate::logging::file_appender(dir) {
-            Ok(appender) => appender,
-            Err(_) => {
-                let _ = subscriber.try_init();
-                return;
-            }
-        };
-        let _ = subscriber
-            .with_ansi(false)
-            .with_writer(file_appender)
-            .try_init();
-    } else {
-        let _ = subscriber.try_init();
-    }
-}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -79,7 +52,7 @@ pub fn run() {
             let debug = ctx.settings.lock().debug_logging;
             let start_with_windows = ctx.settings.lock().start_with_windows;
             let logs = ctx.data_dir.join("logs");
-            init_logging(debug, Some(&logs));
+            crate::logging::init(debug, Some(&logs));
             app.manage(ctx);
             configure_tray(app.handle())?;
             if let Err(err) = sync_autostart(app.handle(), start_with_windows) {
@@ -130,6 +103,7 @@ pub fn run() {
             discover_models,
             toggle_dictation,
             retry_recording,
+            cancel_history_retry,
             open_logs,
             open_settings_dir,
             reset_settings,

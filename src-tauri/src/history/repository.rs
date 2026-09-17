@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use uuid::Uuid;
 
 use crate::error::AppError;
@@ -101,6 +102,8 @@ impl HistoryRepo {
             std::fs::create_dir_all(parent).map_err(|e| AppError::StorageFailed(e.to_string()))?;
         }
         let conn = Connection::open(path).map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        conn.busy_timeout(Duration::from_secs(5))
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
         conn.execute_batch(
             r#"
             PRAGMA journal_mode=WAL;
@@ -140,6 +143,7 @@ impl HistoryRepo {
             );
             CREATE INDEX IF NOT EXISTS idx_recordings_created ON recordings(created_at);
             CREATE INDEX IF NOT EXISTS idx_recordings_search ON recordings(model);
+            CREATE INDEX IF NOT EXISTS idx_attempts_recording ON transcription_attempts(recording_id);
             "#,
         )
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
@@ -249,11 +253,11 @@ impl HistoryRepo {
                 .query_row("SELECT COUNT(*) FROM recordings", [], |row| row.get(0))
                 .map_err(|e| AppError::StorageFailed(e.to_string())),
             Some(q) => {
-                let like = format!("%{q}%");
+                let like = like_pattern(q);
                 self.conn
                     .query_row(
-                        "SELECT COUNT(*) FROM recordings WHERE transcript LIKE ?1
-                         OR last_error_message LIKE ?1 OR last_error_code LIKE ?1 OR model LIKE ?1",
+                        "SELECT COUNT(*) FROM recordings WHERE transcript LIKE ?1 ESCAPE '\\'
+                         OR last_error_message LIKE ?1 ESCAPE '\\' OR last_error_code LIKE ?1 ESCAPE '\\' OR model LIKE ?1 ESCAPE '\\'",
                         params![like],
                         |row| row.get(0),
                     )
@@ -282,14 +286,9 @@ impl HistoryRepo {
                 rows.collect::<Result<Vec<_>, _>>()
                     .map_err(|e| AppError::StorageFailed(e.to_string()))?
             }
-            (Some(id), None) => {
-                let Some(anchor) = self.get(id)? else {
-                    return Ok(HistoryPage {
-                        items: Vec::new(),
-                        next_cursor: None,
-                        total: self.count(None)?,
-                        has_more: false,
-                    });
+            (Some(cursor), None) => {
+                let Some((created_at, id)) = decode_cursor(self, cursor)? else {
+                    return self.list_page(None, limit, None);
                 };
                 let mut stmt = self
                     .conn
@@ -300,21 +299,18 @@ impl HistoryRepo {
                     )
                     .map_err(|e| AppError::StorageFailed(e.to_string()))?;
                 let rows = stmt
-                    .query_map(
-                        params![anchor.created_at.to_rfc3339(), anchor.id, limit + 1],
-                        row_to_recording,
-                    )
+                    .query_map(params![created_at, id, limit + 1], row_to_recording)
                     .map_err(|e| AppError::StorageFailed(e.to_string()))?;
                 rows.collect::<Result<Vec<_>, _>>()
                     .map_err(|e| AppError::StorageFailed(e.to_string()))?
             }
             (None, Some(q)) => {
-                let like = format!("%{q}%");
+                let like = like_pattern(q);
                 let mut stmt = self
                     .conn
                     .prepare(
-                        "SELECT * FROM recordings WHERE transcript LIKE ?1
-                         OR last_error_message LIKE ?1 OR last_error_code LIKE ?1 OR model LIKE ?1
+                        "SELECT * FROM recordings WHERE transcript LIKE ?1 ESCAPE '\\'
+                         OR last_error_message LIKE ?1 ESCAPE '\\' OR last_error_code LIKE ?1 ESCAPE '\\' OR model LIKE ?1 ESCAPE '\\'
                          ORDER BY created_at DESC, id DESC LIMIT ?2",
                     )
                     .map_err(|e| AppError::StorageFailed(e.to_string()))?;
@@ -324,30 +320,22 @@ impl HistoryRepo {
                 rows.collect::<Result<Vec<_>, _>>()
                     .map_err(|e| AppError::StorageFailed(e.to_string()))?
             }
-            (Some(id), Some(q)) => {
-                let Some(anchor) = self.get(id)? else {
-                    return Ok(HistoryPage {
-                        items: Vec::new(),
-                        next_cursor: None,
-                        total: self.count(Some(q))?,
-                        has_more: false,
-                    });
+            (Some(cursor), Some(q)) => {
+                let like = like_pattern(q);
+                let Some((created_at, id)) = decode_cursor(self, cursor)? else {
+                    return self.list_page(None, limit, Some(q));
                 };
-                let like = format!("%{q}%");
                 let mut stmt = self
                     .conn
                     .prepare(
-                        "SELECT * FROM recordings WHERE (transcript LIKE ?1
-                         OR last_error_message LIKE ?1 OR last_error_code LIKE ?1 OR model LIKE ?1)
+                        "SELECT * FROM recordings WHERE (transcript LIKE ?1 ESCAPE '\\'
+                         OR last_error_message LIKE ?1 ESCAPE '\\' OR last_error_code LIKE ?1 ESCAPE '\\' OR model LIKE ?1 ESCAPE '\\')
                          AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))
                          ORDER BY created_at DESC, id DESC LIMIT ?4",
                     )
                     .map_err(|e| AppError::StorageFailed(e.to_string()))?;
                 let rows = stmt
-                    .query_map(
-                        params![like, anchor.created_at.to_rfc3339(), anchor.id, limit + 1],
-                        row_to_recording,
-                    )
+                    .query_map(params![like, created_at, id, limit + 1], row_to_recording)
                     .map_err(|e| AppError::StorageFailed(e.to_string()))?;
                 rows.collect::<Result<Vec<_>, _>>()
                     .map_err(|e| AppError::StorageFailed(e.to_string()))?
@@ -358,7 +346,7 @@ impl HistoryRepo {
             items.truncate(limit as usize);
         }
         let next_cursor = if has_more {
-            items.last().map(|rec| rec.id.clone())
+            items.last().map(encode_cursor)
         } else {
             None
         };
@@ -391,9 +379,19 @@ impl HistoryRepo {
     }
 
     pub fn delete(&self, id: &str) -> Result<bool, AppError> {
-        let changed = self
+        let tx = self
             .conn
+            .unchecked_transaction()
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM transcription_attempts WHERE recording_id=?1",
+            params![id],
+        )
+        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        let changed = tx
             .execute("DELETE FROM recordings WHERE id=?1", params![id])
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        tx.commit()
             .map_err(|e| AppError::StorageFailed(e.to_string()))?;
         Ok(changed > 0)
     }
@@ -406,24 +404,42 @@ impl HistoryRepo {
     }
 
     pub fn insert_attempt(&self, attempt: &TranscriptionAttempt) -> Result<(), AppError> {
-        self.conn
-            .execute(
-                "INSERT INTO transcription_attempts (
+        self.record_attempt(attempt)
+    }
+
+    pub fn record_attempt(&self, attempt: &TranscriptionAttempt) -> Result<(), AppError> {
+        let tx = self
+            .conn
+            .unchecked_transaction()
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        tx.execute(
+            "INSERT INTO transcription_attempts (
                     id, recording_id, attempt_number, started_at, ended_at, outcome,
                     error_category, http_status, latency_ms
                 ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                params![
-                    attempt.id,
-                    attempt.recording_id,
-                    attempt.attempt_number,
-                    attempt.started_at.to_rfc3339(),
-                    attempt.ended_at.map(|t| t.to_rfc3339()),
-                    attempt.outcome,
-                    attempt.error_category,
-                    attempt.http_status,
-                    attempt.latency_ms
-                ],
-            )
+            params![
+                attempt.id,
+                attempt.recording_id,
+                attempt.attempt_number,
+                attempt.started_at.to_rfc3339(),
+                attempt.ended_at.map(|t| t.to_rfc3339()),
+                attempt.outcome,
+                attempt.error_category,
+                attempt.http_status,
+                attempt.latency_ms
+            ],
+        )
+        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        tx.execute(
+            "UPDATE recordings SET attempt_count = MAX(attempt_count, ?1), updated_at=?2 WHERE id=?3",
+            params![
+                attempt.attempt_number,
+                Utc::now().to_rfc3339(),
+                attempt.recording_id
+            ],
+        )
+        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        tx.commit()
             .map_err(|e| AppError::StorageFailed(e.to_string()))?;
         Ok(())
     }
@@ -551,6 +567,29 @@ fn recording_to_summary(rec: Recording) -> RecordingSummary {
         generation_id: rec.generation_id,
         latency_ms: rec.latency_ms,
     }
+}
+
+fn like_pattern(query: &str) -> String {
+    let escaped = query
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    format!("%{escaped}%")
+}
+
+fn encode_cursor(rec: &Recording) -> String {
+    format!("{}|{}", rec.created_at.to_rfc3339(), rec.id)
+}
+
+fn decode_cursor(repo: &HistoryRepo, cursor: &str) -> Result<Option<(String, String)>, AppError> {
+    if let Some((created_at, id)) = cursor.split_once('|') {
+        if !created_at.is_empty() && !id.is_empty() {
+            return Ok(Some((created_at.to_string(), id.to_string())));
+        }
+    }
+    Ok(repo
+        .get(cursor)?
+        .map(|rec| (rec.created_at.to_rfc3339(), rec.id)))
 }
 
 fn parse_time(value: String) -> DateTime<Utc> {
@@ -703,5 +742,42 @@ mod tests {
         let found = repo.list_page(None, 10, Some("needle")).unwrap();
         assert_eq!(found.total, 1);
         assert_eq!(found.items[0].transcript.as_deref(), Some("needle unique"));
+        repo.delete(&page.items[2].id).unwrap();
+        let after_delete = repo
+            .list_page(page.next_cursor.as_deref(), 3, None)
+            .unwrap();
+        assert!(!after_delete.items.is_empty());
+        assert!(after_delete
+            .items
+            .iter()
+            .all(|item| item.id != page.items[2].id));
+        let literal = repo.list_page(None, 10, Some("%")).unwrap();
+        assert_eq!(literal.total, 0);
+    }
+
+    #[test]
+    fn record_attempt_bumps_count_in_one_transaction() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("h.db")).unwrap();
+        let rec = new_recording("m".into());
+        repo.insert(&rec).unwrap();
+        repo.record_attempt(&TranscriptionAttempt {
+            id: "a1".into(),
+            recording_id: rec.id.clone(),
+            attempt_number: 2,
+            started_at: rec.created_at,
+            ended_at: Some(rec.created_at),
+            outcome: "success".into(),
+            error_category: None,
+            http_status: Some(200),
+            latency_ms: Some(12),
+        })
+        .unwrap();
+        let kept = repo.get(&rec.id).unwrap().unwrap();
+        assert_eq!(kept.attempt_count, 2);
+        assert_eq!(repo.list_attempts(&rec.id).unwrap().len(), 1);
+        assert!(repo.delete(&rec.id).unwrap());
+        assert!(repo.get(&rec.id).unwrap().is_none());
+        assert!(repo.list_attempts(&rec.id).unwrap().is_empty());
     }
 }

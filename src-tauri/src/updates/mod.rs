@@ -9,7 +9,7 @@ use tauri_plugin_updater::UpdaterExt;
 use crate::app::lifecycle::is_local_build;
 use crate::app::session::AppContext;
 
-use policy::{install_allowed, is_newer_stable};
+use policy::{install_allowed, is_newer_stable, restart_after_install_allowed};
 
 pub fn current_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
@@ -160,7 +160,12 @@ async fn try_check(app: &AppHandle, install: bool) -> Result<UpdateCode, String>
             ctx.update_installing
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             match result {
-                Ok(()) => Ok(UpdateCode::Installed),
+                Ok(()) => {
+                    if !restart_after_install_allowed(crate::app::operations::system_busy(&ctx)) {
+                        return Ok(UpdateCode::Deferred);
+                    }
+                    Ok(UpdateCode::Installed)
+                }
                 Err(err) => {
                     tracing::error!(error = %err, "update install failed");
                     Ok(UpdateCode::Failed)

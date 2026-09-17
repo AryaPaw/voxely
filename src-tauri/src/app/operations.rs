@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use crate::app::machine::{is_cancellable, SessionState};
 use crate::app::session::AppContext;
+use crate::history::repository::RecordingStatus;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionLease {
@@ -11,6 +12,10 @@ pub struct SessionLease {
 
 pub fn lease_matches(expected: u64, current: u64) -> bool {
     expected == current && expected != 0
+}
+
+pub fn escape_cancels(ctx: &AppContext) -> bool {
+    is_cancellable(&ctx.state.lock()) || !ctx.in_flight.lock().is_empty()
 }
 
 pub fn system_busy(ctx: &AppContext) -> bool {
@@ -68,8 +73,12 @@ pub fn protected_audio_names(ctx: &AppContext) -> HashSet<String> {
     names
 }
 
+pub fn user_may_delete_recording(status: &RecordingStatus, listed_in_use: bool) -> bool {
+    !matches!(status, RecordingStatus::Processing) || !listed_in_use
+}
+
 pub fn hide_overlay_allowed(_state: &SessionState, expected: u64, current: u64) -> bool {
-    lease_matches(expected, current)
+    expected == current
 }
 
 #[cfg(test)]
@@ -88,6 +97,25 @@ mod tests {
     fn hide_blocked_while_new_session_live() {
         assert!(hide_overlay_allowed(&SessionState::Recording, 2, 2));
         assert!(hide_overlay_allowed(&SessionState::Idle, 2, 2));
+        assert!(hide_overlay_allowed(&SessionState::Idle, 0, 0));
         assert!(!hide_overlay_allowed(&SessionState::Idle, 2, 3));
+    }
+
+    #[test]
+    fn failed_clip_can_be_deleted_even_if_listed_in_use() {
+        assert!(user_may_delete_recording(&RecordingStatus::Failed, true));
+        assert!(user_may_delete_recording(&RecordingStatus::Completed, true));
+        assert!(user_may_delete_recording(
+            &RecordingStatus::Interrupted,
+            true
+        ));
+        assert!(user_may_delete_recording(
+            &RecordingStatus::Processing,
+            false
+        ));
+        assert!(!user_may_delete_recording(
+            &RecordingStatus::Processing,
+            true
+        ));
     }
 }

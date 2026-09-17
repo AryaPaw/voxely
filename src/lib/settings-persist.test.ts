@@ -13,5 +13,8 @@ describe("settings persist protocol", () => {
     expect(nextWriteSeq(3)).toBe(4);
     expect(shouldKeepOptimistic({ writeSeq: 5 }, 4)).toBe(true);
     expect(shouldKeepOptimistic({ writeSeq: 4 }, 4)).toBe(false);
+    expect(shouldKeepOptimistic(null, 1)).toBe(false);
+    expect(acceptSavedSettings(null, { writeSeq: 1 })).toEqual({ writeSeq: 1 });
+    expect(acceptSavedSettings({ writeSeq: 1 }, { writeSeq: 0 })).toEqual({ writeSeq: 1 });
   });
 });

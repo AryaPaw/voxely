@@ -10,6 +10,12 @@ pub fn insert_transcript_now(
     hotkey: &str,
 ) -> InsertOutcome {
     let abort_ref: &dyn Fn() -> bool = &abort;
+    let skip = [overlay_root, main_root]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let live = native::capture_session_target(&skip, captured.map(|t| t.generation).unwrap_or(0));
+    let captured = resolve_captured_insert_target(captured, live, overlay_root, main_root);
     let mut world = native::LiveWorld {
         overlay_root,
         main_root,
@@ -47,8 +53,7 @@ pub mod native {
         VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, SendMessageTimeoutW,
-        SetForegroundWindow, SMTO_ABORTIFHUNG, WM_CHAR,
+        GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, SetForegroundWindow,
     };
 
     pub struct LiveWorld {
@@ -69,10 +74,12 @@ pub mod native {
                 let (target_alive, target_iconic, window_class, integrity_blocked) =
                     if let Some(target) = captured {
                         let hwnd = HWND(target.hwnd as *mut _);
-                        let alive = IsWindow(hwnd).as_bool();
+                        let window_ok = IsWindow(hwnd).as_bool();
+                        let root = if window_ok { root_hwnd(hwnd) } else { hwnd };
+                        let alive = window_ok && pid_matches(hwnd, target.pid);
                         (
                             alive,
-                            alive && IsIconic(hwnd).as_bool(),
+                            alive && IsIconic(root).as_bool(),
                             if alive { window_class_name(hwnd) } else { None },
                             if alive {
                                 integrity_blocked(target.pid)
@@ -136,9 +143,6 @@ pub mod native {
         fn send_keys(&mut self, keys: &[InsertKey]) -> ChunkSend {
             if keys.is_empty() {
                 return ChunkSend::Complete;
-            }
-            if let Some(focus) = unsafe { chromium_focus_hwnd() } {
-                return send_chromium_chars(focus, keys);
             }
             let mut inputs = Vec::with_capacity(keys.len() * 2);
             for key_plan in keys {
@@ -352,58 +356,10 @@ pub mod native {
         Some(String::from_utf16_lossy(&buf[..n as usize]))
     }
 
-    unsafe fn chromium_focus_hwnd() -> Option<HWND> {
-        let fg = GetForegroundWindow();
-        let focus = thread_focus_hwnd(fg).unwrap_or(fg);
-        let focus_class = window_class_name(focus);
-        let root_class = hwnd_root_value(fg).and_then(|_| window_class_name(root_hwnd(fg)));
-        if focus_class.as_deref().is_some_and(super::is_chromium_host)
-            || root_class.as_deref().is_some_and(super::is_chromium_host)
-        {
-            Some(focus)
-        } else {
-            None
-        }
-    }
-
-    fn send_chromium_chars(hwnd: HWND, keys: &[InsertKey]) -> ChunkSend {
-        use windows::Win32::Foundation::{LPARAM, WPARAM};
-        let mut accepted = 0u32;
-        let planned = (keys.len() * 2) as u32;
-        for key_plan in keys {
-            match key_plan {
-                InsertKey::Unicode(unit) => {
-                    let mut result = 0usize;
-                    let ok = unsafe {
-                        SendMessageTimeoutW(
-                            hwnd,
-                            WM_CHAR,
-                            WPARAM(usize::from(*unit)),
-                            LPARAM(1),
-                            SMTO_ABORTIFHUNG,
-                            50,
-                            Some(&mut result),
-                        )
-                    };
-                    if ok.0 != 0 {
-                        accepted += 2;
-                    } else if accepted == 0 {
-                        return ChunkSend::Zero;
-                    } else {
-                        return ChunkSend::Partial { accepted };
-                    }
-                }
-                InsertKey::VirtualKey(vk) => {
-                    let inputs = [key(*vk, false), key(*vk, true)];
-                    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
-                    if sent != 2 {
-                        return classify_chunk_send(accepted + sent as u32, planned);
-                    }
-                    accepted += 2;
-                }
-            }
-        }
-        ChunkSend::Complete
+    unsafe fn pid_matches(hwnd: HWND, expected: u32) -> bool {
+        let mut pid = 0u32;
+        let _ = GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        pid != 0 && pid == expected
     }
 
     unsafe fn root_hwnd(hwnd: HWND) -> HWND {
@@ -545,15 +501,28 @@ pub mod native {
             .map_err(|e| AppError::TextInsertionFailed(e.to_string()))?;
         let ptr = GlobalLock(handle);
         if ptr.is_null() {
+            free_hglobal(handle);
             return Err(AppError::TextInsertionFailed(
                 "clipboard lock failed".into(),
             ));
         }
         std::ptr::copy_nonoverlapping(encoded.as_ptr() as *const u8, ptr as *mut u8, bytes);
         GlobalUnlock(handle).ok();
-        SetClipboardData(13, HANDLE(handle.0))
-            .map_err(|e| AppError::TextInsertionFailed(e.to_string()))?;
+        if let Err(err) = SetClipboardData(13, HANDLE(handle.0)) {
+            free_hglobal(handle);
+            return Err(AppError::TextInsertionFailed(err.to_string()));
+        }
         Ok(())
+    }
+
+    fn free_hglobal(handle: windows::Win32::Foundation::HGLOBAL) {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GlobalFree(hmem: *mut core::ffi::c_void) -> *mut core::ffi::c_void;
+        }
+        unsafe {
+            let _ = GlobalFree(handle.0);
+        }
     }
 }
 
@@ -635,17 +604,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn insert_stays_on_start_capture() {
+    fn insert_prefers_live_focus() {
         let desktop = NativeHwnd { value: 1 };
         let field = NativeHwnd { value: 2 };
         let overlay = NativeHwnd { value: 3 };
         let main = NativeHwnd { value: 4 };
         assert_eq!(
             resolve_insert_target(Some(desktop), Some(field), Some(overlay), Some(main)),
+            Some(field)
+        );
+        assert_eq!(
+            resolve_insert_target(Some(desktop), Some(overlay), Some(overlay), Some(main)),
             Some(desktop)
         );
         assert_eq!(
-            resolve_insert_target(Some(overlay), Some(field), Some(overlay), Some(main)),
+            resolve_insert_target(None, Some(field), Some(overlay), Some(main)),
             Some(field)
         );
         assert!(capture_skips_voxely_roots(1, Some(1), Some(2)));

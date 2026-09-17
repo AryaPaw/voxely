@@ -1,5 +1,6 @@
 import { memo, useEffect, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   api,
   type AppSettings,
@@ -65,7 +66,15 @@ export function FilterSettings({
   }, [copy, recording, settings.activePresetId, signature]);
 
   useEffect(() => {
+    let cancelled = false;
+    const unlisten = listen<boolean>("filter://sample", (event) => {
+      if (!cancelled) {
+        setRecording(event.payload);
+      }
+    });
     return () => {
+      cancelled = true;
+      void unlisten.then((fn) => fn());
       void api.stopFilterSample().catch(() => undefined);
     };
   }, []);

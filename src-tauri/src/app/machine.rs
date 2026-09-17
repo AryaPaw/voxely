@@ -69,6 +69,12 @@ pub fn apply_event(
         (SessionState::Recording, SessionEvent::Failed(err)) => failed(err),
         (SessionState::Recording, SessionEvent::Cancelled) => SessionState::Idle,
         (SessionState::Recording, SessionEvent::Shutdown) => SessionState::StoppingRecording,
+        (SessionState::Idle, SessionEvent::TranscriptAttemptStarted { attempt }) => {
+            SessionState::Transcribing { attempt: *attempt }
+        }
+        (SessionState::Failed { .. }, SessionEvent::TranscriptAttemptStarted { attempt }) => {
+            SessionState::Transcribing { attempt: *attempt }
+        }
         (SessionState::StoppingRecording, SessionEvent::Saved) => SessionState::Saving,
         (SessionState::StoppingRecording, SessionEvent::SaveFailed(err)) => failed(err),
         (SessionState::StoppingRecording, SessionEvent::Failed(err)) => failed(err),
@@ -146,6 +152,28 @@ pub fn is_recording_active(state: &SessionState) -> bool {
         state,
         SessionState::StartingRecording | SessionState::Recording | SessionState::StoppingRecording
     )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToggleHotkeyAction {
+    Start,
+    Stop,
+    Cancel,
+    Ignore,
+}
+
+pub fn toggle_hotkey_action(state: &SessionState) -> ToggleHotkeyAction {
+    match state {
+        SessionState::Idle | SessionState::Failed { .. } | SessionState::Completed => {
+            ToggleHotkeyAction::Start
+        }
+        SessionState::StartingRecording | SessionState::Recording => ToggleHotkeyAction::Stop,
+        SessionState::StoppingRecording
+        | SessionState::Saving
+        | SessionState::ProcessingAudio
+        | SessionState::Transcribing { .. }
+        | SessionState::RetryWaiting { .. } => ToggleHotkeyAction::Cancel,
+    }
 }
 
 pub fn is_cancellable(state: &SessionState) -> bool {
@@ -292,6 +320,35 @@ mod tests {
         assert!(!is_recording_active(&SessionState::Transcribing {
             attempt: 1
         }));
+    }
+
+    #[test]
+    fn transcribing_hotkey_cancels() {
+        assert_eq!(
+            toggle_hotkey_action(&SessionState::Transcribing { attempt: 1 }),
+            ToggleHotkeyAction::Cancel
+        );
+        assert_eq!(
+            toggle_hotkey_action(&SessionState::Idle),
+            ToggleHotkeyAction::Start
+        );
+        assert_eq!(
+            toggle_hotkey_action(&SessionState::Recording),
+            ToggleHotkeyAction::Stop
+        );
+    }
+
+    #[test]
+    fn idle_save_does_not_revive_pipeline() {
+        let err = apply_event(SessionState::Idle, SessionEvent::Saved).unwrap_err();
+        assert!(err.event.contains("Saved"));
+    }
+
+    #[test]
+    fn retry_from_idle_enters_transcribing() {
+        let state = walk(&[SessionEvent::TranscriptAttemptStarted { attempt: 1 }]);
+        assert_eq!(state, SessionState::Transcribing { attempt: 1 });
+        assert!(is_cancellable(&state));
     }
 
     #[test]

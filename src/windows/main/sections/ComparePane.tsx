@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { api, type AppSettings, type CompareState } from "../../../lib/api";
@@ -33,6 +33,7 @@ export function ComparePane({
 }) {
   const [state, setState] = useState<CompareState>(emptyState);
   const [error, setError] = useState("");
+  const audioRef = useRef<HTMLAudioElement | null>(null);
   const models = useMemo(() => settings.compareModels ?? [], [settings.compareModels]);
   const unique = useMemo(() => new Set(models.map((item) => item.trim())), [models]);
   const canRun =
@@ -46,15 +47,32 @@ export function ComparePane({
     [...unique].every((item) => item.length > 0);
 
   useEffect(() => {
-    void api
-      .getModelCompare()
-      .then(setState)
-      .catch(() => undefined);
+    let cancelled = false;
     const unlisten = listen<CompareState>("compare://state", (event) => {
       setState(event.payload);
     });
+    void api
+      .getModelCompare()
+      .then((next) => {
+        if (!cancelled) {
+          setState(next);
+        }
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) {
+          setError(formatInvokeError(err, copy));
+        }
+      });
     return () => {
+      cancelled = true;
       void unlisten.then((fn) => fn());
+    };
+  }, [copy]);
+
+  useEffect(() => {
+    const node = audioRef.current;
+    return () => {
+      node?.pause();
     };
   }, []);
 
@@ -100,7 +118,12 @@ export function ComparePane({
           <Button
             type="button"
             variant="outline"
-            onClick={() => void api.cancelModelCompare().then(setState)}
+            onClick={() =>
+              void api
+                .cancelModelCompare()
+                .then(setState)
+                .catch((err: unknown) => setError(formatInvokeError(err, copy)))
+            }
           >
             {copy.cancel}
           </Button>
@@ -122,6 +145,7 @@ export function ComparePane({
       {error ? <p className="mb-3 text-sm text-destructive">{error}</p> : null}
       {state.listenPath ? (
         <audio
+          ref={audioRef}
           key={state.nonce}
           className="mb-4 w-full max-w-lg"
           controls
@@ -132,10 +156,10 @@ export function ComparePane({
       )}
       <div className="grid gap-3 md:grid-cols-2">
         {models.map((model, index) => {
-          const slot = state.slots[index];
+          const slot = compareSlotForModel(state, model);
           return (
             <div
-              key={slot?.slotId ?? `model-${index}`}
+              key={slot?.slotId ?? `compare-row-${index}`}
               className="rounded-lg border border-border p-3"
             >
               <Input
@@ -183,6 +207,15 @@ export function ComparePane({
         })}
       </div>
     </div>
+  );
+}
+
+function compareSlotForModel(state: CompareState, model: string) {
+  const trimmed = model.trim();
+  const runId = state.runId ?? null;
+  return (
+    state.slots.find((slot) => slot.model === trimmed && (slot.runId ?? null) === runId) ??
+    state.slots.find((slot) => slot.slotId && slot.model === trimmed)
   );
 }
 

@@ -16,7 +16,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"docs/**/*.md\" README.md package.json vite.config.ts eslint.config.js",
     "version:set": "pwsh -File scripts/set-version.ps1",
-    "verify": "bun run typecheck && bun run lint && bun run format:check && bun run coverage && cargo fmt --all --check --manifest-path src-tauri/Cargo.toml && cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings && cargo test --locked --manifest-path src-tauri/Cargo.toml --all && pwsh -File scripts/check-version.ps1",
+    "verify": "bun run typecheck && bun run lint && bun run format:check && bun run coverage && cargo fmt --all --check --manifest-path src-tauri/Cargo.toml && cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings && cargo test --locked --manifest-path src-tauri/Cargo.toml --all && pwsh -File scripts/check-version.ps1 && pwsh -File scripts/check-rust-coverage.ps1",
     "docs:shots": "vite --config scripts/readme-shots/vite.config.ts"
   },
   "packageManager": "bun@1.4.2",

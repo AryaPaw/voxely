@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use crate::error::AppError;
 use crate::transcription::retry::{
     classify_http, classify_io, classify_reqwest, error_category, error_chain, parse_retry_after,
-    truncated_body, AttemptDecision, ClassifiedError, RetryClass, RetryPolicy, RetryScheduler,
+    AttemptDecision, ClassifiedError, RetryClass, RetryPolicy, RetryScheduler,
 };
 
 const DEFAULT_BASE: &str = "https://openrouter.ai/api/v1";
@@ -441,8 +441,7 @@ async fn one_attempt(
         .and_then(|v| parse_retry_after(v, chrono::Utc::now()));
     let body = response.text().await.map_err(|e| classify_reqwest(&e))?;
     if !(200..300).contains(&status) {
-        let snippet = truncated_body(&body);
-        tracing::warn!(status, body = %snippet, "stt http error");
+        tracing::warn!(status, "stt http error");
         return Err(classify_http(status, retry_after, &body));
     }
     let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|_| ClassifiedError {

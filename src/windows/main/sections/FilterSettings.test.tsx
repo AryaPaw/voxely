@@ -21,7 +21,21 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
 }));
 
-afterEach(() => cleanup());
+const filterSampleHandlers: Array<(event: { payload: boolean }) => void> = [];
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: vi.fn(async (event: string, handler: (event: { payload: boolean }) => void) => {
+    if (event === "filter://sample") {
+      filterSampleHandlers.push(handler);
+    }
+    return () => undefined;
+  }),
+}));
+
+afterEach(() => {
+  cleanup();
+  filterSampleHandlers.length = 0;
+});
 
 function preset(): DspPreset {
   return {
@@ -141,5 +155,16 @@ describe("FilterSettings", () => {
     expect(clips).toHaveLength(2);
     expect(clips[0]).toHaveAttribute("src", "a.wav?n=1");
     expect(clips[1]).toHaveAttribute("src", "b.wav?n=1");
+  });
+
+  it("follows filter sample events from the backend", async () => {
+    render(
+      <FilterSettings settings={settings()} copy={messagesFor("en")} onChange={() => undefined} />,
+    );
+    await waitFor(() => {
+      expect(filterSampleHandlers.length).toBeGreaterThan(0);
+    });
+    filterSampleHandlers[0]({ payload: true });
+    expect(await screen.findByRole("button", { name: "Stop" })).toBeInTheDocument();
   });
 });

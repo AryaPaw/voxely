@@ -21,7 +21,8 @@ pub const MAX_WAV_BYTES: u64 = 20 * 1024 * 1024;
 pub const MAX_PCM16_FRAMES: u64 = (MAX_WAV_BYTES - 44) / 2;
 const CAPTURE_POLL: Duration = Duration::from_millis(16);
 const START_TIMEOUT: Duration = Duration::from_secs(8);
-const HUNG_JOIN_GRACE: Duration = Duration::from_millis(250);
+const HUNG_JOIN_GRACE: Duration = Duration::from_millis(50);
+const JOIN_BOUND: Duration = Duration::from_secs(8);
 
 pub const METER_BINS: usize = 48;
 const METER_HOPS_PER_SEC: u32 = 16;
@@ -57,6 +58,7 @@ pub struct CaptureSession {
     stop: Arc<AtomicBool>,
     meter: Arc<Mutex<MeterSample>>,
     thread: Option<JoinHandle<Result<CaptureResult, AppError>>>,
+    fallback: Arc<AtomicBool>,
 }
 
 pub struct CaptureResult {
@@ -91,17 +93,27 @@ impl CaptureSession {
         let device_name = device_name.map(str::to_string);
         let stop = Arc::new(AtomicBool::new(false));
         let meter = Arc::new(Mutex::new(MeterSample::silent()));
+        let fallback = Arc::new(AtomicBool::new(false));
         let stop_t = stop.clone();
         let meter_t = meter.clone();
+        let fallback_t = fallback.clone();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let thread = thread::spawn(move || {
-            start_stream_and_write(device_name.as_deref(), dest, stop_t, meter_t, ready_tx)
+            start_stream_and_write(
+                device_name.as_deref(),
+                dest,
+                stop_t,
+                meter_t,
+                fallback_t,
+                ready_tx,
+            )
         });
         match ready_rx.recv_timeout(START_TIMEOUT) {
             Ok(Ok(())) => Ok(Self {
                 stop,
                 meter,
                 thread: Some(thread),
+                fallback,
             }),
             Ok(Err(err)) => {
                 let _ = thread.join();
@@ -124,13 +136,38 @@ impl CaptureSession {
         self.meter.lock().clone()
     }
 
+    pub fn is_finished(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    pub fn used_fallback_device(&self) -> bool {
+        self.fallback.load(Ordering::SeqCst)
+    }
+
     pub fn stop(mut self) -> Result<CaptureResult, AppError> {
         self.stop.store(true, Ordering::SeqCst);
-        self.thread
+        let handle = self
+            .thread
             .take()
-            .ok_or_else(|| AppError::AudioCaptureFailed("capture thread missing".into()))?
-            .join()
-            .map_err(|_| AppError::AudioCaptureFailed("capture thread panicked".into()))?
+            .ok_or_else(|| AppError::AudioCaptureFailed("capture thread missing".into()))?;
+        if handle.is_finished() {
+            return handle
+                .join()
+                .map_err(|_| AppError::AudioCaptureFailed("capture thread panicked".into()))?;
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        thread::spawn(move || {
+            let _ = tx.send(handle.join());
+        });
+        match rx.recv_timeout(JOIN_BOUND) {
+            Ok(Ok(result)) => result,
+            Ok(Err(_)) => Err(AppError::AudioCaptureFailed(
+                "capture thread panicked".into(),
+            )),
+            Err(_) => Err(AppError::AudioCaptureFailed(
+                "capture thread did not stop in time".into(),
+            )),
+        }
     }
 
     pub fn discard(self) {
@@ -154,9 +191,10 @@ fn start_stream_and_write(
     dest: Option<PathBuf>,
     stop: Arc<AtomicBool>,
     meter: Arc<Mutex<MeterSample>>,
+    fallback: Arc<AtomicBool>,
     ready_tx: std::sync::mpsc::Sender<Result<(), AppError>>,
 ) -> Result<CaptureResult, AppError> {
-    match start_stream_inner(device_name, meter) {
+    match start_stream_inner(device_name, meter, fallback) {
         Ok(built) => {
             let _ = ready_tx.send(Ok(()));
             match dest {
@@ -181,8 +219,11 @@ struct BuiltCapture {
 fn start_stream_inner(
     device_name: Option<&str>,
     meter: Arc<Mutex<MeterSample>>,
+    fallback: Arc<AtomicBool>,
 ) -> Result<BuiltCapture, AppError> {
-    let device = resolve_device(device_name).map_err(|_| AppError::MicrophoneUnavailable)?;
+    let (device, used_fallback) =
+        resolve_device(device_name).map_err(|_| AppError::MicrophoneUnavailable)?;
+    fallback.store(used_fallback, Ordering::SeqCst);
     let supported = device
         .default_input_config()
         .map_err(|e| AppError::AudioCaptureFailed(e.to_string()))?;
@@ -299,10 +340,12 @@ fn run_capture(
         drain_consumer(&mut built.consumer, &mut leftover)?;
         if built.overflow.load(Ordering::Relaxed) > 0 {
             truncated = true;
+            stop.store(true, Ordering::SeqCst);
             break;
         }
         if flush_pcm_chunk(&mut leftover, built.input_rate, &mut writer, &mut written)? {
             truncated = true;
+            stop.store(true, Ordering::SeqCst);
             break;
         }
         thread::sleep(CAPTURE_POLL);
@@ -542,6 +585,32 @@ mod tests {
     #[test]
     fn hung_open_timeout_is_bounded() {
         assert_eq!(START_TIMEOUT, Duration::from_secs(8));
-        assert!(HUNG_JOIN_GRACE < Duration::from_secs(1));
+        assert!(HUNG_JOIN_GRACE < Duration::from_millis(100));
+        assert_eq!(JOIN_BOUND, Duration::from_secs(8));
+    }
+
+    #[test]
+    fn finished_join_handle_is_detected() {
+        let thread = thread::spawn(|| {
+            Ok(CaptureResult {
+                path: PathBuf::new(),
+                duration_ms: 0,
+                sample_rate: SAMPLE_RATE,
+                samples: Vec::new(),
+                truncated: true,
+            })
+        });
+        while !thread.is_finished() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        let session = CaptureSession {
+            stop: Arc::new(AtomicBool::new(false)),
+            meter: Arc::new(Mutex::new(MeterSample::silent())),
+            thread: Some(thread),
+            fallback: Arc::new(AtomicBool::new(false)),
+        };
+        assert!(session.is_finished());
+        let result = session.stop().unwrap();
+        assert!(result.truncated);
     }
 }

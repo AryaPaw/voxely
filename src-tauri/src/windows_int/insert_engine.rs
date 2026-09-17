@@ -220,6 +220,10 @@ pub fn is_chromium_host(class: &str) -> bool {
         || class.eq_ignore_ascii_case("Chrome_RenderWidgetHostHWND")
 }
 
+pub fn chromium_uses_named_host_adapter() -> bool {
+    false
+}
+
 pub fn unicode_chunk_units_for_class(class: Option<&str>) -> usize {
     if class.is_some_and(is_chromium_host) {
         UNICODE_CHUNK_UNITS_CHROMIUM
@@ -279,14 +283,39 @@ pub fn resolve_insert_target(
     overlay: Option<NativeHwnd>,
     main: Option<NativeHwnd>,
 ) -> Option<NativeHwnd> {
-    let overlay_root = overlay.map(|hwnd| hwnd.value);
-    let main_root = main.map(|hwnd| hwnd.value);
-    if let Some(start) = start {
-        if !capture_skips_voxely_roots(start.value, overlay_root, main_root) {
-            return Some(start);
+    resolve_captured_insert_target(
+        start.map(|hwnd| CapturedTarget {
+            hwnd: hwnd.value,
+            root: hwnd.value,
+            pid: 0,
+            tid: 0,
+            generation: 0,
+        }),
+        live.map(|hwnd| CapturedTarget {
+            hwnd: hwnd.value,
+            root: hwnd.value,
+            pid: 0,
+            tid: 0,
+            generation: 0,
+        }),
+        overlay.map(|hwnd| hwnd.value),
+        main.map(|hwnd| hwnd.value),
+    )
+    .map(|target| NativeHwnd { value: target.hwnd })
+}
+
+pub fn resolve_captured_insert_target(
+    start: Option<CapturedTarget>,
+    live: Option<CapturedTarget>,
+    overlay_root: Option<usize>,
+    main_root: Option<usize>,
+) -> Option<CapturedTarget> {
+    if let Some(live) = live {
+        if !capture_skips_voxely_roots(live.root, overlay_root, main_root) {
+            return Some(live);
         }
     }
-    live.filter(|hwnd| !capture_skips_voxely_roots(hwnd.value, overlay_root, main_root))
+    start.filter(|target| !capture_skips_voxely_roots(target.root, overlay_root, main_root))
 }
 
 pub fn insert_should_abort(started_generation: u64, current_generation: u64) -> bool {
@@ -657,6 +686,50 @@ mod tests {
     }
 
     #[test]
+    fn live_focus_wins_over_start_capture() {
+        let start = FakeWorld::target(10);
+        let live = CapturedTarget {
+            hwnd: 21,
+            root: 20,
+            pid: 20,
+            tid: 21,
+            generation: 1,
+        };
+        assert_eq!(
+            resolve_captured_insert_target(Some(start), Some(live), Some(3), Some(4)),
+            Some(live)
+        );
+        assert_eq!(
+            resolve_captured_insert_target(
+                Some(start),
+                Some(CapturedTarget {
+                    hwnd: 3,
+                    root: 3,
+                    pid: 1,
+                    tid: 1,
+                    generation: 1,
+                }),
+                Some(3),
+                Some(4)
+            ),
+            Some(start)
+        );
+        assert_eq!(
+            resolve_captured_insert_target(None, Some(live), Some(3), Some(4)),
+            Some(live)
+        );
+        assert_eq!(
+            resolve_insert_target(
+                Some(NativeHwnd { value: 10 }),
+                Some(NativeHwnd { value: 20 }),
+                Some(NativeHwnd { value: 3 }),
+                Some(NativeHwnd { value: 4 }),
+            ),
+            Some(NativeHwnd { value: 20 })
+        );
+    }
+
+    #[test]
     fn same_process_other_hwnd_restores_then_sends() {
         let target = FakeWorld::target(10);
         let mut world = FakeWorld {
@@ -683,6 +756,7 @@ mod tests {
         assert!(is_chromium_host("Chrome_WidgetWin_1"));
         assert!(is_chromium_host("Chrome_RenderWidgetHostHWND"));
         assert!(!is_chromium_host("Edit"));
+        assert!(!chromium_uses_named_host_adapter());
         assert_eq!(
             unicode_chunk_units_for_class(Some("Chrome_WidgetWin_1")),
             UNICODE_CHUNK_UNITS_CHROMIUM

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { api, type AppSettings, type OverlaySnapshot, type SessionState } from "../../lib/api";
 import { applyUiLocale, messagesFor, resolveUiLocale } from "../../lib/i18n";
-import { overlayHudLabel, overlayIsBusy } from "../../lib/session-copy";
+import { overlayHudLabel, overlayIsBusy, overlayShouldRender } from "../../lib/session-copy";
 import { acceptOverlayRevision, applyOverlaySnapshot } from "../../lib/overlay-snapshot";
 import { overlayCancelArmed, overlayHoverFromElement } from "../../lib/overlay-wave";
 import { applyTheme, watchSystemTheme } from "../../lib/theme";
@@ -36,11 +36,14 @@ export function OverlayApp() {
   }
 
   useEffect(() => {
-    void invoke("overlay_mark_frame", { phase: "react" });
+    void invoke("overlay_mark_frame", { phase: "react" }).catch(() => undefined);
     const frame = window.requestAnimationFrame(() => {
-      void invoke("overlay_mark_frame", { phase: "frame" });
+      void invoke("overlay_mark_frame", { phase: "frame" }).catch(() => undefined);
     });
-    void api.settings().then(applySettings);
+    void api
+      .settings()
+      .then(applySettings)
+      .catch(() => undefined);
     let revision = 0;
     let unlistenFn: (() => void) | undefined;
     let cancelled = false;
@@ -121,16 +124,16 @@ export function OverlayApp() {
 
   function onPillClick() {
     if (cancelReady) {
-      void api.cancel();
+      void api.cancel().catch(() => undefined);
     }
   }
 
-  const status = overlayHudLabel(snapshot.visible, state, copy);
+  const status = overlayHudLabel(snapshot.visible, state, copy, Boolean(snapshot.limitReached));
   const showDots = busy && !cancelReady && !recording;
   const clock = recording && !cancelReady ? formatClock(elapsed) : "";
   const cancelHint = cancelReady ? copy.overlayCancel : busy ? copy.overlayCancelAria : status;
 
-  if (!snapshot.visible) {
+  if (!overlayShouldRender(snapshot.visible, state)) {
     return <div className="overlay-shell overlay-shell-hidden" aria-hidden="true" />;
   }
 

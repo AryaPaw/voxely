@@ -8,6 +8,7 @@ import {
   Pause,
   Play,
   RotateCcw,
+  Square,
   Settings as SettingsIcon,
   Trash2,
 } from "lucide-react";
@@ -91,7 +92,14 @@ export function HistoryPane({
               {copy.clearSearch}
             </Button>
           ) : null}
-          <Button variant="outline" onClick={() => void api.openAudioDir()}>
+          <Button
+            variant="outline"
+            onClick={() =>
+              void api.openAudioDir().catch((error: unknown) => {
+                reportError(formatInvokeError(error, copy));
+              })
+            }
+          >
             <FolderOpen className="h-4 w-4" /> {copy.folder}
           </Button>
           <Button variant="outline" onClick={onOpenSettings}>
@@ -157,6 +165,7 @@ export function HistoryCard({
   const emptySuccess = item.status === "completed" && !(item.transcript ?? "").trim();
   const canRetry = Boolean(item.rawAudioPath || item.processedAudioPath);
   const processingLabel = item.processedAudioPath ? copy.processing : copy.processingAudio;
+  const busy = processing || retrying;
 
   useEffect(() => {
     if (!loadAudio) {
@@ -222,14 +231,21 @@ export function HistoryCard({
   }
 
   async function retryTranscription() {
+    if (retrying || processing) {
+      return;
+    }
     setRetrying(true);
     try {
       await api.retry(item.id);
-      await onRefresh();
     } catch (error) {
       reportError(formatInvokeError(error, copy));
     } finally {
       setRetrying(false);
+      try {
+        await onRefresh();
+      } catch (error) {
+        reportError(formatInvokeError(error, copy));
+      }
     }
   }
 
@@ -258,31 +274,50 @@ export function HistoryCard({
               variant="ghost"
               aria-label={copied ? copy.copied : copy.copy}
               onClick={() => {
-                void api.copy(item.transcript ?? "").then(() => {
-                  setCopied(true);
-                  if (copiedTimer.current !== null) {
-                    window.clearTimeout(copiedTimer.current);
-                  }
-                  copiedTimer.current = window.setTimeout(() => {
-                    copiedTimer.current = null;
-                    setCopied(false);
-                  }, 1400);
-                });
+                void api
+                  .copy(item.transcript ?? "")
+                  .then(() => {
+                    setCopied(true);
+                    if (copiedTimer.current !== null) {
+                      window.clearTimeout(copiedTimer.current);
+                    }
+                    copiedTimer.current = window.setTimeout(() => {
+                      copiedTimer.current = null;
+                      setCopied(false);
+                    }, 1400);
+                  })
+                  .catch((error: unknown) => {
+                    reportError(formatInvokeError(error, copy));
+                  });
               }}
             >
               {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
             </Button>
           ) : null}
-          {canRetry ? (
+          {busy ? (
+            <Button
+              type="button"
+              size="icon"
+              variant="ghost"
+              aria-label={copy.cancelRetry}
+              onClick={() => {
+                void api.cancelRetry(item.id).catch((error: unknown) => {
+                  reportError(formatInvokeError(error, copy));
+                });
+              }}
+            >
+              <Square className="h-4 w-4 text-primary" />
+            </Button>
+          ) : canRetry ? (
             <Button
               type="button"
               size="icon"
               variant="ghost"
               aria-label={copy.retry}
-              disabled={retrying || processing}
+              disabled={busy}
               onClick={() => void retryTranscription()}
             >
-              <RotateCcw className={`h-4 w-4 text-primary${retrying ? " history-spin" : ""}`} />
+              <RotateCcw className={`h-4 w-4 text-primary${busy ? " history-spin" : ""}`} />
             </Button>
           ) : null}
           <Button
@@ -333,6 +368,7 @@ export function HistoryCard({
             <button
               type="button"
               className="text-primary underline-offset-2 hover:underline"
+              disabled={busy}
               onClick={() => void retryTranscription()}
             >
               {copy.retry}

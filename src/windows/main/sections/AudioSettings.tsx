@@ -19,7 +19,9 @@ export function AudioSettings({
   copy: Messages;
   onChange: (patch: Partial<AppSettings>) => void;
 }) {
-  const [devices, setDevices] = useState<Array<{ id: string; name: string }>>([]);
+  const [devices, setDevices] = useState<Array<{ id: string; name: string; available?: boolean }>>(
+    [],
+  );
   const [error, setError] = useState("");
   const [level, setLevel] = useState(0);
   const [warning, setWarning] = useState<string | null>(null);
@@ -79,7 +81,13 @@ export function AudioSettings({
           onValueChange={(inputDevice) => onChange({ inputDevice })}
           options={[
             { value: "default", label: copy.defaultMic },
-            ...devices.map((device) => ({ value: device.id, label: device.name })),
+            ...devices.map((device) => ({
+              value: device.id,
+              label:
+                device.available === false
+                  ? `${device.name} (${copy.deviceUnavailable})`
+                  : device.name,
+            })),
           ]}
         />
       </SettingsField>

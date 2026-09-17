@@ -64,15 +64,14 @@ function settings(): AppSettings {
 
 describe("AppearanceSettings", () => {
   it("does not host the manual update action", () => {
+    const onChange = vi.fn();
     render(
-      <AppearanceSettings
-        settings={settings()}
-        copy={messagesFor("en")}
-        onChange={() => undefined}
-      />,
+      <AppearanceSettings settings={settings()} copy={messagesFor("en")} onChange={onChange} />,
     );
     expect(screen.queryByRole("button", { name: /Check for updates/ })).not.toBeInTheDocument();
     expect(screen.getByRole("combobox", { name: "Theme" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: "Automatic updates" }));
+    expect(onChange).toHaveBeenCalledWith({ autoUpdateEnabled: false });
   });
 });
 

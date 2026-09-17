@@ -47,50 +47,119 @@ pub fn list_input_devices() -> Result<Vec<InputDeviceInfo>, String> {
     Ok(devices)
 }
 
-pub fn resolve_device(preferred: Option<&str>) -> Result<cpal::Device, String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceResolvePlan {
+    Exact,
+    Default,
+    FallbackDefault,
+    Ambiguous,
+    Unavailable,
+}
+
+pub fn plan_device_resolve(
+    preferred: Option<&str>,
+    listed_ids: &[String],
+    listed_names: &[String],
+    has_default: bool,
+) -> DeviceResolvePlan {
+    let Some(name) = preferred.filter(|value| *value != "default") else {
+        return if has_default {
+            DeviceResolvePlan::Default
+        } else {
+            DeviceResolvePlan::Unavailable
+        };
+    };
+    if listed_ids.iter().any(|id| id == name) {
+        return DeviceResolvePlan::Exact;
+    }
+    let name_matches = listed_names.iter().filter(|item| *item == name).count();
+    if name_matches > 1 {
+        return DeviceResolvePlan::Ambiguous;
+    }
+    if name_matches == 1 {
+        return DeviceResolvePlan::Exact;
+    }
+    if has_default {
+        DeviceResolvePlan::FallbackDefault
+    } else {
+        DeviceResolvePlan::Unavailable
+    }
+}
+
+pub fn annotate_missing_selection(devices: &mut Vec<InputDeviceInfo>, selected_id: &str) -> bool {
+    if selected_id.is_empty() || selected_id == "default" {
+        return false;
+    }
+    if devices.iter().any(|device| device.id == selected_id) {
+        return false;
+    }
+    devices.insert(
+        0,
+        InputDeviceInfo {
+            id: selected_id.to_string(),
+            name: selected_id.to_string(),
+            is_default: false,
+            sample_rate: None,
+            channels: None,
+            available: false,
+        },
+    );
+    true
+}
+
+pub fn resolve_device(preferred: Option<&str>) -> Result<(cpal::Device, bool), String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    if let Some(name) = preferred {
-        if name != "default" {
-            let listed = list_input_devices().unwrap_or_default();
+    let listed = list_input_devices().unwrap_or_default();
+    let ids: Vec<String> = listed.iter().map(|d| d.id.clone()).collect();
+    let names: Vec<String> = listed.iter().map(|d| d.name.clone()).collect();
+    let has_default = host.default_input_device().is_some();
+    match plan_device_resolve(preferred, &ids, &names, has_default) {
+        DeviceResolvePlan::Ambiguous => Err("Microphone selection is ambiguous".into()),
+        DeviceResolvePlan::Unavailable => Err("Microphone is unavailable".into()),
+        DeviceResolvePlan::Default | DeviceResolvePlan::FallbackDefault => {
+            let fallback = matches!(
+                plan_device_resolve(preferred, &ids, &names, has_default),
+                DeviceResolvePlan::FallbackDefault
+            );
+            host.default_input_device()
+                .map(|device| (device, fallback))
+                .ok_or_else(|| "Microphone is unavailable".into())
+        }
+        DeviceResolvePlan::Exact => {
+            let name = preferred.unwrap_or("default");
             let exact = listed.iter().find(|d| d.id == name);
             let name_matches: Vec<_> = listed.iter().filter(|d| d.name == name).collect();
             let resolved_id = if let Some(device) = exact {
-                Some(device.id.as_str())
-            } else if name_matches.len() == 1 {
-                Some(name_matches[0].id.as_str())
-            } else if name_matches.len() > 1 {
-                return Err("Microphone selection is ambiguous".into());
+                device.id.as_str()
             } else {
-                return Err("Selected microphone is unavailable".into());
+                name_matches[0].id.as_str()
             };
-            if let Some(id) = resolved_id {
-                let match_name = listed
-                    .iter()
-                    .find(|d| d.id == id)
-                    .map(|d| d.name.clone())
-                    .unwrap_or_else(|| name.to_string());
-                let occurrence = listed.iter().position(|d| d.id == id).unwrap_or(0);
-                if let Ok(mut devices) = host.input_devices() {
-                    let mut seen = 0usize;
-                    if let Some(found) = devices.find(|d| {
-                        if d.name().ok().as_deref() == Some(match_name.as_str()) {
-                            if seen == occurrence {
-                                return true;
-                            }
-                            seen += 1;
+            let match_name = listed
+                .iter()
+                .find(|d| d.id == resolved_id)
+                .map(|d| d.name.clone())
+                .unwrap_or_else(|| name.to_string());
+            let occurrence = listed.iter().position(|d| d.id == resolved_id).unwrap_or(0);
+            if let Ok(mut devices) = host.input_devices() {
+                let mut seen = 0usize;
+                if let Some(found) = devices.find(|d| {
+                    if d.name().ok().as_deref() == Some(match_name.as_str()) {
+                        if seen == occurrence {
+                            return true;
                         }
-                        false
-                    }) {
-                        return Ok(found);
+                        seen += 1;
                     }
+                    false
+                }) {
+                    return Ok((found, false));
                 }
-                return Err("Selected microphone is unavailable".into());
             }
+            host.default_input_device()
+                .map(|device| (device, true))
+                .ok_or_else(|| "Selected microphone is unavailable".into())
         }
     }
-    host.default_input_device()
-        .ok_or_else(|| "Microphone is unavailable".into())
 }
 
 #[cfg(test)]
@@ -112,5 +181,30 @@ mod tests {
             });
         }
         assert_eq!(ids, ["Mic", "Mic #2", "Other"]);
+    }
+
+    #[test]
+    fn missing_preferred_device_is_explicit_fallback() {
+        let ids = vec!["Mic".into()];
+        let names = vec!["Mic".into()];
+        assert_eq!(
+            plan_device_resolve(Some("gone"), &ids, &names, true),
+            DeviceResolvePlan::FallbackDefault
+        );
+        assert_eq!(
+            plan_device_resolve(Some("gone"), &ids, &names, false),
+            DeviceResolvePlan::Unavailable
+        );
+        let mut devices = vec![InputDeviceInfo {
+            id: "Mic".into(),
+            name: "Mic".into(),
+            is_default: true,
+            sample_rate: None,
+            channels: None,
+            available: true,
+        }];
+        assert!(annotate_missing_selection(&mut devices, "USB Mic"));
+        assert!(!devices[0].available);
+        assert_eq!(devices[0].id, "USB Mic");
     }
 }

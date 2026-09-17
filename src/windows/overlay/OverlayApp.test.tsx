@@ -75,4 +75,37 @@ describe("OverlayApp", () => {
       expect(screen.getByText("Transcribing")).toBeInTheDocument();
     });
   });
+
+  it("hides leftover HUD when backend stays visible after idle", async () => {
+    render(<OverlayApp />);
+    expect(await screen.findByText("Recording")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(overlayHandlers.length).toBeGreaterThan(0);
+    });
+    overlayHandlers[0]({
+      payload: { revision: 4, visible: true, state: { kind: "idle" } },
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("button")).not.toBeInTheDocument();
+      expect(screen.queryByText("Transcribing")).not.toBeInTheDocument();
+      expect(screen.queryByText("Recording")).not.toBeInTheDocument();
+    });
+  });
+
+  it("shows the recording limit HUD when the capture cap is hit", async () => {
+    render(<OverlayApp />);
+    expect(await screen.findByText("Recording")).toBeInTheDocument();
+    await waitFor(() => {
+      expect(overlayHandlers.length).toBeGreaterThan(0);
+    });
+    overlayHandlers[0]({
+      payload: {
+        revision: 3,
+        visible: true,
+        state: { kind: "recording" },
+        limitReached: true,
+      },
+    });
+    expect(await screen.findByText("Recording limit")).toBeInTheDocument();
+  });
 });

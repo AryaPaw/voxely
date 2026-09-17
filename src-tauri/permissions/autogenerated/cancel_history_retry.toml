@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cancel-history-retry"
+description = "Enables the cancel_history_retry command without any pre-configured scope."
+commands.allow = ["cancel_history_retry"]
+
+[[permission]]
+identifier = "deny-cancel-history-retry"
+description = "Denies the cancel_history_retry command without any pre-configured scope."
+commands.deny = ["cancel_history_retry"]

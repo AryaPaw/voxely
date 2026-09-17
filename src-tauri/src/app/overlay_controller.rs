@@ -8,6 +8,8 @@ pub struct OverlaySnapshot {
     pub revision: u64,
     pub visible: bool,
     pub state: SessionState,
+    #[serde(default)]
+    pub limit_reached: bool,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -15,6 +17,7 @@ pub struct OverlayLifecycle {
     pub revision: u64,
     pub epoch: u64,
     pub visible: bool,
+    pub limit_reached: bool,
 }
 
 impl OverlayLifecycle {
@@ -26,6 +29,7 @@ impl OverlayLifecycle {
     pub fn show(&mut self) -> u64 {
         self.epoch = next_overlay_revision(self.epoch);
         self.visible = true;
+        self.limit_reached = false;
         self.publish()
     }
 
@@ -36,8 +40,28 @@ impl OverlayLifecycle {
     }
 
     pub fn snapshot(&self, state: SessionState) -> OverlaySnapshot {
-        overlay_snapshot(self.revision, self.visible, state)
+        overlay_snapshot(
+            self.revision,
+            overlay_chrome_visible(self.visible, &state),
+            state,
+            self.limit_reached,
+        )
     }
+
+    pub fn set_limit_reached(&mut self, reached: bool) {
+        if self.limit_reached != reached {
+            self.limit_reached = reached;
+            self.publish();
+        }
+    }
+}
+
+pub fn overlay_hud_visible(state: &SessionState) -> bool {
+    !matches!(state, SessionState::Idle | SessionState::Completed)
+}
+
+pub fn overlay_chrome_visible(flagged_visible: bool, state: &SessionState) -> bool {
+    flagged_visible && overlay_hud_visible(state)
 }
 
 pub fn next_overlay_revision(current: u64) -> u64 {
@@ -48,11 +72,17 @@ pub fn accept_overlay_revision(current: u64, incoming: u64) -> bool {
     incoming > current
 }
 
-pub fn overlay_snapshot(revision: u64, visible: bool, state: SessionState) -> OverlaySnapshot {
+pub fn overlay_snapshot(
+    revision: u64,
+    visible: bool,
+    state: SessionState,
+    limit_reached: bool,
+) -> OverlaySnapshot {
     OverlaySnapshot {
         revision,
         visible,
         state,
+        limit_reached,
     }
 }
 
@@ -85,8 +115,9 @@ mod tests {
             }
         }
         assert_eq!(revision, 4);
-        let hidden = overlay_snapshot(revision, false, SessionState::Idle);
+        let hidden = overlay_snapshot(revision, false, SessionState::Idle, false);
         assert!(!hidden.visible);
+        assert!(!hidden.limit_reached);
         assert_eq!(hidden.state, SessionState::Idle);
     }
 
@@ -131,6 +162,9 @@ mod tests {
             SessionState::Transcribing { attempt: 1 }
         );
         assert!(transcribing.visible);
+        assert!(!overlay_chrome_visible(true, &SessionState::Idle));
+        assert!(!life.snapshot(SessionState::Idle).visible);
+        assert!(!life.snapshot(SessionState::Completed).visible);
     }
 
     #[test]

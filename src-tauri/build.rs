@@ -41,6 +41,7 @@ fn main() {
             "discover_models",
             "toggle_dictation",
             "retry_recording",
+            "cancel_history_retry",
             "open_logs",
             "open_settings_dir",
             "reset_settings",

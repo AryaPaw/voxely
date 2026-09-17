@@ -126,7 +126,7 @@ pub fn classify_http(status: u16, retry_after: Option<Duration>, body: &str) -> 
     {
         return ClassifiedError {
             class: RetryClass::Terminal,
-            error: AppError::InvalidModel(truncated_body(body)),
+            error: AppError::InvalidModel("invalid model".into()),
             http_status: Some(status),
             retry_after: None,
         };
@@ -589,13 +589,20 @@ mod tests {
     fn ten_second_audio_exceeds_old_forty_second_cap() {
         let timeout = RetryPolicy::default().scaled_request_timeout(Duration::from_secs(10));
         assert!(timeout > Duration::from_secs(40));
+        assert!(timeout < Duration::from_secs(15 * 60));
     }
 
     #[test]
-    fn eight_minute_audio_is_not_capped_at_forty() {
+    fn ninety_second_audio_is_not_capped_at_one_minute() {
+        let timeout = RetryPolicy::default().scaled_request_timeout(Duration::from_secs(90));
+        assert!(timeout > Duration::from_secs(60));
+        assert_eq!(timeout, Duration::from_millis(20_000 + 225_000));
+    }
+
+    #[test]
+    fn eight_minute_audio_is_capped_at_fifteen_minutes() {
         let timeout = RetryPolicy::default().scaled_request_timeout(Duration::from_secs(8 * 60));
-        assert!(timeout > Duration::from_secs(40));
-        assert!(timeout <= Duration::from_secs(15 * 60));
+        assert_eq!(timeout, Duration::from_secs(15 * 60));
     }
 
     use proptest::prelude::*;

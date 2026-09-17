@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Recording } from "../../../lib/api";
@@ -39,7 +39,7 @@ function recording(patch: Partial<Recording> = {}): Recording {
 }
 
 describe("HistoryPane", () => {
-  it("labels search and confirms single delete", () => {
+  it("labels search and confirms single delete", async () => {
     render(
       <HistoryPane
         items={[recording()]}
@@ -58,6 +58,12 @@ describe("HistoryPane", () => {
     expect(screen.getByRole("button", { name: "Удалить" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Копировать" }));
     expect(screen.getByRole("button", { name: "Повторить расшифровку" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Удалить" }));
+    const dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Удалить" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("delete_history_item", { id: "1" });
+    });
   });
 
   it("keeps retry on completed transcripts and hides it without audio", () => {
@@ -132,6 +138,7 @@ describe("HistoryPane", () => {
       />,
     );
     expect(screen.getByText("Обработка")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Отменить повтор" })).toBeInTheDocument();
   });
 
   it("does not fetch audio until listen", async () => {
@@ -181,5 +188,68 @@ describe("HistoryPane", () => {
     );
     expect(screen.getByText("Ничего не найдено по этому запросу.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Очистить поиск" })).toBeInTheDocument();
+  });
+
+  it("labels an empty successful transcript", () => {
+    render(
+      <HistoryCard
+        item={recording({ transcript: "   " })}
+        copy={messagesFor("ru")}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    expect(screen.getByText("Расшифровка пустая")).toBeInTheDocument();
+  });
+
+  it("cancels a history retry without cancelling live dictation", async () => {
+    render(
+      <HistoryCard
+        item={recording({
+          status: "processing",
+          transcript: null,
+          processedAudioPath: "b.wav",
+        })}
+        copy={messagesFor("ru")}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Отменить повтор" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("cancel_history_retry", { id: "1" });
+    });
+  });
+
+  it("resets the player on ended and error", async () => {
+    const invokeMock = vi.mocked(invoke);
+    invokeMock.mockImplementation(async (cmd: string) => {
+      if (cmd === "recording_audio_url") {
+        return "C:/tmp/a.wav";
+      }
+      return undefined;
+    });
+    const { container } = render(
+      <HistoryCard
+        item={recording()}
+        copy={messagesFor("ru")}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Слушать" }));
+    await waitFor(() => {
+      expect(container.querySelector("audio")).not.toBeNull();
+    });
+    const node = container.querySelector("audio");
+    if (node) {
+      Object.defineProperty(node, "duration", { configurable: true, value: 2 });
+      Object.defineProperty(node, "currentTime", { configurable: true, value: 2, writable: true });
+      fireEvent.ended(node);
+      fireEvent.error(node);
+    }
   });
 });

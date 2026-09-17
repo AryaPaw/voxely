@@ -5,6 +5,7 @@ import {
   overlayHudLabel,
   overlayHudVisible,
   overlayIsBusy,
+  overlayShouldRender,
   overlayLabel,
   overlayRetryDisplayAttempt,
   overlaySttAttempt,
@@ -12,6 +13,7 @@ import {
 } from "./session-copy";
 import { acceptOverlayRevision } from "./overlay-snapshot";
 import { formatDuration, formatTime } from "./utils";
+import { messagesFor } from "./i18n";
 
 const cases: Array<[SessionState, string]> = [
   [{ kind: "idle" }, ""],
@@ -63,8 +65,15 @@ describe("overlayHudVisible", () => {
     expect(overlayHudLabel(false, { kind: "idle" })).toBe("");
     expect(overlayHudLabel(false, { kind: "recording" })).toBe("");
     expect(overlayHudLabel(true, { kind: "recording" })).toBe("Запись");
+    expect(overlayHudLabel(true, { kind: "recording" }, messagesFor("ru"), true)).toBe(
+      "Лимит записи",
+    );
     expect(overlayHudLabel(true, { kind: "saving" })).toBe("Сохранение");
     expect(overlayHudLabel(true, { kind: "transcribing", attempt: 1 })).toBe("Расшифровка");
+    expect(overlayShouldRender(true, { kind: "transcribing", attempt: 1 })).toBe(true);
+    expect(overlayShouldRender(true, { kind: "idle" })).toBe(false);
+    expect(overlayShouldRender(true, { kind: "completed" })).toBe(false);
+    expect(overlayShouldRender(false, { kind: "transcribing", attempt: 1 })).toBe(false);
     expect(acceptOverlayRevision(1, 2)).toBe(true);
     expect(acceptOverlayRevision(4, 4)).toBe(false);
   });

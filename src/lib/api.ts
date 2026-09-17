@@ -198,6 +198,7 @@ export type OverlaySnapshot = {
   revision: number;
   visible: boolean;
   state: SessionState;
+  limitReached?: boolean;
 };
 
 export const api = {
@@ -213,7 +214,10 @@ export const api = {
   recording: (id: string) => ipc<Recording | null>("get_recording", { id }),
   deleteItem: (id: string) => ipc<void>("delete_history_item", { id }),
   deleteAll: () => ipc<{ deleted: string[]; failed: string[] }>("delete_all_history"),
-  mics: () => ipc<Array<{ id: string; name: string; isDefault: boolean }>>("list_microphones"),
+  mics: () =>
+    ipc<Array<{ id: string; name: string; isDefault: boolean; available?: boolean }>>(
+      "list_microphones",
+    ),
   meter: () => ipc<MeterSample>("get_meter"),
   startInputMeter: () => ipc<void>("start_input_meter"),
   stopInputMeter: () => ipc<void>("stop_input_meter"),
@@ -230,6 +234,7 @@ export const api = {
   cancel: () => ipc<void>("cancel_dictation"),
   setHotkeyCapture: (capturing: boolean) => ipc<void>("set_hotkey_capture", { capturing }),
   retry: (id: string) => ipc<Recording>("retry_recording", { id }),
+  cancelRetry: (id: string) => ipc<void>("cancel_history_retry", { id }),
   openLogs: () => ipc<void>("open_logs"),
   openSettingsDir: () => ipc<void>("open_settings_dir"),
   resetSettings: (wipeApiKey: boolean) => ipc<AppSettings>("reset_settings", { wipeApiKey }),

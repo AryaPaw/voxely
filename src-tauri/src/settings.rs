@@ -276,13 +276,6 @@ impl AppSettings {
     }
 
     pub fn migrate_honest_dsp_and_insert(&mut self) {
-        if let Some(preset) = self
-            .presets
-            .iter_mut()
-            .find(|preset| preset.id == self.active_preset_id)
-        {
-            *preset = preset.apply_mic_tune(&self.mic_tune);
-        }
         if self.insertion_mode == "auto" || self.insertion_mode == "sendinput" {
             self.insertion_mode = "unicode".into();
         }

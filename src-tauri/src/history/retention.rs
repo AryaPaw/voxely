@@ -25,9 +25,11 @@ impl Retention {
 }
 
 pub fn keep_temp_wav(name: &str) -> bool {
-    name == "filter-sample.wav"
-        || name.starts_with("filter-preview")
-        || name.starts_with("model-compare.")
+    name == "filter-sample.wav" || name.starts_with("filter-preview")
+}
+
+pub fn keep_compare_temp_wav(name: &str) -> bool {
+    name.starts_with("model-compare.")
 }
 
 pub fn apply_retention(
@@ -69,6 +71,14 @@ pub fn apply_retention_except(
     if let Some(limit) = storage_limit_bytes {
         let mut list = repo.list_all()?;
         list.sort_by_key(|a| a.created_at);
+        let protected_bytes: u64 = list
+            .iter()
+            .filter(|rec| protected_ids.contains(&rec.id))
+            .map(|rec| recording_bytes(audio_root, rec))
+            .sum();
+        if protected_bytes >= limit {
+            return Ok(deleted);
+        }
         let mut bytes = inventory_bytes(audio_root, &list);
         for rec in list {
             if bytes <= limit {
@@ -94,6 +104,20 @@ pub fn apply_retention_except(
     Ok(deleted)
 }
 
+fn processing_tmp_keep(known: &[Recording], name: &str) -> bool {
+    known.iter().any(|rec| {
+        rec.raw_audio_path.as_ref().is_some_and(|raw| {
+            let tmp = format!("{raw}.tmp");
+            let wav_tmp = Path::new(raw)
+                .with_extension("wav.tmp")
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            name == tmp || name == wav_tmp
+        })
+    })
+}
+
 fn inventory_bytes(audio_root: &Path, list: &[Recording]) -> u64 {
     list.iter()
         .map(|rec| recording_bytes(audio_root, rec))
@@ -117,16 +141,21 @@ pub fn delete_recording(
     audio_root: &Path,
     rec: &Recording,
 ) -> Result<bool, AppError> {
+    if !repo.delete(&rec.id)? {
+        return Ok(false);
+    }
     for rel in [&rec.raw_audio_path, &rec.processed_audio_path]
         .into_iter()
         .flatten()
     {
         let path = audio_root.join(rel);
         if path.exists() {
-            std::fs::remove_file(&path).map_err(|e| AppError::StorageFailed(e.to_string()))?;
+            if let Err(err) = std::fs::remove_file(&path) {
+                tracing::warn!(error = %err, file = %path.display(), "orphan audio after delete");
+            }
         }
     }
-    repo.delete(&rec.id)
+    Ok(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -193,6 +222,9 @@ pub fn cleanup_orphans_except(
             continue;
         }
         if name.ends_with(".tmp") || name.ends_with(".wav.tmp") {
+            if processing_tmp_keep(&known, &name) {
+                continue;
+            }
             let _ = std::fs::remove_file(entry.path());
             continue;
         }
@@ -221,7 +253,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanup_keeps_filter_and_compare_wavs() {
+    fn cleanup_keeps_filter_and_protected_compare_wavs() {
         let dir = tempdir().unwrap();
         let repo = HistoryRepo::open(&dir.path().join("h.db")).unwrap();
         let audio = dir.path();
@@ -232,8 +264,13 @@ mod tests {
         cleanup_orphans(audio, &repo).unwrap();
         assert!(audio.join("filter-sample.wav").exists());
         assert!(audio.join("filter-preview.wav").exists());
-        assert!(audio.join("model-compare.2.stt.wav").exists());
+        assert!(!audio.join("model-compare.2.stt.wav").exists());
         assert!(!audio.join("orphan.wav").exists());
+        std::fs::write(audio.join("model-compare.2.stt.wav"), b"c").unwrap();
+        let mut protected = HashSet::new();
+        protected.insert("model-compare.2.stt.wav".into());
+        cleanup_orphans_except(audio, &repo, &protected).unwrap();
+        assert!(audio.join("model-compare.2.stt.wav").exists());
     }
 
     #[test]
@@ -256,5 +293,42 @@ mod tests {
     #[test]
     fn three_day_setting_parses() {
         assert_eq!(Retention::from_setting("3d"), Retention::Days(3));
+    }
+
+    #[test]
+    fn oversized_protected_clip_does_not_wipe_history() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("h.db")).unwrap();
+        let audio = dir.path();
+        let mut live = new_recording("m".into());
+        live.raw_audio_path = Some("live.wav".into());
+        std::fs::write(audio.join("live.wav"), vec![0u8; 64]).unwrap();
+        repo.insert(&live).unwrap();
+        let mut older = new_recording("m".into());
+        older.created_at = Utc::now() - Duration::days(1);
+        older.updated_at = older.created_at;
+        older.raw_audio_path = Some("old.wav".into());
+        std::fs::write(audio.join("old.wav"), vec![0u8; 8]).unwrap();
+        repo.insert(&older).unwrap();
+        let mut protected = HashSet::new();
+        protected.insert(live.id.clone());
+        let deleted =
+            apply_retention_except(&repo, audio, Retention::Forever, Some(16), &protected).unwrap();
+        assert!(deleted.is_empty());
+        assert!(repo.get(&older.id).unwrap().is_some());
+        assert!(audio.join("old.wav").exists());
+    }
+
+    #[test]
+    fn cleanup_keeps_known_raw_tmp() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("h.db")).unwrap();
+        let mut rec = new_recording("m".into());
+        rec.raw_audio_path = Some(format!("{}.raw.wav", rec.id));
+        repo.insert(&rec).unwrap();
+        let tmp = dir.path().join(format!("{}.raw.wav.tmp", rec.id));
+        std::fs::write(&tmp, b"pcm").unwrap();
+        cleanup_orphans(dir.path(), &repo).unwrap();
+        assert!(tmp.exists());
     }
 }

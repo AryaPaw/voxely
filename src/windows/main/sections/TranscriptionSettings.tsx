@@ -210,7 +210,14 @@ export function TranscriptionSettings({
           inputMode="numeric"
           value={connectDraft}
           onChange={(event) => setConnectDraft(event.target.value)}
-          onBlur={() => commitRetry("connectTimeoutMs", connectDraft, settings, onChange)}
+          onBlur={() => {
+            const parsed = parseDraft(connectDraft, settings.retry.connectTimeoutMs);
+            if (parsed == null) {
+              setConnectDraft(draftNumber(settings.retry.connectTimeoutMs));
+              return;
+            }
+            commitRetry("connectTimeoutMs", connectDraft, settings, onChange);
+          }}
         />
       </SettingsField>
       <SettingsField label={copy.requestTimeout}>
@@ -218,7 +225,14 @@ export function TranscriptionSettings({
           inputMode="numeric"
           value={requestDraft}
           onChange={(event) => setRequestDraft(event.target.value)}
-          onBlur={() => commitRetry("requestTimeoutMs", requestDraft, settings, onChange)}
+          onBlur={() => {
+            const parsed = parseDraft(requestDraft, settings.retry.requestTimeoutMs);
+            if (parsed == null) {
+              setRequestDraft(draftNumber(settings.retry.requestTimeoutMs));
+              return;
+            }
+            commitRetry("requestTimeoutMs", requestDraft, settings, onChange);
+          }}
         />
       </SettingsField>
       <SettingsField label={copy.initialDelay}>
@@ -242,7 +256,14 @@ export function TranscriptionSettings({
           inputMode="numeric"
           value={totalDraft}
           onChange={(event) => setTotalDraft(event.target.value)}
-          onBlur={() => commitRetry("totalOperationTimeoutMs", totalDraft, settings, onChange)}
+          onBlur={() => {
+            const parsed = parseDraft(totalDraft, settings.retry.totalOperationTimeoutMs);
+            if (parsed == null) {
+              setTotalDraft(draftNumber(settings.retry.totalOperationTimeoutMs));
+              return;
+            }
+            commitRetry("totalOperationTimeoutMs", totalDraft, settings, onChange);
+          }}
         />
       </SettingsField>
     </div>

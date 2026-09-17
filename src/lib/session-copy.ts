@@ -90,11 +90,25 @@ export function overlayHudLabel(
   visible: boolean,
   state: SessionState,
   copy: Messages = messagesFor("ru"),
+  limitReached = false,
 ): string {
   if (!visible) {
     return "";
   }
+  if (
+    limitReached &&
+    (state.kind === "recording" ||
+      state.kind === "startingRecording" ||
+      state.kind === "stoppingRecording" ||
+      state.kind === "saving")
+  ) {
+    return copy.overlayRecordingLimit;
+  }
   return overlayLabel(state, copy);
+}
+
+export function overlayShouldRender(visible: boolean, state: SessionState): boolean {
+  return visible && overlayHudVisible(state);
 }
 
 export function overlayHudVisible(state: SessionState): boolean {

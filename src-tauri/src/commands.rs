@@ -68,15 +68,18 @@ fn persist_settings_inner(
     if settings.hotkey != previous.hotkey {
         crate::app::shortcuts::parse_hotkey(&settings.hotkey)?;
     }
+    let hotkey_changed = settings.hotkey != previous.hotkey;
     settings.write_seq = previous.write_seq.saturating_add(1);
     settings.save(&ctx.settings_path)?;
     *ctx.settings.lock() = settings.clone();
     *ctx.settings_recovery.lock() = false;
-    if let Err(err) = crate::app::shortcuts::sync_shortcuts(app) {
-        let _ = previous.save(&ctx.settings_path);
-        *ctx.settings.lock() = previous.clone();
-        let _ = crate::app::shortcuts::sync_shortcuts(app);
-        return Err(err);
+    if hotkey_changed {
+        if let Err(err) = crate::app::shortcuts::sync_shortcuts(app) {
+            let _ = previous.save(&ctx.settings_path);
+            *ctx.settings.lock() = previous.clone();
+            let _ = crate::app::shortcuts::sync_shortcuts(app);
+            return Err(err);
+        }
     }
     if let Err(err) = crate::app::lifecycle::sync_autostart(app, settings.start_with_windows) {
         settings.start_with_windows = previous.start_with_windows;
@@ -84,7 +87,8 @@ fn persist_settings_inner(
         *ctx.settings.lock() = settings.clone();
         return Err(err);
     }
-    let _ = app.emit("settings://changed", settings.clone());
+    let _ = app.emit_to("main", "settings://changed", settings.clone());
+    let _ = app.emit_to("overlay", "settings://changed", settings.clone());
     if run_retention {
         let _ = crate::app::session::apply_configured_retention(ctx);
     }
@@ -92,6 +96,9 @@ fn persist_settings_inner(
     ctx.transport
         .lock()
         .sync(settings.retry.to_policy().connect_timeout)?;
+    if settings.debug_logging != previous.debug_logging {
+        crate::logging::apply_debug_logging(settings.debug_logging);
+    }
     Ok(settings)
 }
 
@@ -176,8 +183,16 @@ pub fn delete_history_item(
         .lock()
         .get(&id)?
         .ok_or_else(|| AppError::StorageFailed("not found".into()))?;
-    if crate::app::operations::protected_recording_ids(ctx.inner()).contains(&id) {
-        return Err(AppError::IllegalTransition("recording is in use".into()));
+    if crate::app::operations::protected_recording_ids(ctx.inner()).contains(&id)
+        && !crate::app::operations::user_may_delete_recording(&rec.status, true)
+    {
+        return Err(AppError::TranscriptionInProgress);
+    }
+    ctx.in_flight.lock().remove(&id);
+    if !is_cancellable(&ctx.state.lock())
+        && ctx.session_recording_id.lock().as_deref() == Some(id.as_str())
+    {
+        *ctx.session_recording_id.lock() = None;
     }
     let root = crate::history::repository::audio_dir(&ctx.data_dir);
     delete_recording(&ctx.history.lock(), &root, &rec)?;
@@ -199,8 +214,11 @@ pub fn delete_all_history(
 }
 
 #[tauri::command]
-pub fn list_microphones() -> Result<Vec<InputDeviceInfo>, AppError> {
-    devices()
+pub fn list_microphones(ctx: State<'_, Arc<AppContext>>) -> Result<Vec<InputDeviceInfo>, AppError> {
+    let mut list = devices()?;
+    let selected = ctx.settings.lock().input_device.clone();
+    crate::audio::devices::annotate_missing_selection(&mut list, &selected);
+    Ok(list)
 }
 
 #[tauri::command]
@@ -259,7 +277,10 @@ pub async fn preview_dsp(ctx: State<'_, Arc<AppContext>>) -> Result<DspPreview, 
 }
 
 #[tauri::command]
-pub fn start_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
+pub async fn start_filter_sample(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppContext>>,
+) -> Result<(), AppError> {
     if is_cancellable(&ctx.state.lock()) {
         return Err(AppError::IllegalTransition(
             "dictation is already running".into(),
@@ -272,6 +293,7 @@ pub fn start_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppErr
     }
     release_meter_monitor(ctx.inner());
     if ctx.preview_capture.lock().is_some() {
+        let _ = app.emit_to("main", "filter://sample", true);
         return Ok(());
     }
     ctx.settings.lock().mic_tune.validate()?;
@@ -282,29 +304,49 @@ pub fn start_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppErr
     } else {
         Some(settings.input_device.clone())
     };
-    let session = CaptureSession::start(device.as_deref(), dest)?;
-    *ctx.preview_capture.lock() = Some(session);
-    ctx.filter_recording
-        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let ctx = ctx.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let session = CaptureSession::start(device.as_deref(), dest)?;
+        *ctx.preview_capture.lock() = Some(session);
+        ctx.filter_recording
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    })
+    .await
+    .map_err(|e| AppError::AudioCaptureFailed(e.to_string()))??;
+    let _ = app.emit_to("main", "filter://sample", true);
     Ok(())
 }
 
 #[tauri::command]
-pub fn stop_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<DspPreview, AppError> {
-    let session = ctx
-        .preview_capture
-        .lock()
-        .take()
-        .ok_or_else(|| AppError::AudioCaptureFailed("sample not started".into()))?;
-    let result = session.stop()?;
-    ctx.filter_recording
-        .store(false, std::sync::atomic::Ordering::SeqCst);
-    preview_from_original(ctx.inner(), &result.path)
+pub async fn stop_filter_sample(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppContext>>,
+) -> Result<DspPreview, AppError> {
+    let ctx = ctx.inner().clone();
+    let preview = tokio::task::spawn_blocking(move || {
+        ctx.filter_recording
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        let session = ctx
+            .preview_capture
+            .lock()
+            .take()
+            .ok_or_else(|| AppError::AudioCaptureFailed("sample not started".into()))?;
+        let result = session.stop()?;
+        preview_from_original(&ctx, &result.path)
+    })
+    .await
+    .map_err(|e| AppError::AudioProcessingFailed(e.to_string()))?;
+    let _ = app.emit_to("main", "filter://sample", false);
+    preview
 }
 
 #[tauri::command]
-pub fn start_input_meter(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
-    start_meter_monitor(ctx.inner())
+pub async fn start_input_meter(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
+    let ctx = ctx.inner().clone();
+    tokio::task::spawn_blocking(move || start_meter_monitor(&ctx))
+        .await
+        .map_err(|e| AppError::AudioCaptureFailed(e.to_string()))?
 }
 
 #[tauri::command]
@@ -379,6 +421,11 @@ pub fn set_hotkey_capture(app: AppHandle, capturing: bool) -> Result<(), AppErro
 #[tauri::command]
 pub async fn retry_recording(app: AppHandle, id: String) -> Result<Recording, AppError> {
     crate::app::session::manual_retry(app, id).await
+}
+
+#[tauri::command]
+pub fn cancel_history_retry(app: AppHandle, id: String) -> Result<(), AppError> {
+    crate::app::session::cancel_history_retry(&app, &id)
 }
 
 #[tauri::command]

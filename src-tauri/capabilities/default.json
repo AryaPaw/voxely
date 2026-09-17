@@ -12,8 +12,6 @@
     "core:window:allow-set-ignore-cursor-events",
     "core:window:allow-set-position",
     "core:window:allow-set-size",
-    "core:webview:allow-internal-toggle-devtools",
-    "opener:default",
     "global-shortcut:allow-is-registered",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
@@ -39,6 +37,7 @@
     "allow-discover-models",
     "allow-toggle-dictation",
     "allow-retry-recording",
+    "allow-cancel-history-retry",
     "allow-open-logs",
     "allow-open-settings-dir",
     "allow-reset-settings",
@@ -68,7 +67,6 @@
     "allow-get-runtime-info",
     "allow-play-cue",
     "allow-preview-error-notification",
-    "updater:default",
     "notification:default",
     "process:allow-restart"
   ]

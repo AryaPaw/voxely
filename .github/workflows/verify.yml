@@ -41,7 +41,12 @@ jobs:
         run: |
           cargo fmt --all --check
           cargo clippy --locked --all-targets --all-features -- -D warnings
-          cargo test --locked --all
+          cargo test --locked --all -- --test-threads=8
+      - name: Rust coverage floor
+        shell: pwsh
+        run: |
+          cargo install cargo-llvm-cov --locked --version 0.6.16
+          ./scripts/check-rust-coverage.ps1
       - name: MSRV field matches Cargo.toml
         working-directory: src-tauri
         shell: pwsh

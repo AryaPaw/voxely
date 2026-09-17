@@ -135,6 +135,15 @@ mod tests {
     }
 
     #[test]
+    fn dictation_timing_helpers_run() {
+        let samples = tone(0.05, 440.0, SAMPLE_RATE, 0.2);
+        let dsp = measure_dsp(DspPreset::stt_fast(), &samples, 1);
+        let wav = measure_wav_roundtrip(&samples, 1);
+        assert!(dsp < 60_000);
+        assert!(wav < 60_000);
+    }
+
+    #[test]
     #[ignore]
     fn dictation_timing() {
         let one = tone(1.0, 440.0, SAMPLE_RATE, 0.2);

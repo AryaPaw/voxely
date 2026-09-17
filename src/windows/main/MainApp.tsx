@@ -16,7 +16,7 @@ import {
   messagesFor,
   resolveUiLocale,
 } from "../../lib/i18n";
-import { HISTORY_CHANGED } from "../../lib/history-sync";
+import { HISTORY_CHANGED, historySearchQuery } from "../../lib/history-sync";
 import {
   APP_NAVIGATE,
   sectionFromNavigatePayload,
@@ -48,13 +48,21 @@ export function MainApp() {
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [settingsRecovered, setSettingsRecovered] = useState(false);
   const historyCursorRef = useRef<string | null>(null);
+  const queryRef = useRef(query);
+  queryRef.current = query;
   const settingsRef = useRef<AppSettings | null>(null);
   settingsRef.current = settings;
 
-  async function refreshHistory(reset = true) {
+  function copyForUi() {
+    return messagesFor(
+      resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto", navigator.language),
+    );
+  }
+
+  async function refreshHistory(reset = true, search = query) {
     const cursor = reset ? null : historyCursorRef.current;
     const [page, configured] = await Promise.all([
-      api.history(cursor, query || undefined),
+      api.history(cursor, historySearchQuery(search)),
       api.keyConfigured(),
     ]);
     setHistory((current) => (reset ? page.items : [...current, ...page.items]));
@@ -87,19 +95,15 @@ export function MainApp() {
         setSection((current) => (current === "debug" ? "history" : current));
       }
     } catch (error) {
-      setLoadError(
-        formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
-      );
+      setLoadError(formatInvokeError(error, copyForUi()));
     }
   }
 
   useEffect(() => {
     void loadSettings();
     const unlistenHistory = listen(HISTORY_CHANGED, () => {
-      void refreshHistory(true).catch((error: unknown) => {
-        reportError(
-          formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
-        );
+      void refreshHistory(true, queryRef.current).catch((error: unknown) => {
+        reportError(formatInvokeError(error, copyForUi()));
       });
     });
     const unlistenInsert = listen<string>("session://insert", (event) => {
@@ -127,9 +131,7 @@ export function MainApp() {
 
   useEffect(() => {
     void refreshHistory(true).catch((error: unknown) => {
-      reportError(
-        formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
-      );
+      reportError(formatInvokeError(error, copyForUi()));
     });
     // reload on search only; refreshHistory closes over the latest query
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -159,9 +161,7 @@ export function MainApp() {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 text-sm">
         <p>{loadError}</p>
-        <Button onClick={() => void loadSettings()}>
-          {messagesFor(resolveUiLocale("auto", navigator.language)).retryAction}
-        </Button>
+        <Button onClick={() => void loadSettings()}>{copyForUi().retryAction}</Button>
       </div>
     );
   }
@@ -169,7 +169,7 @@ export function MainApp() {
   if (!settings) {
     return (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        {messagesFor(resolveUiLocale("auto", navigator.language)).loading}
+        {copyForUi().loading}
       </div>
     );
   }
@@ -267,8 +267,12 @@ export function MainApp() {
                   copy={copy}
                   onChange={(patch) => void persist({ ...settings, ...patch })}
                   onDeleteAll={async () => {
-                    await api.deleteAll();
-                    await refreshHistory();
+                    try {
+                      await api.deleteAll();
+                      await refreshHistory();
+                    } catch (error) {
+                      reportError(formatInvokeError(error, copy));
+                    }
                   }}
                 />
               ) : null}

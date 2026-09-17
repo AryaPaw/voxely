@@ -42,6 +42,10 @@ pub fn install_allowed(dictation_busy: bool) -> bool {
     !dictation_busy
 }
 
+pub fn restart_after_install_allowed(dictation_busy: bool) -> bool {
+    !dictation_busy
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,5 +63,7 @@ mod tests {
     fn busy_dictation_defers_install() {
         assert!(install_allowed(false));
         assert!(!install_allowed(true));
+        assert!(restart_after_install_allowed(false));
+        assert!(!restart_after_install_allowed(true));
     }
 }

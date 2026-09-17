@@ -71,7 +71,7 @@ History keeps transcripts locally so you can copy, listen, and search.
 - Unicode insert into the captured window, or clipboard-only if you prefer to paste
 - Recording HUD: waveform, timer, hover to cancel
 - Speech filters: high-pass, gain, noise reduction, compressor, limiter
-- A/B listen of original vs processed audio at matched loudness
+- A/B listen of original vs processed audio at matched preview loudness (filter-sample playback only)
 - Local history, search, retention, and storage limits
 - English and Russian UI, light, dark, and system theme
 - Signed Tauri updates once a release is published
@@ -105,7 +105,7 @@ Some Chromium-based apps accept Unicode poorly. If nothing appears, the recordin
 - Transcription goes through OpenRouter; logs omit the key
 - The overlay does not steal focus and will not type into a different app
 
-Audit notes: [`docs/SECURITY.md`](docs/SECURITY.md).
+Audit notes: [`docs/SECURITY.md`](docs/SECURITY.md). Voxely is not a medical device.
 
 ## For developers
 

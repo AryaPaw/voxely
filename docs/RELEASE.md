@@ -37,4 +37,4 @@ bun run tauri build
 
 Push a `vX.Y.Z` tag only after manifests already contain `X.Y.Z`. The release workflow builds signed NSIS, runs installer smoke, then publishes one GitHub Release named `vX.Y.Z`. It must not leave a leftover draft.
 
-Rollback: keep the previous NSIS and do not move `latest`. A failed update must leave the running app intact.
+Rollback: keep the previous NSIS on its GitHub tag. A failed update must leave the running app intact. To roll the Tauri updater back, replace the published `latest.json` with the previous signed manifest; do not rely on GitHub `latest` alone.

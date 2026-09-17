@@ -1,12 +1,62 @@
 use std::fs;
 use std::io;
 use std::path::Path;
+use std::sync::OnceLock;
 
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
+use tracing_subscriber::fmt;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::reload;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::EnvFilter;
+
+static FILTER_RELOAD: OnceLock<reload::Handle<EnvFilter, tracing_subscriber::Registry>> =
+    OnceLock::new();
 
 pub const MAX_LOG_FILES: usize = 14;
 pub const LOG_PREFIX: &str = "voxely";
 pub const LOG_SUFFIX: &str = "log";
+
+fn env_filter(debug: bool) -> EnvFilter {
+    EnvFilter::new(if debug {
+        "info,voxely_lib=debug"
+    } else {
+        "warn,voxely_lib=info"
+    })
+}
+
+pub fn apply_debug_logging(debug: bool) {
+    if let Some(handle) = FILTER_RELOAD.get() {
+        let _ = handle.reload(env_filter(debug));
+    }
+}
+
+pub fn init(debug: bool, log_dir: Option<&Path>) {
+    let (filter_layer, handle) = reload::Layer::new(env_filter(debug));
+    let _ = FILTER_RELOAD.set(handle);
+    if let Some(dir) = log_dir {
+        let _ = std::fs::create_dir_all(dir);
+        let file_appender = match file_appender(dir) {
+            Ok(appender) => appender,
+            Err(_) => {
+                let _ = tracing_subscriber::registry()
+                    .with(filter_layer)
+                    .with(fmt::layer())
+                    .try_init();
+                return;
+            }
+        };
+        let _ = tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(fmt::layer().with_ansi(false).with_writer(file_appender))
+            .try_init();
+    } else {
+        let _ = tracing_subscriber::registry()
+            .with(filter_layer)
+            .with(fmt::layer())
+            .try_init();
+    }
+}
 
 pub fn migrate_legacy_log_names(dir: &Path) -> io::Result<()> {
     if !dir.is_dir() {
@@ -77,5 +127,11 @@ mod tests {
         assert!(current.exists());
         assert!(!old.exists());
         assert_eq!(fs::read_to_string(current).unwrap(), "new");
+    }
+
+    #[test]
+    fn apply_debug_logging_without_init_is_safe() {
+        apply_debug_logging(true);
+        apply_debug_logging(false);
     }
 }

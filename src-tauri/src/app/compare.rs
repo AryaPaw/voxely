@@ -91,7 +91,7 @@ pub fn compare_busy(ctx: &AppContext) -> bool {
 fn emit_compare(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
     let state = ctx.compare_state.lock().clone();
-    let _ = app.emit("compare://state", state);
+    let _ = app.emit_to("main", "compare://state", state);
 }
 
 pub fn start_model_compare(app: &AppHandle) -> Result<(), AppError> {
@@ -372,7 +372,8 @@ fn apply_slot_error(app: &AppHandle, slot_id: &str, model: &str, err: AppError) 
     }
 }
 
-pub fn steal_compare_capture(ctx: &AppContext) {
+pub fn steal_compare_capture(app: &AppHandle) {
+    let ctx = app.state::<Arc<AppContext>>();
     if let Some(session) = ctx.compare_capture.lock().take() {
         std::thread::spawn(move || {
             if let Ok(result) = session.stop() {
@@ -381,6 +382,7 @@ pub fn steal_compare_capture(ctx: &AppContext) {
         });
     }
     ctx.compare_state.lock().recording = false;
+    emit_compare(app);
 }
 
 pub fn frozen_stt_copy(audio_root: &Path, run_id: &str, src: &Path) -> Result<PathBuf, AppError> {
@@ -417,10 +419,13 @@ mod tests {
     fn keep_list_covers_compare_and_filter() {
         assert!(keep_compare_wav("filter-sample.wav"));
         assert!(keep_compare_wav("filter-preview.wav"));
-        assert!(keep_compare_wav("model-compare.stt.wav"));
-        assert!(keep_compare_wav("model-compare.abc.stt.wav"));
+        assert!(!keep_compare_wav("model-compare.stt.wav"));
+        assert!(!keep_compare_wav("model-compare.abc.stt.wav"));
         assert!(!keep_compare_wav("orphan.wav"));
-        assert!(keep_compare_wav(&compare_listen_name(9)));
+        assert!(!keep_compare_wav(&compare_listen_name(9)));
+        assert!(crate::history::retention::keep_compare_temp_wav(
+            &compare_listen_name(9)
+        ));
     }
 
     #[test]

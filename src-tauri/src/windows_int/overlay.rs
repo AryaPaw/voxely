@@ -53,6 +53,28 @@ pub fn work_area_for_hwnd(raw: isize) -> Option<WorkArea> {
 }
 
 #[cfg(windows)]
+pub fn dpi_scale_for_hwnd(raw: isize) -> Option<f64> {
+    if raw == 0 {
+        return None;
+    }
+    unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+        use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+
+        let hwnd = HWND(raw as *mut core::ffi::c_void);
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut dpi_x = 0u32;
+        let mut dpi_y = 0u32;
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).ok()?;
+        if dpi_x == 0 {
+            return None;
+        }
+        Some(f64::from(dpi_x) / 96.0)
+    }
+}
+
+#[cfg(windows)]
 pub fn work_area_for_foreground(skip_roots: &[usize]) -> Option<WorkArea> {
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT};
@@ -154,6 +176,11 @@ pub fn work_area_for_cursor() -> Option<WorkArea> {
 
 #[cfg(not(windows))]
 pub fn work_area_for_hwnd(_raw: isize) -> Option<WorkArea> {
+    None
+}
+
+#[cfg(not(windows))]
+pub fn dpi_scale_for_hwnd(_raw: isize) -> Option<f64> {
     None
 }
 

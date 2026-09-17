@@ -133,4 +133,47 @@ describe("ComparePane", () => {
       );
     });
   });
+
+  it("binds a compare result to the matching model, not the slot index", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "get_model_compare") {
+        return {
+          recording: false,
+          running: false,
+          listenPath: "C:/tmp/model-compare.listen.wav",
+          sttPath: "C:/tmp/model-compare.stt.wav",
+          nonce: 4,
+          runId: "run-9",
+          slots: [
+            {
+              slotId: "s-whisper",
+              model: "openai/whisper-large-v3",
+              status: "ok",
+              text: "whisper text",
+              error: null,
+              attempt: 1,
+              cost: 0.01,
+              latencyMs: 10,
+              runId: "run-9",
+            },
+          ],
+        };
+      }
+      return undefined;
+    });
+    render(
+      <ComparePane
+        settings={settings()}
+        copy={messagesFor("en")}
+        keyConfigured
+        onChange={() => undefined}
+        onOpenKey={() => undefined}
+      />,
+    );
+    expect(await screen.findByText("whisper text")).toBeInTheDocument();
+    const rows = screen.getAllByRole("textbox");
+    expect(rows[0]).toHaveValue("openai/gpt-transcribe");
+    expect(rows[1]).toHaveValue("openai/whisper-large-v3");
+  });
 });

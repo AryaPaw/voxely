@@ -11,8 +11,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WM_KEYDOWN, WM_SYSKEYDOWN,
 };
 
-use crate::app::machine::is_cancellable;
-use crate::app::session::{cancel_recording, AppContext};
+use crate::app::operations::escape_cancels;
+use crate::app::session::AppContext;
 
 static APP: OnceLock<AppHandle> = OnceLock::new();
 static HOOK: Mutex<Option<isize>> = Mutex::new(None);
@@ -56,7 +56,7 @@ pub fn uninstall() {
 
 fn session_is_cancellable(app: &AppHandle) -> bool {
     app.try_state::<Arc<AppContext>>()
-        .map(|ctx| is_cancellable(&ctx.state.lock()))
+        .map(|ctx| escape_cancels(&ctx))
         .unwrap_or(false)
 }
 
@@ -68,10 +68,10 @@ unsafe extern "system" fn ll_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> 
             if info.vkCode == u32::from(VK_ESCAPE.0) {
                 if let Some(app) = APP.get() {
                     if session_is_cancellable(app) {
-                        let app = app.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let _ = cancel_recording(&app);
-                        });
+                        crate::app::shortcuts::post_session_command(
+                            app,
+                            crate::app::shortcuts::SessionCommand::Cancel,
+                        );
                         return LRESULT(1);
                     }
                 }
