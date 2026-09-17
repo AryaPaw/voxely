@@ -42,12 +42,13 @@ pub mod native {
     };
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
-        KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL,
-        VK_RMENU, VK_RSHIFT, VK_RWIN,
+        GetAsyncKeyState, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
+        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
+        VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, SetForegroundWindow,
+        GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, SendMessageTimeoutW,
+        SetForegroundWindow, SMTO_ABORTIFHUNG, WM_CHAR,
     };
 
     pub struct LiveWorld {
@@ -60,6 +61,10 @@ pub mod native {
             unsafe {
                 let fg = GetForegroundWindow();
                 let foreground_root = hwnd_root_value(fg);
+                let mut foreground_pid = 0u32;
+                if !fg.is_invalid() {
+                    GetWindowThreadProcessId(fg, Some(&mut foreground_pid));
+                }
                 let focus_root = thread_focus_hwnd(fg).and_then(|hwnd| hwnd_root_value(hwnd));
                 let (target_alive, target_iconic, window_class, integrity_blocked) =
                     if let Some(target) = captured {
@@ -81,6 +86,11 @@ pub mod native {
                 WorldSnapshot {
                     captured,
                     foreground_root,
+                    foreground_pid: if foreground_pid == 0 {
+                        None
+                    } else {
+                        Some(foreground_pid)
+                    },
                     focus_root,
                     overlay_root: self.overlay_root,
                     main_root: self.main_root,
@@ -100,8 +110,22 @@ pub mod native {
                 }
                 let _guard = attach_input(hwnd);
                 let ok = SetForegroundWindow(hwnd).as_bool();
+                let _ = SetFocus(HWND(target.hwnd as *mut _));
                 drop(_guard);
                 hwnd_root_value(GetForegroundWindow()) == Some(target.root) || ok
+            }
+        }
+
+        fn focus_caret(&mut self, target: &CapturedTarget) -> bool {
+            unsafe {
+                let hwnd = HWND(target.hwnd as *mut _);
+                if !IsWindow(hwnd).as_bool() {
+                    return false;
+                }
+                let _guard = attach_input(hwnd);
+                let focused = SetFocus(hwnd).is_ok();
+                drop(_guard);
+                focused || thread_focus_hwnd(hwnd).is_some_and(|focus| focus == hwnd)
             }
         }
 
@@ -110,6 +134,12 @@ pub mod native {
         }
 
         fn send_keys(&mut self, keys: &[InsertKey]) -> ChunkSend {
+            if keys.is_empty() {
+                return ChunkSend::Complete;
+            }
+            if let Some(focus) = unsafe { chromium_focus_hwnd() } {
+                return send_chromium_chars(focus, keys);
+            }
             let mut inputs = Vec::with_capacity(keys.len() * 2);
             for key_plan in keys {
                 match key_plan {
@@ -122,9 +152,6 @@ pub mod native {
                         inputs.push(key(*vk, true));
                     }
                 }
-            }
-            if inputs.is_empty() {
-                return ChunkSend::Complete;
             }
             let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
             classify_chunk_send(sent, inputs.len() as u32)
@@ -325,6 +352,60 @@ pub mod native {
         Some(String::from_utf16_lossy(&buf[..n as usize]))
     }
 
+    unsafe fn chromium_focus_hwnd() -> Option<HWND> {
+        let fg = GetForegroundWindow();
+        let focus = thread_focus_hwnd(fg).unwrap_or(fg);
+        let focus_class = window_class_name(focus);
+        let root_class = hwnd_root_value(fg).and_then(|_| window_class_name(root_hwnd(fg)));
+        if focus_class.as_deref().is_some_and(super::is_chromium_host)
+            || root_class.as_deref().is_some_and(super::is_chromium_host)
+        {
+            Some(focus)
+        } else {
+            None
+        }
+    }
+
+    fn send_chromium_chars(hwnd: HWND, keys: &[InsertKey]) -> ChunkSend {
+        use windows::Win32::Foundation::{LPARAM, WPARAM};
+        let mut accepted = 0u32;
+        let planned = (keys.len() * 2) as u32;
+        for key_plan in keys {
+            match key_plan {
+                InsertKey::Unicode(unit) => {
+                    let mut result = 0usize;
+                    let ok = unsafe {
+                        SendMessageTimeoutW(
+                            hwnd,
+                            WM_CHAR,
+                            WPARAM(usize::from(*unit)),
+                            LPARAM(1),
+                            SMTO_ABORTIFHUNG,
+                            50,
+                            Some(&mut result),
+                        )
+                    };
+                    if ok.0 != 0 {
+                        accepted += 2;
+                    } else if accepted == 0 {
+                        return ChunkSend::Zero;
+                    } else {
+                        return ChunkSend::Partial { accepted };
+                    }
+                }
+                InsertKey::VirtualKey(vk) => {
+                    let inputs = [key(*vk, false), key(*vk, true)];
+                    let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
+                    if sent != 2 {
+                        return classify_chunk_send(accepted + sent as u32, planned);
+                    }
+                    accepted += 2;
+                }
+            }
+        }
+        ChunkSend::Complete
+    }
+
     unsafe fn root_hwnd(hwnd: HWND) -> HWND {
         use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GA_ROOT};
         if hwnd.is_invalid() {
@@ -493,6 +574,7 @@ pub mod native {
             WorldSnapshot {
                 captured,
                 foreground_root: None,
+                foreground_pid: None,
                 focus_root: None,
                 overlay_root: self.overlay_root,
                 main_root: self.main_root,
@@ -504,6 +586,10 @@ pub mod native {
         }
 
         fn restore_foreground(&mut self, _target: &CapturedTarget) -> bool {
+            false
+        }
+
+        fn focus_caret(&mut self, _target: &CapturedTarget) -> bool {
             false
         }
 

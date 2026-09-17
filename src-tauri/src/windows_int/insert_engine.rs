@@ -72,6 +72,7 @@ pub enum InsertKey {
 pub struct WorldSnapshot {
     pub captured: Option<CapturedTarget>,
     pub foreground_root: Option<usize>,
+    pub foreground_pid: Option<u32>,
     pub focus_root: Option<usize>,
     pub overlay_root: Option<usize>,
     pub main_root: Option<usize>,
@@ -92,6 +93,7 @@ pub enum ChunkSend {
 pub trait InsertWorld {
     fn snapshot(&self, captured: Option<CapturedTarget>) -> WorldSnapshot;
     fn restore_foreground(&mut self, target: &CapturedTarget) -> bool;
+    fn focus_caret(&mut self, target: &CapturedTarget) -> bool;
     fn wait_keys_up(&mut self, keys: &[u16], timeout: Duration);
     fn send_keys(&mut self, keys: &[InsertKey]) -> ChunkSend;
     fn clipboard_copy(&mut self, text: &str) -> Result<(), AppError>;
@@ -125,6 +127,7 @@ pub fn classify_insert_policy(snap: &WorldSnapshot) -> InsertPolicy {
         Some(fg) if snap.overlay_root == Some(fg) || snap.main_root == Some(fg) => {
             InsertPolicy::RestoreThenSend
         }
+        Some(_) if snap.foreground_pid == Some(target.pid) => InsertPolicy::RestoreThenSend,
         Some(_) => InsertPolicy::CopyOnly(CopyReason::UserSwitched),
         None => InsertPolicy::CopyOnly(CopyReason::NoTarget),
     }
@@ -207,6 +210,23 @@ pub fn plan_insert_units_for_class(text: &str, class: Option<&str>) -> Vec<Inser
 pub const UNICODE_CHUNK_UNITS_DEFAULT: usize = 512;
 pub const UNICODE_CHUNK_UNITS_MIN: usize = 256;
 pub const UNICODE_CHUNK_UNITS_MAX: usize = 1024;
+pub const UNICODE_CHUNK_UNITS_CHROMIUM: usize = 64;
+pub const UNICODE_CHUNK_UNITS_CHROMIUM_MIN: usize = 32;
+
+pub fn is_chromium_host(class: &str) -> bool {
+    let class = class.trim();
+    class.starts_with("Chrome_WidgetWin")
+        || class.starts_with("Chrome_RenderWidgetHost")
+        || class.eq_ignore_ascii_case("Chrome_RenderWidgetHostHWND")
+}
+
+pub fn unicode_chunk_units_for_class(class: Option<&str>) -> usize {
+    if class.is_some_and(is_chromium_host) {
+        UNICODE_CHUNK_UNITS_CHROMIUM
+    } else {
+        UNICODE_CHUNK_UNITS_DEFAULT
+    }
+}
 
 pub fn next_logical_chunk_end(units: &[Vec<InsertKey>], start: usize, max_keys: usize) -> usize {
     if start >= units.len() {
@@ -230,9 +250,14 @@ pub fn next_logical_chunk_end(units: &[Vec<InsertKey>], start: usize, max_keys: 
 }
 
 pub fn adapt_unicode_chunk_size(prev_chunk: usize, wall_ms: u128) -> usize {
-    let current = prev_chunk.clamp(UNICODE_CHUNK_UNITS_MIN, UNICODE_CHUNK_UNITS_MAX);
-    if wall_ms >= 80 {
+    let min = if prev_chunk < UNICODE_CHUNK_UNITS_MIN {
+        UNICODE_CHUNK_UNITS_CHROMIUM_MIN
+    } else {
         UNICODE_CHUNK_UNITS_MIN
+    };
+    let current = prev_chunk.clamp(min, UNICODE_CHUNK_UNITS_MAX);
+    if wall_ms >= 80 {
+        min
     } else if wall_ms <= 8 {
         UNICODE_CHUNK_UNITS_MAX
     } else {
@@ -349,6 +374,7 @@ fn restore_then_send(
     if !world.restore_foreground(&target) {
         return copy_full(world, req.text, CopyReason::UserSwitched);
     }
+    let _ = world.focus_caret(&target);
     let snap = annotated_snapshot(world, req.captured, req.overlay_root, req.main_root);
     match classify_insert_policy(&snap) {
         InsertPolicy::SendUnicode => send_unicode(world, req, snap),
@@ -362,6 +388,9 @@ fn send_unicode(
     req: InsertRequest<'_>,
     snap: WorldSnapshot,
 ) -> InsertOutcome {
+    if let Some(target) = snap.captured {
+        let _ = world.focus_caret(&target);
+    }
     world.wait_keys_up(
         &hotkey_keys_to_release(req.hotkey),
         Duration::from_millis(300),
@@ -372,7 +401,8 @@ fn send_unicode(
     let units = plan_logical_units(req.text, snap.window_class.as_deref());
     let mut cursor = 0usize;
     let mut any = false;
-    let mut chunk = UNICODE_CHUNK_UNITS_DEFAULT;
+    let mut chunk = unicode_chunk_units_for_class(snap.window_class.as_deref());
+    let started_all = std::time::Instant::now();
     while cursor < units.len() {
         if (req.abort)() {
             return if any {
@@ -411,6 +441,8 @@ fn send_unicode(
     tracing::info!(
         policy = "send_unicode",
         units = units.len() as u64,
+        insert_ms = started_all.elapsed().as_millis() as u64,
+        class = snap.window_class.as_deref().unwrap_or(""),
         "unicode insert completed"
     );
     InsertOutcome::Inserted
@@ -450,6 +482,7 @@ mod tests {
         foreground_root: Option<usize>,
         overlay_root: Option<usize>,
         main_root: Option<usize>,
+        foreground_pid: Option<u32>,
         alive: bool,
         iconic: bool,
         integrity_blocked: Option<bool>,
@@ -479,6 +512,7 @@ mod tests {
             WorldSnapshot {
                 captured,
                 foreground_root: self.foreground_root,
+                foreground_pid: self.foreground_pid,
                 focus_root: self.foreground_root,
                 overlay_root: self.overlay_root,
                 main_root: self.main_root,
@@ -494,9 +528,15 @@ mod tests {
             if self.restore_ok {
                 if let Some(target) = self.captured {
                     self.foreground_root = Some(target.root);
+                    self.foreground_pid = Some(target.pid);
                 }
             }
             self.restore_ok
+        }
+
+        fn focus_caret(&mut self, _target: &CapturedTarget) -> bool {
+            self.actions.borrow_mut().push("focus".into());
+            true
         }
 
         fn wait_keys_up(&mut self, _keys: &[u16], _timeout: Duration) {
@@ -560,7 +600,10 @@ mod tests {
         let never = || false;
         let outcome = run_insert(&mut world, request("unicode", "hi", Some(target), &never));
         assert_eq!(outcome, InsertOutcome::Inserted);
-        assert_eq!(world.actions.borrow().as_slice(), ["wait_keys", "send:2"]);
+        assert_eq!(
+            world.actions.borrow().as_slice(),
+            ["focus", "wait_keys", "send:2"]
+        );
         assert!(world.clipboard.is_none());
     }
 
@@ -581,7 +624,7 @@ mod tests {
         assert_eq!(outcome, InsertOutcome::Inserted);
         assert_eq!(
             world.actions.borrow().as_slice(),
-            ["restore", "wait_keys", "send:2"]
+            ["restore", "focus", "focus", "wait_keys", "send:2"]
         );
     }
 
@@ -591,6 +634,7 @@ mod tests {
         let mut world = FakeWorld {
             captured: Some(target),
             foreground_root: Some(99),
+            foreground_pid: Some(99),
             overlay_root: Some(3),
             main_root: Some(4),
             alive: true,
@@ -610,6 +654,43 @@ mod tests {
         );
         assert_eq!(world.actions.borrow().as_slice(), ["copy:9"]);
         assert_eq!(world.clipboard.as_deref(), Some("full text"));
+    }
+
+    #[test]
+    fn same_process_other_hwnd_restores_then_sends() {
+        let target = FakeWorld::target(10);
+        let mut world = FakeWorld {
+            captured: Some(target),
+            foreground_root: Some(77),
+            foreground_pid: Some(10),
+            overlay_root: Some(3),
+            main_root: Some(4),
+            alive: true,
+            restore_ok: true,
+            ..FakeWorld::default()
+        };
+        let never = || false;
+        let outcome = run_insert(&mut world, request("unicode", "hi", Some(target), &never));
+        assert_eq!(outcome, InsertOutcome::Inserted);
+        assert_eq!(
+            world.actions.borrow().as_slice(),
+            ["restore", "focus", "focus", "wait_keys", "send:2"]
+        );
+    }
+
+    #[test]
+    fn chromium_chunk_stays_small_when_slow() {
+        assert!(is_chromium_host("Chrome_WidgetWin_1"));
+        assert!(is_chromium_host("Chrome_RenderWidgetHostHWND"));
+        assert!(!is_chromium_host("Edit"));
+        assert_eq!(
+            unicode_chunk_units_for_class(Some("Chrome_WidgetWin_1")),
+            UNICODE_CHUNK_UNITS_CHROMIUM
+        );
+        assert_eq!(
+            adapt_unicode_chunk_size(64, 400),
+            UNICODE_CHUNK_UNITS_CHROMIUM_MIN
+        );
     }
 
     #[test]

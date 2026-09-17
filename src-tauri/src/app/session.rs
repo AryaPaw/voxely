@@ -36,7 +36,7 @@ use crate::windows_int::credentials::get_api_key;
 use crate::windows_int::overlay::{work_area_for_cursor, work_area_for_hwnd};
 use crate::windows_int::text_injector::{
     insert_outcome_event, insert_should_abort, insert_transcript_now, native, CapturedTarget,
-    NativeHwnd,
+    InsertPolicy, InsertWorld, NativeHwnd,
 };
 
 pub struct AppContext {
@@ -232,6 +232,8 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     *ctx.captured_target.lock() = native::capture_session_target(&skip, generation);
     ctx.overlay_timeline.lock().begin_show();
     show_overlay(app);
+    keep_captured_caret(app);
+    schedule_keep_captured_caret(app, generation);
     ctx.emit_state(app);
     let settings = ctx.settings.lock().clone();
     if settings.notifications {
@@ -578,6 +580,7 @@ fn publish_stt_success(app: &AppHandle, ctx: &AppContext, started_generation: u6
         ]
     );
     hide_overlay_now(app);
+    keep_captured_caret(app);
     let _ = ctx.transition(SessionEvent::Succeeded);
     let _ = ctx.transition(SessionEvent::Dismiss);
     ctx.emit_state(app);
@@ -636,6 +639,48 @@ fn voxely_window_roots(app: &AppHandle) -> Vec<usize> {
         .into_iter()
         .filter_map(|label| native_hwnd_for_label(app, label).map(|h| h.value))
         .collect()
+}
+
+fn keep_captured_caret(app: &AppHandle) {
+    let ctx = app.state::<Arc<AppContext>>();
+    let Some(target) = *ctx.captured_target.lock() else {
+        return;
+    };
+    let overlay_root = overlay_native_hwnd(app).map(|h| h.value);
+    let main_root = native_hwnd_for_label(app, "main").map(|h| h.value);
+    let mut world = native::LiveWorld {
+        overlay_root,
+        main_root,
+    };
+    let mut snap = world.snapshot(Some(target));
+    snap.overlay_root = overlay_root;
+    snap.main_root = main_root;
+    snap.captured = Some(target);
+    match crate::windows_int::insert_engine::classify_insert_policy(&snap) {
+        InsertPolicy::SendUnicode => {
+            let _ = world.focus_caret(&target);
+        }
+        InsertPolicy::RestoreThenSend => {
+            if world.restore_foreground(&target) {
+                let _ = world.focus_caret(&target);
+            }
+        }
+        InsertPolicy::CopyOnly(_) => {}
+    }
+}
+
+fn schedule_keep_captured_caret(app: &AppHandle, generation: u64) {
+    for delay_ms in [40_u64, 160] {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            let ctx = app.state::<Arc<AppContext>>();
+            if ctx.session_generation.load(Ordering::SeqCst) != generation {
+                return;
+            }
+            keep_captured_caret(&app);
+        });
+    }
 }
 
 fn overlay_work_area(window: &WebviewWindow) -> WorkArea {
