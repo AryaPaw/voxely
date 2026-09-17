@@ -8,10 +8,9 @@ use crate::app::session::{
 use crate::audio::capture::{read_pcm16_wav, write_pcm16_wav, CaptureSession};
 use crate::audio::devices::InputDeviceInfo;
 use crate::dsp::metrics::SAMPLE_RATE;
-use crate::dsp::obs_mapping::{parse_scene_collection, preset_from_preview, ObsImportPreview};
-use crate::dsp::pipeline::{prepare_listen_preview, DspPreset};
+use crate::dsp::pipeline::prepare_listen_preview;
 use crate::error::AppError;
-use crate::history::repository::{Recording, RecordingSummary};
+use crate::history::repository::Recording;
 use crate::history::retention::delete_recording;
 use crate::settings::AppSettings;
 use crate::transcription::openrouter::{list_transcription_models, SttModel};
@@ -50,21 +49,81 @@ fn persist_settings(
     ctx: &AppContext,
     settings: AppSettings,
 ) -> Result<AppSettings, AppError> {
+    persist_settings_inner(app, ctx, settings, true)
+}
+
+fn persist_settings_inner(
+    app: &AppHandle,
+    ctx: &AppContext,
+    mut settings: AppSettings,
+    run_retention: bool,
+) -> Result<AppSettings, AppError> {
     settings.retry.validate()?;
     settings.mic_tune.validate()?;
+    validate_settings_graph(&settings)?;
+    let previous = ctx.settings.lock().clone();
+    if settings.write_seq != 0 && settings.write_seq < previous.write_seq {
+        return Ok(previous);
+    }
+    if settings.hotkey != previous.hotkey {
+        crate::app::shortcuts::parse_hotkey(&settings.hotkey)?;
+    }
+    settings.write_seq = previous.write_seq.saturating_add(1);
     settings.save(&ctx.settings_path)?;
     *ctx.settings.lock() = settings.clone();
-    let _ = app.emit("settings://changed", settings.clone());
-    let _ = crate::app::session::apply_configured_retention(ctx);
-    if let Err(e) = crate::app::shortcuts::sync_shortcuts(app) {
-        tracing::error!(error = %e, "hotkey register failed");
+    *ctx.settings_recovery.lock() = false;
+    if let Err(err) = crate::app::shortcuts::sync_shortcuts(app) {
+        let _ = previous.save(&ctx.settings_path);
+        *ctx.settings.lock() = previous.clone();
+        let _ = crate::app::shortcuts::sync_shortcuts(app);
+        return Err(err);
     }
-    crate::app::lifecycle::sync_autostart(app, settings.start_with_windows);
+    if let Err(err) = crate::app::lifecycle::sync_autostart(app, settings.start_with_windows) {
+        settings.start_with_windows = previous.start_with_windows;
+        let _ = settings.save(&ctx.settings_path);
+        *ctx.settings.lock() = settings.clone();
+        return Err(err);
+    }
+    let _ = app.emit("settings://changed", settings.clone());
+    if run_retention {
+        let _ = crate::app::session::apply_configured_retention(ctx);
+    }
     let _ = configure_tray(app);
     ctx.transport
         .lock()
         .sync(settings.retry.to_policy().connect_timeout)?;
     Ok(settings)
+}
+
+fn validate_settings_graph(settings: &AppSettings) -> Result<(), AppError> {
+    if settings.model.trim().is_empty() {
+        return Err(AppError::RequestValidationFailed("model required".into()));
+    }
+    if !settings
+        .presets
+        .iter()
+        .any(|preset| preset.id == settings.active_preset_id)
+    {
+        return Err(AppError::RequestValidationFailed(
+            "active preset is missing".into(),
+        ));
+    }
+    for preset in &settings.presets {
+        let mut kinds = std::collections::HashSet::new();
+        for slot in &preset.order {
+            if !kinds.insert(slot.kind) {
+                return Err(AppError::RequestValidationFailed(
+                    "preset has duplicate filter kinds".into(),
+                ));
+            }
+        }
+    }
+    if !matches!(settings.insertion_mode.as_str(), "unicode" | "clipboard") {
+        return Err(AppError::RequestValidationFailed(
+            "insertion mode must be unicode or clipboard".into(),
+        ));
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -75,8 +134,27 @@ pub fn list_history(ctx: State<'_, Arc<AppContext>>) -> Result<Vec<Recording>, A
 #[tauri::command]
 pub fn list_history_summaries(
     ctx: State<'_, Arc<AppContext>>,
-) -> Result<Vec<RecordingSummary>, AppError> {
-    ctx.history.lock().list_summaries(500)
+    cursor: Option<String>,
+    limit: Option<i64>,
+    query: Option<String>,
+) -> Result<crate::history::repository::HistorySummaryPage, AppError> {
+    ctx.history
+        .lock()
+        .list_summaries_page(cursor.as_deref(), limit.unwrap_or(50), query.as_deref())
+}
+
+#[tauri::command]
+pub fn search_history(
+    ctx: State<'_, Arc<AppContext>>,
+    query: String,
+    cursor: Option<String>,
+    limit: Option<i64>,
+) -> Result<crate::history::repository::HistorySummaryPage, AppError> {
+    ctx.history.lock().list_summaries_page(
+        cursor.as_deref(),
+        limit.unwrap_or(50),
+        Some(query.as_str()),
+    )
 }
 
 #[tauri::command]
@@ -98,6 +176,9 @@ pub fn delete_history_item(
         .lock()
         .get(&id)?
         .ok_or_else(|| AppError::StorageFailed("not found".into()))?;
+    if crate::app::operations::protected_recording_ids(ctx.inner()).contains(&id) {
+        return Err(AppError::IllegalTransition("recording is in use".into()));
+    }
     let root = crate::history::repository::audio_dir(&ctx.data_dir);
     delete_recording(&ctx.history.lock(), &root, &rec)?;
     ctx.emit_history(&app);
@@ -105,15 +186,16 @@ pub fn delete_history_item(
 }
 
 #[tauri::command]
-pub fn delete_all_history(app: AppHandle, ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
+pub fn delete_all_history(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppContext>>,
+) -> Result<crate::history::retention::DeleteAllResult, AppError> {
     let root = crate::history::repository::audio_dir(&ctx.data_dir);
-    let items = ctx.history.lock().list(20_000)?;
-    for rec in items {
-        let _ = delete_recording(&ctx.history.lock(), &root, &rec);
-    }
-    ctx.history.lock().delete_all()?;
+    let protected = crate::app::operations::protected_recording_ids(ctx.inner());
+    let result =
+        crate::history::retention::delete_all_recordings(&ctx.history.lock(), &root, &protected)?;
     ctx.emit_history(&app);
-    Ok(())
+    Ok(result)
 }
 
 #[tauri::command]
@@ -202,6 +284,8 @@ pub fn start_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppErr
     };
     let session = CaptureSession::start(device.as_deref(), dest)?;
     *ctx.preview_capture.lock() = Some(session);
+    ctx.filter_recording
+        .store(true, std::sync::atomic::Ordering::SeqCst);
     Ok(())
 }
 
@@ -213,6 +297,8 @@ pub fn stop_filter_sample(ctx: State<'_, Arc<AppContext>>) -> Result<DspPreview,
         .take()
         .ok_or_else(|| AppError::AudioCaptureFailed("sample not started".into()))?;
     let result = session.stop()?;
+    ctx.filter_recording
+        .store(false, std::sync::atomic::Ordering::SeqCst);
     preview_from_original(ctx.inner(), &result.path)
 }
 
@@ -325,11 +411,11 @@ pub fn reset_settings(
         delete_api_key()?;
     }
     let keep_first_run = !wipe_api_key && ctx.settings.lock().first_run_complete;
-    persist_settings(
-        &app,
-        ctx.inner().as_ref(),
-        AppSettings::reset_user_settings(keep_first_run),
-    )
+    let current = ctx.settings.lock().clone();
+    let mut reset = AppSettings::reset_user_settings(keep_first_run);
+    reset.retention = current.retention;
+    reset.storage_limit = current.storage_limit;
+    persist_settings_inner(&app, ctx.inner().as_ref(), reset, false)
 }
 
 #[tauri::command]
@@ -338,35 +424,6 @@ pub fn open_audio_dir(ctx: State<'_, Arc<AppContext>>) -> Result<(), AppError> {
     std::fs::create_dir_all(&dir).map_err(|e| AppError::StorageFailed(e.to_string()))?;
     tauri_plugin_opener::open_path(dir, None::<&str>)
         .map_err(|e| AppError::StorageFailed(e.to_string()))
-}
-
-#[tauri::command]
-pub fn preview_obs_import() -> Result<Vec<ObsImportPreview>, AppError> {
-    crate::obs::load_local_previews()
-}
-
-#[tauri::command]
-pub fn import_obs_preset(
-    ctx: State<'_, Arc<AppContext>>,
-    source_name: String,
-    preset_name: String,
-) -> Result<DspPreset, AppError> {
-    let previews = crate::obs::load_local_previews()?;
-    let preview = previews
-        .into_iter()
-        .find(|p| p.source_name == source_name)
-        .ok_or_else(|| AppError::RequestValidationFailed("source not found".into()))?;
-    let preset = preset_from_preview(&preview, preset_name);
-    let mut settings = ctx.settings.lock().clone();
-    settings.presets.push(preset.clone());
-    settings.save(&ctx.settings_path)?;
-    *ctx.settings.lock() = settings;
-    Ok(preset)
-}
-
-#[tauri::command]
-pub fn parse_obs_json(json: String) -> Result<Vec<ObsImportPreview>, AppError> {
-    parse_scene_collection(&json).map_err(AppError::RequestValidationFailed)
 }
 
 #[tauri::command]
@@ -470,8 +527,13 @@ pub fn clear_model_compare(app: AppHandle) -> Result<(), AppError> {
 }
 
 #[tauri::command]
-pub fn get_runtime_info() -> crate::app::lifecycle::RuntimeInfo {
-    crate::app::lifecycle::runtime_info()
+pub fn cancel_model_compare(app: AppHandle) -> Result<crate::app::compare::CompareState, AppError> {
+    crate::app::compare::cancel_model_compare(&app)
+}
+
+#[tauri::command]
+pub fn get_runtime_info(ctx: State<'_, Arc<AppContext>>) -> crate::app::lifecycle::RuntimeInfo {
+    crate::app::lifecycle::runtime_info_with_recovery(*ctx.settings_recovery.lock())
 }
 
 #[tauri::command]

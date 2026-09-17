@@ -145,6 +145,7 @@ export interface AppSettings {
   uiLanguage?: string;
   autoUpdateEnabled?: boolean;
   compareModels?: string[];
+  writeSeq?: number;
 }
 
 export interface MeterSample {
@@ -153,7 +154,15 @@ export interface MeterSample {
   levels?: number[];
 }
 
+export interface HistorySummaryPage {
+  items: Recording[];
+  nextCursor: string | null;
+  total: number;
+  hasMore: boolean;
+}
+
 export interface CompareSlot {
+  slotId?: string;
   model: string;
   status: string;
   text: string | null;
@@ -161,6 +170,8 @@ export interface CompareSlot {
   attempt: number;
   cost: number | null;
   latencyMs: number | null;
+  clipNonce?: number;
+  runId?: string | null;
 }
 
 export interface CompareState {
@@ -178,7 +189,10 @@ export type CueKind = "start" | "stop" | "cancel";
 export interface RuntimeInfo {
   localBuild: boolean;
   buildDate: string;
+  settingsRecovered?: boolean;
 }
+
+export type UpdateOutcome = "none" | "available" | "installed" | "busy" | "deferred" | "failed";
 
 export type OverlaySnapshot = {
   revision: number;
@@ -192,10 +206,13 @@ export const api = {
   settings: () => ipc<AppSettings>("get_settings"),
   runtimeInfo: () => ipc<RuntimeInfo>("get_runtime_info"),
   saveSettings: (settings: AppSettings) => ipc<AppSettings>("save_settings", { settings }),
-  history: () => ipc<Recording[]>("list_history_summaries"),
+  history: (cursor?: string | null, query?: string, limit?: number) =>
+    ipc<HistorySummaryPage>("list_history_summaries", { cursor, query, limit }),
+  searchHistory: (query: string, cursor?: string | null, limit?: number) =>
+    ipc<HistorySummaryPage>("search_history", { query, cursor, limit }),
   recording: (id: string) => ipc<Recording | null>("get_recording", { id }),
   deleteItem: (id: string) => ipc<void>("delete_history_item", { id }),
-  deleteAll: () => ipc<void>("delete_all_history"),
+  deleteAll: () => ipc<{ deleted: string[]; failed: string[] }>("delete_all_history"),
   mics: () => ipc<Array<{ id: string; name: string; isDefault: boolean }>>("list_microphones"),
   meter: () => ipc<MeterSample>("get_meter"),
   startInputMeter: () => ipc<void>("start_input_meter"),
@@ -203,8 +220,8 @@ export const api = {
   previewDsp: () => ipc<DspPreview>("preview_dsp"),
   startFilterSample: () => ipc<void>("start_filter_sample"),
   stopFilterSample: () => ipc<DspPreview>("stop_filter_sample"),
-  checkForUpdates: () => ipc<string>("check_for_updates"),
-  installUpdate: () => ipc<string>("install_update"),
+  checkForUpdates: () => ipc<UpdateOutcome>("check_for_updates"),
+  installUpdate: () => ipc<UpdateOutcome>("install_update"),
   keyConfigured: () => ipc<boolean>("api_key_configured"),
   storeKey: (key: string) => ipc<boolean>("store_api_key", { key }),
   testConnection: () => ipc<number>("test_openrouter"),
@@ -216,9 +233,6 @@ export const api = {
   openLogs: () => ipc<void>("open_logs"),
   openSettingsDir: () => ipc<void>("open_settings_dir"),
   resetSettings: (wipeApiKey: boolean) => ipc<AppSettings>("reset_settings", { wipeApiKey }),
-  obsPreview: () => ipc<Array<{ sourceName: string; unsupported: string[] }>>("preview_obs_import"),
-  importObs: (sourceName: string, presetName: string) =>
-    ipc("import_obs_preset", { sourceName, presetName }),
   copy: (text: string) => ipc<void>("copy_transcript", { text }),
   audioPath: (id: string) => ipc<string | null>("recording_audio_url", { id }),
   openAudioDir: () => ipc<void>("open_audio_dir"),
@@ -228,6 +242,7 @@ export const api = {
   runModelCompare: () => ipc<CompareState>("run_model_compare"),
   getModelCompare: () => ipc<CompareState>("get_model_compare"),
   clearModelCompare: () => ipc<void>("clear_model_compare"),
+  cancelModelCompare: () => ipc<CompareState>("cancel_model_compare"),
   playCue: (kind: CueKind) => ipc<void>("play_cue", { kind }),
   previewErrorNotification: () => ipc<void>("preview_error_notification"),
 };

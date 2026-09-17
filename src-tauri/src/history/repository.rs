@@ -61,6 +61,24 @@ pub struct RecordingSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
+pub struct HistoryPage {
+    pub items: Vec<Recording>,
+    pub next_cursor: Option<String>,
+    pub total: i64,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct HistorySummaryPage {
+    pub items: Vec<RecordingSummary>,
+    pub next_cursor: Option<String>,
+    pub total: i64,
+    pub has_more: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
 pub struct TranscriptionAttempt {
     pub id: String,
     pub recording_id: String,
@@ -121,6 +139,7 @@ impl HistoryRepo {
                 FOREIGN KEY(recording_id) REFERENCES recordings(id) ON DELETE CASCADE
             );
             CREATE INDEX IF NOT EXISTS idx_recordings_created ON recordings(created_at);
+            CREATE INDEX IF NOT EXISTS idx_recordings_search ON recordings(model);
             "#,
         )
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
@@ -162,8 +181,9 @@ impl HistoryRepo {
         Ok(())
     }
 
-    pub fn update(&self, rec: &Recording) -> Result<(), AppError> {
-        self.conn
+    pub fn update(&self, rec: &Recording) -> Result<bool, AppError> {
+        let changed = self
+            .conn
             .execute(
                 "UPDATE recordings SET updated_at=?2, duration_ms=?3, raw_audio_path=?4,
                  processed_audio_path=?5, transcript=?6, status=?7, provider=?8, model=?9,
@@ -192,7 +212,7 @@ impl HistoryRepo {
                 ],
             )
             .map_err(|e| AppError::StorageFailed(e.to_string()))?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     pub fn get(&self, id: &str) -> Result<Option<Recording>, AppError> {
@@ -207,39 +227,175 @@ impl HistoryRepo {
     }
 
     pub fn list(&self, limit: i64) -> Result<Vec<Recording>, AppError> {
+        self.list_page(None, limit, None).map(|page| page.items)
+    }
+
+    pub fn list_all(&self) -> Result<Vec<Recording>, AppError> {
         let mut stmt = self
             .conn
-            .prepare("SELECT * FROM recordings ORDER BY created_at DESC LIMIT ?1")
+            .prepare("SELECT * FROM recordings ORDER BY created_at DESC")
             .map_err(|e| AppError::StorageFailed(e.to_string()))?;
         let rows = stmt
-            .query_map(params![limit], row_to_recording)
+            .query_map([], row_to_recording)
             .map_err(|e| AppError::StorageFailed(e.to_string()))?;
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| AppError::StorageFailed(e.to_string()))
+    }
+
+    pub fn count(&self, query: Option<&str>) -> Result<i64, AppError> {
+        match query.map(str::trim).filter(|q| !q.is_empty()) {
+            None => self
+                .conn
+                .query_row("SELECT COUNT(*) FROM recordings", [], |row| row.get(0))
+                .map_err(|e| AppError::StorageFailed(e.to_string())),
+            Some(q) => {
+                let like = format!("%{q}%");
+                self.conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM recordings WHERE transcript LIKE ?1
+                         OR last_error_message LIKE ?1 OR last_error_code LIKE ?1 OR model LIKE ?1",
+                        params![like],
+                        |row| row.get(0),
+                    )
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))
+            }
+        }
+    }
+
+    pub fn list_page(
+        &self,
+        cursor: Option<&str>,
+        limit: i64,
+        query: Option<&str>,
+    ) -> Result<HistoryPage, AppError> {
+        let limit = limit.clamp(1, 200);
+        let search = query.map(str::trim).filter(|q| !q.is_empty());
+        let mut items = match (cursor, search) {
+            (None, None) => {
+                let mut stmt = self
+                    .conn
+                    .prepare("SELECT * FROM recordings ORDER BY created_at DESC, id DESC LIMIT ?1")
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+                let rows = stmt
+                    .query_map(params![limit + 1], row_to_recording)
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?
+            }
+            (Some(id), None) => {
+                let Some(anchor) = self.get(id)? else {
+                    return Ok(HistoryPage {
+                        items: Vec::new(),
+                        next_cursor: None,
+                        total: self.count(None)?,
+                        has_more: false,
+                    });
+                };
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT * FROM recordings WHERE created_at < ?1
+                         OR (created_at = ?1 AND id < ?2)
+                         ORDER BY created_at DESC, id DESC LIMIT ?3",
+                    )
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+                let rows = stmt
+                    .query_map(
+                        params![anchor.created_at.to_rfc3339(), anchor.id, limit + 1],
+                        row_to_recording,
+                    )
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?
+            }
+            (None, Some(q)) => {
+                let like = format!("%{q}%");
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT * FROM recordings WHERE transcript LIKE ?1
+                         OR last_error_message LIKE ?1 OR last_error_code LIKE ?1 OR model LIKE ?1
+                         ORDER BY created_at DESC, id DESC LIMIT ?2",
+                    )
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+                let rows = stmt
+                    .query_map(params![like, limit + 1], row_to_recording)
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?
+            }
+            (Some(id), Some(q)) => {
+                let Some(anchor) = self.get(id)? else {
+                    return Ok(HistoryPage {
+                        items: Vec::new(),
+                        next_cursor: None,
+                        total: self.count(Some(q))?,
+                        has_more: false,
+                    });
+                };
+                let like = format!("%{q}%");
+                let mut stmt = self
+                    .conn
+                    .prepare(
+                        "SELECT * FROM recordings WHERE (transcript LIKE ?1
+                         OR last_error_message LIKE ?1 OR last_error_code LIKE ?1 OR model LIKE ?1)
+                         AND (created_at < ?2 OR (created_at = ?2 AND id < ?3))
+                         ORDER BY created_at DESC, id DESC LIMIT ?4",
+                    )
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+                let rows = stmt
+                    .query_map(
+                        params![like, anchor.created_at.to_rfc3339(), anchor.id, limit + 1],
+                        row_to_recording,
+                    )
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+                rows.collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| AppError::StorageFailed(e.to_string()))?
+            }
+        };
+        let has_more = items.len() as i64 > limit;
+        if has_more {
+            items.truncate(limit as usize);
+        }
+        let next_cursor = if has_more {
+            items.last().map(|rec| rec.id.clone())
+        } else {
+            None
+        };
+        Ok(HistoryPage {
+            items,
+            next_cursor,
+            total: self.count(search)?,
+            has_more,
+        })
     }
 
     pub fn list_summaries(&self, limit: i64) -> Result<Vec<RecordingSummary>, AppError> {
-        let mut stmt = self
-            .conn
-            .prepare(
-                "SELECT id, created_at, duration_ms, raw_audio_path, processed_audio_path,
-                    transcript, status, provider, model, attempt_count, last_error_code,
-                    last_error_message, cost, generation_id, latency_ms
-             FROM recordings ORDER BY created_at DESC LIMIT ?1",
-            )
-            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
-        let rows = stmt
-            .query_map(params![limit], row_to_summary)
-            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .map_err(|e| AppError::StorageFailed(e.to_string()))
+        let page = self.list_page(None, limit, None)?;
+        Ok(page.items.into_iter().map(recording_to_summary).collect())
     }
 
-    pub fn delete(&self, id: &str) -> Result<(), AppError> {
-        self.conn
+    pub fn list_summaries_page(
+        &self,
+        cursor: Option<&str>,
+        limit: i64,
+        query: Option<&str>,
+    ) -> Result<HistorySummaryPage, AppError> {
+        let page = self.list_page(cursor, limit, query)?;
+        Ok(HistorySummaryPage {
+            items: page.items.into_iter().map(recording_to_summary).collect(),
+            next_cursor: page.next_cursor,
+            total: page.total,
+            has_more: page.has_more,
+        })
+    }
+
+    pub fn delete(&self, id: &str) -> Result<bool, AppError> {
+        let changed = self
+            .conn
             .execute("DELETE FROM recordings WHERE id=?1", params![id])
             .map_err(|e| AppError::StorageFailed(e.to_string()))?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     pub fn delete_all(&self) -> Result<(), AppError> {
@@ -284,9 +440,37 @@ impl HistoryRepo {
             .map_err(|e| AppError::StorageFailed(e.to_string()))
     }
 
+    pub fn list_attempts(&self, recording_id: &str) -> Result<Vec<TranscriptionAttempt>, AppError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, recording_id, attempt_number, started_at, ended_at, outcome,
+                 error_category, http_status, latency_ms
+                 FROM transcription_attempts WHERE recording_id=?1 ORDER BY attempt_number",
+            )
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![recording_id], |row| {
+                Ok(TranscriptionAttempt {
+                    id: row.get("id")?,
+                    recording_id: row.get("recording_id")?,
+                    attempt_number: row.get("attempt_number")?,
+                    started_at: parse_time(row.get::<_, String>("started_at")?),
+                    ended_at: row.get::<_, Option<String>>("ended_at")?.map(parse_time),
+                    outcome: row.get("outcome")?,
+                    error_category: row.get("error_category")?,
+                    http_status: row.get("http_status")?,
+                    latency_ms: row.get("latency_ms")?,
+                })
+            })
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| AppError::StorageFailed(e.to_string()))
+    }
+
     pub fn total_audio_bytes(&self, root: &Path) -> u64 {
         let mut total = 0u64;
-        if let Ok(list) = self.list(10_000) {
+        if let Ok(list) = self.list_all() {
             for rec in list {
                 for path in [rec.raw_audio_path, rec.processed_audio_path]
                     .into_iter()
@@ -349,24 +533,24 @@ fn row_to_recording(row: &rusqlite::Row<'_>) -> rusqlite::Result<Recording> {
     })
 }
 
-fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordingSummary> {
-    Ok(RecordingSummary {
-        id: row.get("id")?,
-        created_at: parse_time(row.get::<_, String>("created_at")?),
-        duration_ms: row.get("duration_ms")?,
-        raw_audio_path: row.get("raw_audio_path")?,
-        processed_audio_path: row.get("processed_audio_path")?,
-        transcript: row.get("transcript")?,
-        status: parse_status(row.get("status")?),
-        provider: row.get("provider")?,
-        model: row.get("model")?,
-        attempt_count: row.get("attempt_count")?,
-        last_error_code: row.get("last_error_code")?,
-        last_error_message: row.get("last_error_message")?,
-        cost: row.get("cost")?,
-        generation_id: row.get("generation_id")?,
-        latency_ms: row.get("latency_ms")?,
-    })
+fn recording_to_summary(rec: Recording) -> RecordingSummary {
+    RecordingSummary {
+        id: rec.id,
+        created_at: rec.created_at,
+        duration_ms: rec.duration_ms,
+        raw_audio_path: rec.raw_audio_path,
+        processed_audio_path: rec.processed_audio_path,
+        transcript: rec.transcript,
+        status: rec.status,
+        provider: rec.provider,
+        model: rec.model,
+        attempt_count: rec.attempt_count,
+        last_error_code: rec.last_error_code,
+        last_error_message: rec.last_error_message,
+        cost: rec.cost,
+        generation_id: rec.generation_id,
+        latency_ms: rec.latency_ms,
+    }
 }
 
 fn parse_time(value: String) -> DateTime<Utc> {
@@ -483,5 +667,41 @@ mod tests {
             history_play_name(&rec, true).map(String::as_str),
             Some("1.wav")
         );
+    }
+
+    #[test]
+    fn missing_update_reports_no_row() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("h.db")).unwrap();
+        let rec = new_recording("m".into());
+        assert!(!repo.update(&rec).unwrap());
+    }
+
+    #[test]
+    fn search_and_cursor_cover_full_table() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("h.db")).unwrap();
+        for i in 0..8 {
+            let mut rec = new_recording("openai/gpt-transcribe".into());
+            rec.transcript = Some(if i == 7 {
+                "needle unique".into()
+            } else {
+                format!("row {i}")
+            });
+            rec.created_at -= chrono::Duration::seconds(i);
+            rec.updated_at = rec.created_at;
+            rec.id = format!("id-{i}");
+            repo.insert(&rec).unwrap();
+        }
+        let page = repo.list_page(None, 3, None).unwrap();
+        assert_eq!(page.items.len(), 3);
+        assert!(page.has_more);
+        let next = repo
+            .list_page(page.next_cursor.as_deref(), 3, None)
+            .unwrap();
+        assert_eq!(next.items.len(), 3);
+        let found = repo.list_page(None, 10, Some("needle")).unwrap();
+        assert_eq!(found.total, 1);
+        assert_eq!(found.items[0].transcript.as_deref(), Some("needle unique"));
     }
 }

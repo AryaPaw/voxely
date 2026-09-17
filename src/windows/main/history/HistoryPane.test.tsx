@@ -150,4 +150,36 @@ describe("HistoryPane", () => {
       expect(invoke).toHaveBeenCalledWith("recording_audio_url", { id: "1" });
     });
   });
+
+  it("distinguishes empty history from empty search", () => {
+    const { rerender } = render(
+      <HistoryPane
+        items={[]}
+        query=""
+        keyConfigured
+        hotkey="Ctrl+Shift+Space"
+        onQuery={() => undefined}
+        onRefresh={async () => undefined}
+        onOpenKey={() => undefined}
+        onOpenSettings={() => undefined}
+        copy={messagesFor("ru")}
+      />,
+    );
+    expect(screen.getByText(/Записей пока нет/)).toBeInTheDocument();
+    rerender(
+      <HistoryPane
+        items={[]}
+        query="needle"
+        keyConfigured
+        hotkey="Ctrl+Shift+Space"
+        onQuery={() => undefined}
+        onRefresh={async () => undefined}
+        onOpenKey={() => undefined}
+        onOpenSettings={() => undefined}
+        copy={messagesFor("ru")}
+      />,
+    );
+    expect(screen.getByText("Ничего не найдено по этому запросу.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Очистить поиск" })).toBeInTheDocument();
+  });
 });

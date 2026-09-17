@@ -29,7 +29,6 @@ export function FilterSettings({
   copy: Messages;
   onChange: (patch: Partial<AppSettings>) => void;
 }) {
-  const [unsupported, setUnsupported] = useState<string[]>([]);
   const [preview, setPreview] = useState<DspPreview | null>(null);
   const [previewError, setPreviewError] = useState("");
   const [recording, setRecording] = useState(false);
@@ -64,6 +63,12 @@ export function FilterSettings({
     };
     // copy is display-only for the error string
   }, [copy, recording, settings.activePresetId, signature]);
+
+  useEffect(() => {
+    return () => {
+      void api.stopFilterSample().catch(() => undefined);
+    };
+  }, []);
 
   async function toggleSample() {
     setPreviewError("");
@@ -196,38 +201,16 @@ export function FilterSettings({
         <Button disabled={busy} onClick={() => void toggleSample()}>
           {recording ? copy.stopSample : copy.recordSample}
         </Button>
-        <Button
-          variant="outline"
-          onClick={async () => {
-            const previewObs = await api.obsPreview();
-            const first = previewObs[0];
-            if (!first) {
-              setUnsupported([copy.obsMicMissing]);
-              return;
-            }
-            setUnsupported(first.unsupported);
-            await api.importObs(first.sourceName, `OBS ${first.sourceName}`);
-          }}
-        >
-          {copy.importObs}
-        </Button>
       </div>
       {recording ? (
         <p className="mb-3 text-sm text-muted-foreground">{copy.recordingSample}</p>
       ) : null}
       {previewError ? (
-        <p className="mb-3 text-sm text-danger">
+        <p className="mb-3 text-sm text-destructive">
           {previewError.includes("no filter sample") ? copy.noFilterSample : previewError}
         </p>
       ) : null}
       {preview ? <FilterPreviewPlayer preview={preview} copy={copy} /> : null}
-      {unsupported.length > 0 ? (
-        <ul className="mt-3 text-sm text-muted-foreground">
-          {unsupported.map((item) => (
-            <li key={item}>{copy.unsupported.replace("{item}", item)}</li>
-          ))}
-        </ul>
-      ) : null}
     </div>
   );
 }
@@ -280,7 +263,7 @@ function MicLevelMeter({ live, copy }: { live: boolean; copy: Messages }) {
       <Label className="mb-1 text-sm">{copy.micLevel}</Label>
       <Progress value={level} className="h-2" />
       <p className="mt-1 text-xs text-muted-foreground">{live ? copy.meterLive : copy.meterIdle}</p>
-      {warning ? <p className="mt-1 text-xs text-danger">{warning}</p> : null}
+      {warning ? <p className="mt-1 text-xs text-destructive">{warning}</p> : null}
     </div>
   );
 }
@@ -294,10 +277,37 @@ const FilterPreviewPlayer = memo(function FilterPreviewPlayer({
 }) {
   const originalRef = useRef<HTMLAudioElement>(null);
   const processedRef = useRef<HTMLAudioElement>(null);
+  const [activeSide, setActiveSide] = useState<"original" | "processed" | null>(null);
+  const [playbackError, setPlaybackError] = useState("");
   const originalSrc = convertFallback(preview.originalPath, preview.nonce);
   const processedSrc = convertFallback(preview.processedPath, preview.nonce);
   const peak = peakDbFs(preview.peak);
   const warning = previewWarning(preview.peak, preview.clipCount, copy.clippingWarning);
+  useEffect(() => {
+    const original = originalRef.current;
+    const processed = processedRef.current;
+    function onEnded() {
+      setActiveSide(null);
+    }
+    function onError() {
+      setPlaybackError(copy.playbackFailed);
+      setActiveSide(null);
+    }
+    for (const node of [original, processed]) {
+      node?.addEventListener("ended", onEnded);
+      node?.addEventListener("error", onError);
+    }
+    return () => {
+      for (const node of [original, processed]) {
+        node?.pause();
+        if (node) {
+          node.currentTime = 0;
+        }
+        node?.removeEventListener("ended", onEnded);
+        node?.removeEventListener("error", onError);
+      }
+    };
+  }, [copy.playbackFailed, preview.nonce]);
 
   function playSide(side: "original" | "processed") {
     const original = originalRef.current;
@@ -311,7 +321,24 @@ const FilterPreviewPlayer = memo(function FilterPreviewPlayer({
     const time = playing?.currentTime ?? target.currentTime;
     other?.pause();
     target.currentTime = time;
-    void target.play();
+    setPlaybackError("");
+    setActiveSide(side);
+    void target.play().catch(() => {
+      setPlaybackError(copy.playbackFailed);
+      setActiveSide(null);
+    });
+  }
+
+  function stopListen() {
+    originalRef.current?.pause();
+    processedRef.current?.pause();
+    if (originalRef.current) {
+      originalRef.current.currentTime = 0;
+    }
+    if (processedRef.current) {
+      processedRef.current.currentTime = 0;
+    }
+    setActiveSide(null);
   }
 
   return (
@@ -322,12 +349,30 @@ const FilterPreviewPlayer = memo(function FilterPreviewPlayer({
           .replace("{rms}", preview.rms.toFixed(3))}
         {preview.clipCount > 0 ? copy.clipping.replace("{count}", String(preview.clipCount)) : ""}
       </p>
-      {warning ? <p className="mb-2 text-xs text-danger">{warning}</p> : null}
+      {warning ? <p className="mb-2 text-xs text-destructive">{warning}</p> : null}
+      {playbackError ? <p className="mb-2 text-xs text-destructive">{playbackError}</p> : null}
       <div className="mb-3 flex items-center gap-2">
         <Button variant="outline" onClick={() => playSide("original")}>
           {copy.playOriginal}
+          {activeSide === "original" ? " *" : ""}
         </Button>
-        <Button onClick={() => playSide("processed")}>{copy.playProcessed}</Button>
+        <Button variant="outline" onClick={() => playSide("processed")}>
+          {copy.playProcessed}
+          {activeSide === "processed" ? " *" : ""}
+        </Button>
+        <Button
+          variant="ghost"
+          onClick={() => {
+            originalRef.current?.pause();
+            processedRef.current?.pause();
+            setActiveSide(null);
+          }}
+        >
+          {copy.pause}
+        </Button>
+        <Button variant="ghost" onClick={stopListen}>
+          {copy.stopListen}
+        </Button>
       </div>
       <audio key={`${preview.nonce}-original`} ref={originalRef} preload="auto" src={originalSrc} />
       <audio

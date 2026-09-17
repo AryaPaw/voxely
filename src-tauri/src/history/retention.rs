@@ -1,4 +1,5 @@
 use chrono::{Duration, Utc};
+use std::collections::HashSet;
 use std::path::Path;
 
 use super::repository::{HistoryRepo, Recording};
@@ -23,37 +24,92 @@ impl Retention {
     }
 }
 
+pub fn keep_temp_wav(name: &str) -> bool {
+    name == "filter-sample.wav"
+        || name.starts_with("filter-preview")
+        || name.starts_with("model-compare.")
+}
+
 pub fn apply_retention(
     repo: &HistoryRepo,
     audio_root: &Path,
     retention: Retention,
     storage_limit_bytes: Option<u64>,
 ) -> Result<Vec<String>, AppError> {
+    apply_retention_except(
+        repo,
+        audio_root,
+        retention,
+        storage_limit_bytes,
+        &HashSet::new(),
+    )
+}
+
+pub fn apply_retention_except(
+    repo: &HistoryRepo,
+    audio_root: &Path,
+    retention: Retention,
+    storage_limit_bytes: Option<u64>,
+    protected_ids: &HashSet<String>,
+) -> Result<Vec<String>, AppError> {
     let mut deleted = Vec::new();
     if let Retention::Days(days) = retention {
         let cutoff = Utc::now() - Duration::days(days as i64);
         for rec in repo.older_than(cutoff)? {
-            if delete_recording(repo, audio_root, &rec)? {
-                deleted.push(rec.id);
+            if protected_ids.contains(&rec.id) {
+                continue;
+            }
+            match delete_recording(repo, audio_root, &rec) {
+                Ok(true) => deleted.push(rec.id),
+                Ok(false) => {}
+                Err(err) => tracing::warn!(error = %err, id = %rec.id, "retention skip"),
             }
         }
     }
     if let Some(limit) = storage_limit_bytes {
-        let mut list = repo.list(10_000)?;
+        let mut list = repo.list_all()?;
         list.sort_by_key(|a| a.created_at);
-        while repo.total_audio_bytes(audio_root) > limit {
-            let Some(oldest) = list.first().cloned() else {
+        let mut bytes = inventory_bytes(audio_root, &list);
+        for rec in list {
+            if bytes <= limit {
                 break;
-            };
-            list.remove(0);
-            if delete_recording(repo, audio_root, &oldest)? {
-                deleted.push(oldest.id);
-            } else {
-                break;
+            }
+            if protected_ids.contains(&rec.id) {
+                continue;
+            }
+            let rec_bytes = recording_bytes(audio_root, &rec);
+            match delete_recording(repo, audio_root, &rec) {
+                Ok(true) => {
+                    deleted.push(rec.id);
+                    bytes = bytes.saturating_sub(rec_bytes);
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    tracing::warn!(error = %err, id = %rec.id, "retention skip");
+                    break;
+                }
             }
         }
     }
     Ok(deleted)
+}
+
+fn inventory_bytes(audio_root: &Path, list: &[Recording]) -> u64 {
+    list.iter()
+        .map(|rec| recording_bytes(audio_root, rec))
+        .sum()
+}
+
+fn recording_bytes(audio_root: &Path, rec: &Recording) -> u64 {
+    [&rec.raw_audio_path, &rec.processed_audio_path]
+        .into_iter()
+        .flatten()
+        .map(|path| {
+            std::fs::metadata(audio_root.join(path))
+                .map(|meta| meta.len())
+                .unwrap_or(0)
+        })
+        .sum()
 }
 
 pub fn delete_recording(
@@ -70,13 +126,52 @@ pub fn delete_recording(
             std::fs::remove_file(&path).map_err(|e| AppError::StorageFailed(e.to_string()))?;
         }
     }
-    repo.delete(&rec.id)?;
-    Ok(true)
+    repo.delete(&rec.id)
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAllResult {
+    pub deleted: Vec<String>,
+    pub failed: Vec<String>,
+}
+
+use serde::{Deserialize, Serialize};
+
+pub fn delete_all_recordings(
+    repo: &HistoryRepo,
+    audio_root: &Path,
+    protected_ids: &HashSet<String>,
+) -> Result<DeleteAllResult, AppError> {
+    let mut result = DeleteAllResult {
+        deleted: Vec::new(),
+        failed: Vec::new(),
+    };
+    for rec in repo.list_all()? {
+        if protected_ids.contains(&rec.id) {
+            result.failed.push(rec.id);
+            continue;
+        }
+        match delete_recording(repo, audio_root, &rec) {
+            Ok(true) => result.deleted.push(rec.id),
+            Ok(false) => result.failed.push(rec.id),
+            Err(_) => result.failed.push(rec.id),
+        }
+    }
+    Ok(result)
 }
 
 pub fn cleanup_orphans(audio_root: &Path, repo: &HistoryRepo) -> Result<(), AppError> {
-    let known = repo.list(20_000)?;
-    let mut keep = std::collections::HashSet::new();
+    cleanup_orphans_except(audio_root, repo, &HashSet::new())
+}
+
+pub fn cleanup_orphans_except(
+    audio_root: &Path,
+    repo: &HistoryRepo,
+    protected_names: &HashSet<String>,
+) -> Result<(), AppError> {
+    let known = repo.list_all()?;
+    let mut keep = HashSet::new();
     for rec in &known {
         if let Some(p) = &rec.raw_audio_path {
             keep.insert(p.clone());
@@ -85,6 +180,7 @@ pub fn cleanup_orphans(audio_root: &Path, repo: &HistoryRepo) -> Result<(), AppE
             keep.insert(p.clone());
         }
     }
+    keep.extend(protected_names.iter().cloned());
     if !audio_root.exists() {
         return Ok(());
     }
@@ -93,14 +189,14 @@ pub fn cleanup_orphans(audio_root: &Path, repo: &HistoryRepo) -> Result<(), AppE
     {
         let entry = entry.map_err(|e| AppError::StorageFailed(e.to_string()))?;
         let name = entry.file_name().to_string_lossy().to_string();
+        if protected_names.contains(&name) {
+            continue;
+        }
         if name.ends_with(".tmp") || name.ends_with(".wav.tmp") {
             let _ = std::fs::remove_file(entry.path());
             continue;
         }
-        if !keep.contains(&name)
-            && name.ends_with(".wav")
-            && !crate::app::compare::keep_compare_wav(&name)
-        {
+        if !keep.contains(&name) && name.ends_with(".wav") && !keep_temp_wav(&name) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -131,13 +227,30 @@ mod tests {
         let audio = dir.path();
         std::fs::write(audio.join("filter-sample.wav"), b"a").unwrap();
         std::fs::write(audio.join("filter-preview.wav"), b"b").unwrap();
-        std::fs::write(audio.join("model-compare.stt.wav"), b"c").unwrap();
+        std::fs::write(audio.join("model-compare.2.stt.wav"), b"c").unwrap();
         std::fs::write(audio.join("orphan.wav"), b"d").unwrap();
         cleanup_orphans(audio, &repo).unwrap();
         assert!(audio.join("filter-sample.wav").exists());
         assert!(audio.join("filter-preview.wav").exists());
-        assert!(audio.join("model-compare.stt.wav").exists());
+        assert!(audio.join("model-compare.2.stt.wav").exists());
         assert!(!audio.join("orphan.wav").exists());
+    }
+
+    #[test]
+    fn protected_id_survives_retention() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("h.db")).unwrap();
+        let mut rec = new_recording("m".into());
+        rec.created_at = Utc::now() - Duration::days(30);
+        rec.updated_at = rec.created_at;
+        repo.insert(&rec).unwrap();
+        let mut protected = HashSet::new();
+        protected.insert(rec.id.clone());
+        let deleted =
+            apply_retention_except(&repo, dir.path(), Retention::Days(1), None, &protected)
+                .unwrap();
+        assert!(deleted.is_empty());
+        assert!(repo.get(&rec.id).unwrap().is_some());
     }
 
     #[test]

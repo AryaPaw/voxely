@@ -1,8 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { reportError } from "../../lib/system-notify";
 import { api, type AppSettings, type Recording } from "../../lib/api";
+import {
+  acceptSavedSettings,
+  nextWriteSeq,
+  shouldKeepOptimistic,
+} from "../../lib/settings-persist";
 import { applyTheme, resolvedTheme, watchSystemTheme } from "../../lib/theme";
 import {
   applyUiLocale,
@@ -40,10 +45,21 @@ export function MainApp() {
   const [keyConfigured, setKeyConfigured] = useState(false);
   const [query, setQuery] = useState("");
   const [localBuild, setLocalBuild] = useState(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [settingsRecovered, setSettingsRecovered] = useState(false);
+  const historyCursorRef = useRef<string | null>(null);
+  const settingsRef = useRef<AppSettings | null>(null);
+  settingsRef.current = settings;
 
-  async function refreshHistory() {
-    const [items, configured] = await Promise.all([api.history(), api.keyConfigured()]);
-    setHistory(items);
+  async function refreshHistory(reset = true) {
+    const cursor = reset ? null : historyCursorRef.current;
+    const [page, configured] = await Promise.all([
+      api.history(cursor, query || undefined),
+      api.keyConfigured(),
+    ]);
+    setHistory((current) => (reset ? page.items : [...current, ...page.items]));
+    historyCursorRef.current = page.nextCursor;
+    setHistoryHasMore(page.hasMore);
     setKeyConfigured(configured);
   }
 
@@ -57,6 +73,7 @@ export function MainApp() {
       try {
         const runtime = await api.runtimeInfo();
         setLocalBuild(runtime.localBuild);
+        setSettingsRecovered(Boolean(runtime.settingsRecovered));
         if (runtime.localBuild) {
           const fromUrl = sectionFromSearch(window.location.search, true);
           if (fromUrl === "debug") {
@@ -78,20 +95,15 @@ export function MainApp() {
 
   useEffect(() => {
     void loadSettings();
-    void refreshHistory().catch((error: unknown) => {
-      reportError(
-        formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
-      );
-    });
     const unlistenHistory = listen(HISTORY_CHANGED, () => {
-      void refreshHistory().catch((error: unknown) => {
+      void refreshHistory(true).catch((error: unknown) => {
         reportError(
           formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
         );
       });
     });
     const unlistenInsert = listen<string>("session://insert", (event) => {
-      const locale = resolveUiLocale("auto", navigator.language);
+      const locale = resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto", navigator.language);
       const nextCopy = messagesFor(locale);
       if (event.payload === "copied") {
         toast.success(nextCopy.copiedInsert);
@@ -101,11 +113,27 @@ export function MainApp() {
         toast.error(localizedError(event.payload, nextCopy));
       }
     });
+    const unlistenSettings = listen<AppSettings>("settings://changed", (event) => {
+      setSettings((prev) => acceptSavedSettings(prev, event.payload));
+    });
     return () => {
       void unlistenHistory.then((fn) => fn());
       void unlistenInsert.then((fn) => fn());
+      void unlistenSettings.then((fn) => fn());
     };
+    // listeners capture latest refreshHistory via query-driven reloads
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  useEffect(() => {
+    void refreshHistory(true).catch((error: unknown) => {
+      reportError(
+        formatInvokeError(error, messagesFor(resolveUiLocale("auto", navigator.language))),
+      );
+    });
+    // reload on search only; refreshHistory closes over the latest query
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query]);
 
   useEffect(() => {
     const unlistenNavigate = listen<string>(APP_NAVIGATE, (event) => {
@@ -125,15 +153,7 @@ export function MainApp() {
     return watchSystemTheme(settings.theme);
   }, [settings]);
 
-  const filtered = useMemo(
-    () =>
-      history.filter((item) =>
-        `${item.transcript ?? ""} ${item.status} ${item.lastErrorMessage ?? ""}`
-          .toLowerCase()
-          .includes(query.toLowerCase()),
-      ),
-    [history, query],
-  );
+  const filtered = history;
 
   if (loadError && !settings) {
     return (
@@ -158,14 +178,19 @@ export function MainApp() {
   const currentSettings = settings;
 
   async function persist(next: AppSettings) {
-    setSettings(next);
-    applyTheme(next.theme);
+    const seq = nextWriteSeq(currentSettings.writeSeq ?? 0);
+    const outgoing = { ...next, writeSeq: seq };
+    setSettings(outgoing);
+    applyTheme(outgoing.theme);
     try {
-      const saved = await api.saveSettings(next);
-      setSettings(saved);
+      const saved = await api.saveSettings(outgoing);
+      setSettings((prev) => acceptSavedSettings(prev, saved));
       applyTheme(saved.theme);
+      setSettingsRecovered(false);
     } catch (error) {
-      setSettings(currentSettings);
+      setSettings((prev) =>
+        shouldKeepOptimistic(prev, seq) ? (prev as AppSettings) : currentSettings,
+      );
       applyTheme(currentSettings.theme);
       reportError(formatInvokeError(error, copy));
     }
@@ -180,10 +205,14 @@ export function MainApp() {
             <HistoryPane
               items={filtered}
               query={query}
+              hasMore={historyHasMore}
+              recovered={settingsRecovered}
               keyConfigured={keyConfigured}
               hotkey={settings.hotkey}
               onQuery={setQuery}
-              onRefresh={refreshHistory}
+              onClearQuery={() => setQuery("")}
+              onLoadMore={() => void refreshHistory(false)}
+              onRefresh={() => refreshHistory(true)}
               onOpenKey={() => setSection("transcription")}
               onOpenSettings={() => setSection("general")}
               copy={copy}

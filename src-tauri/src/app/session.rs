@@ -64,13 +64,16 @@ pub struct AppContext {
     pub compare_running: AtomicBool,
     pub meter_monitor: Mutex<Option<CaptureSession>>,
     pub update_gate: tokio::sync::Mutex<bool>,
+    pub update_installing: AtomicBool,
+    pub settings_recovery: Mutex<bool>,
+    pub filter_recording: AtomicBool,
 }
 
 impl AppContext {
     pub fn initialize(data_dir: PathBuf) -> Result<Self, AppError> {
         std::fs::create_dir_all(&data_dir).map_err(|e| AppError::StorageFailed(e.to_string()))?;
         let settings_path = data_dir.join("settings.json");
-        let settings = AppSettings::load(&settings_path)?;
+        let (settings, recovered) = AppSettings::load_with_recovery(&settings_path)?;
         let history = HistoryRepo::open(&data_dir.join("history.sqlite"))?;
         let audio = audio_dir(&data_dir);
         std::fs::create_dir_all(&audio).map_err(|e| AppError::StorageFailed(e.to_string()))?;
@@ -108,6 +111,9 @@ impl AppContext {
             compare_running: AtomicBool::new(false),
             meter_monitor: Mutex::new(None),
             update_gate: tokio::sync::Mutex::new(false),
+            update_installing: AtomicBool::new(false),
+            settings_recovery: Mutex::new(recovered),
+            filter_recording: AtomicBool::new(false),
         })
     }
 
@@ -241,6 +247,15 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     }
     let id = uuid::Uuid::new_v4().to_string();
     let dest = audio_dir(&ctx.data_dir).join(format!("{id}.raw.wav"));
+    let mut rec = new_recording(settings.model.clone());
+    rec.id = id.clone();
+    rec.raw_audio_path = Some(format!("{id}.raw.wav"));
+    rec.status = RecordingStatus::Processing;
+    ctx.history.lock().insert(&rec).inspect_err(|err| {
+        let _ = ctx.transition(SessionEvent::CaptureFailed(err.clone()));
+    })?;
+    *ctx.session_recording_id.lock() = Some(id);
+    ctx.emit_history(app);
     let device = if settings.input_device == "default" {
         None
     } else {
@@ -251,20 +266,26 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
         let started = CaptureSession::start(device.as_deref(), dest);
         let handle = app_handle.clone();
         let _ = app_handle.run_on_main_thread(move || {
-            finish_capture_start(&handle, started);
+            finish_capture_start(&handle, started, generation);
         });
     });
     Ok(())
 }
 
-fn finish_capture_start(app: &AppHandle, started: Result<CaptureSession, AppError>) {
+fn finish_capture_start(
+    app: &AppHandle,
+    started: Result<CaptureSession, AppError>,
+    generation: u64,
+) {
     let ctx = app.state::<Arc<AppContext>>();
-    if ctx.abort_start.load(Ordering::SeqCst) {
+    if !crate::app::operations::lease_matches(
+        generation,
+        ctx.session_generation.load(Ordering::SeqCst),
+    ) || ctx.abort_start.load(Ordering::SeqCst)
+    {
         if let Ok(session) = started {
             thread::spawn(move || {
-                if let Ok(result) = session.stop() {
-                    let _ = std::fs::remove_file(result.path);
-                }
+                let _ = session.stop();
             });
         }
         return;
@@ -285,10 +306,14 @@ fn finish_capture_start(app: &AppHandle, started: Result<CaptureSession, AppErro
         }
         Err(err) => {
             tracing::error!(error = %err, "capture start failed");
+            if let Some(id) = ctx.session_recording_id.lock().clone() {
+                mark_recording_failed(&ctx, &id, &err);
+                ctx.emit_history(app);
+            }
             let _ = ctx.transition(SessionEvent::CaptureFailed(err.clone()));
             ctx.emit_state(app);
             crate::notify::show_error(app, &err);
-            schedule_error_overlay_hide(app.clone(), Duration::from_millis(2000));
+            schedule_error_overlay_hide(app.clone(), Duration::from_millis(2000), generation);
         }
     }
 }
@@ -316,40 +341,56 @@ fn stop_recording(app: &AppHandle) -> Result<(), AppError> {
     if ctx.settings.lock().notifications {
         crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Stop);
     }
+    let generation = ctx.session_generation.load(Ordering::SeqCst);
     let app_handle = app.clone();
     thread::spawn(move || match session.stop() {
         Ok(result) => {
             let handle = app_handle.clone();
             let _ = app_handle.run_on_main_thread(move || {
-                finish_stop(&handle, result);
+                finish_stop(&handle, result, generation);
             });
         }
         Err(err) => {
             let handle = app_handle.clone();
             let _ = app_handle.run_on_main_thread(move || {
                 let ctx = handle.state::<Arc<AppContext>>();
+                if !crate::app::operations::lease_matches(
+                    generation,
+                    ctx.session_generation.load(Ordering::SeqCst),
+                ) {
+                    return;
+                }
                 let _ = ctx.transition(SessionEvent::SaveFailed(err.clone()));
                 ctx.emit_state(&handle);
                 crate::notify::show_error(&handle, &err);
-                schedule_error_overlay_hide(handle, Duration::from_millis(2000));
+                schedule_error_overlay_hide(handle, Duration::from_millis(2000), generation);
             });
         }
     });
     Ok(())
 }
 
-fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
+fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult, generation: u64) {
     let ctx = app.state::<Arc<AppContext>>();
+    if !crate::app::operations::lease_matches(
+        generation,
+        ctx.session_generation.load(Ordering::SeqCst),
+    ) {
+        return;
+    }
     if matches!(*ctx.state.lock(), SessionState::Idle) {
-        let _ = std::fs::remove_file(&result.path);
         return;
     }
     if ctx.transition(SessionEvent::Saved).is_err() {
         return;
     }
     ctx.emit_state(app);
-    let settings = ctx.settings.lock().clone();
-    let mut rec = new_recording(settings.model.clone());
+    let Some(id) = ctx.session_recording_id.lock().clone() else {
+        return;
+    };
+    let Ok(Some(mut rec)) = ctx.history.lock().get(&id) else {
+        return;
+    };
     rec.duration_ms = result.duration_ms as i64;
     rec.raw_audio_path = Some(
         result
@@ -359,12 +400,17 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
             .to_string_lossy()
             .to_string(),
     );
-    *ctx.session_recording_id.lock() = Some(rec.id.clone());
-    if let Err(err) = ctx.history.lock().insert(&rec) {
+    rec.updated_at = chrono::Utc::now();
+    if result.truncated {
+        rec.last_error_code = Some(AppError::RecordingTooLarge.code().into());
+        rec.last_error_message = Some("Recording truncated".into());
+    }
+    if ctx.history.lock().update(&rec).ok() != Some(true) {
+        let err = AppError::StorageFailed("recording missing".into());
         let _ = ctx.transition(SessionEvent::SaveFailed(err.clone()));
         ctx.emit_state(app);
         crate::notify::show_error(app, &err);
-        schedule_error_overlay_hide(app.clone(), Duration::from_millis(2000));
+        schedule_error_overlay_hide(app.clone(), Duration::from_millis(2000), generation);
         return;
     }
     ctx.emit_history(app);
@@ -372,7 +418,11 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
     let _ = ctx.transition(SessionEvent::Saved);
     ctx.emit_state(app);
     let app_handle = app.clone();
-    let samples = result.samples;
+    let samples = if result.samples.is_empty() {
+        crate::audio::capture::read_pcm16_wav(&result.path).unwrap_or_default()
+    } else {
+        result.samples
+    };
     tauri::async_runtime::spawn(async move {
         match process_and_transcribe(app_handle.clone(), rec.id.clone(), samples).await {
             Ok(()) => {}
@@ -380,7 +430,7 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
                 let ctx = app_handle.state::<Arc<AppContext>>();
                 mark_recording_failed(&ctx, &rec.id, &AppError::Cancelled);
                 ctx.emit_history(&app_handle);
-                hide_overlay_now(&app_handle);
+                hide_overlay_for_generation(&app_handle, generation);
             }
             Err(err) => {
                 tracing::error!(error = %err, "pipeline failed");
@@ -390,7 +440,7 @@ fn finish_stop(app: &AppHandle, result: crate::audio::capture::CaptureResult) {
                 let _ = ctx.transition(SessionEvent::Failed(err.clone()));
                 ctx.emit_state(&app_handle);
                 crate::notify::show_error(&app_handle, &err);
-                schedule_error_overlay_hide(app_handle, Duration::from_millis(2000));
+                schedule_error_overlay_hide(app_handle, Duration::from_millis(2000), generation);
             }
         }
     });
@@ -579,7 +629,7 @@ fn publish_stt_success(app: &AppHandle, ctx: &AppContext, started_generation: u6
             SttSuccessStep::SpawnInsert,
         ]
     );
-    hide_overlay_now(app);
+    hide_overlay_for_generation(app, started_generation);
     keep_captured_caret(app);
     let _ = ctx.transition(SessionEvent::Succeeded);
     let _ = ctx.transition(SessionEvent::Dismiss);
@@ -801,6 +851,17 @@ fn hide_overlay_hwnd(window: &WebviewWindow) {
 
 fn hide_overlay_now(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
+    let generation = ctx.session_generation.load(Ordering::SeqCst);
+    hide_overlay_for_generation(app, generation);
+}
+
+fn hide_overlay_for_generation(app: &AppHandle, expected: u64) {
+    let ctx = app.state::<Arc<AppContext>>();
+    let current = ctx.session_generation.load(Ordering::SeqCst);
+    let state = ctx.state.lock().clone();
+    if !crate::app::operations::hide_overlay_allowed(&state, expected, current) {
+        return;
+    }
     ctx.overlay.lock().hide();
     if let Some(window) = app.get_webview_window("overlay") {
         hide_overlay_hwnd(&window);
@@ -809,7 +870,7 @@ fn hide_overlay_now(app: &AppHandle) {
     ctx.emit_overlay(app);
 }
 
-fn schedule_error_overlay_hide(app: AppHandle, delay: Duration) {
+fn schedule_error_overlay_hide(app: AppHandle, delay: Duration, generation: u64) {
     let ctx = app.state::<Arc<AppContext>>();
     let expected = ctx.overlay.lock().epoch;
     tauri::async_runtime::spawn(async move {
@@ -818,7 +879,7 @@ fn schedule_error_overlay_hide(app: AppHandle, delay: Duration) {
         if delayed_hide_is_stale(expected, ctx.overlay.lock().epoch) {
             return;
         }
-        hide_overlay_now(&app);
+        hide_overlay_for_generation(&app, generation);
         let _ = ctx.transition(SessionEvent::Dismiss);
         ctx.emit_state(&app);
     });
@@ -833,11 +894,13 @@ pub fn shutdown_session(app: &AppHandle) {
     }
     if let Some(session) = ctx.capture.lock().take() {
         thread::spawn(move || {
-            if let Ok(result) = session.stop() {
-                let _ = std::fs::remove_file(result.path);
-            }
+            let _ = session.stop();
         });
     }
+    if let Some(id) = ctx.session_recording_id.lock().clone() {
+        mark_recording_failed(&ctx, &id, &AppError::Interrupted);
+    }
+    *ctx.session_recording_id.lock() = None;
     *ctx.captured_target.lock() = None;
     hide_overlay_now(app);
     let _ = ctx.transition(SessionEvent::Shutdown);
@@ -848,7 +911,7 @@ fn recover_stale_processing(
     history: &HistoryRepo,
     audio_root: &std::path::Path,
 ) -> Result<(), AppError> {
-    for rec in history.list(10_000)? {
+    for rec in history.list_all()? {
         if rec.status != RecordingStatus::Processing {
             continue;
         }
@@ -892,15 +955,70 @@ fn fail_active_recording(ctx: &AppContext, err: &AppError) {
 }
 
 fn emit_stt_progress(ctx: &AppContext, app: &AppHandle, recording_id: &str, progress: SttProgress) {
-    if ctx.session_recording_id.lock().as_deref() != Some(recording_id) {
+    match &progress {
+        SttProgress::Finished {
+            attempt,
+            outcome,
+            http_status,
+            latency_ms,
+            category,
+        } => {
+            persist_attempt(
+                ctx,
+                recording_id,
+                *attempt,
+                outcome,
+                *http_status,
+                *latency_ms,
+                category.clone(),
+            );
+        }
+        SttProgress::Attempt(_) | SttProgress::Waiting { .. } => {}
+    }
+    if ctx.session_recording_id.lock().as_deref() != Some(recording_id)
+        && !ctx.in_flight.lock().contains(recording_id)
+    {
         return;
     }
     let event = match progress {
         SttProgress::Attempt(attempt) => SessionEvent::TranscriptAttemptStarted { attempt },
         SttProgress::Waiting { attempt, delay } => SessionEvent::RetryScheduled { attempt, delay },
+        SttProgress::Finished { .. } => return,
     };
-    if ctx.transition(event).is_ok() {
+    if ctx.session_recording_id.lock().as_deref() == Some(recording_id)
+        && ctx.transition(event).is_ok()
+    {
         ctx.emit_state(app);
+    }
+}
+
+fn persist_attempt(
+    ctx: &AppContext,
+    recording_id: &str,
+    attempt: u32,
+    outcome: &str,
+    http_status: Option<u16>,
+    latency_ms: u128,
+    category: Option<String>,
+) {
+    let ended = chrono::Utc::now();
+    let started = ended - chrono::Duration::milliseconds(latency_ms as i64);
+    let row = crate::history::repository::TranscriptionAttempt {
+        id: uuid::Uuid::new_v4().to_string(),
+        recording_id: recording_id.into(),
+        attempt_number: attempt as i64,
+        started_at: started,
+        ended_at: Some(ended),
+        outcome: outcome.into(),
+        error_category: category,
+        http_status: http_status.map(|s| s as i64),
+        latency_ms: Some(latency_ms as i64),
+    };
+    let _ = ctx.history.lock().insert_attempt(&row);
+    if let Ok(Some(mut rec)) = ctx.history.lock().get(recording_id) {
+        rec.attempt_count = rec.attempt_count.max(attempt as i64);
+        rec.updated_at = ended;
+        let _ = ctx.history.lock().update(&rec);
     }
 }
 
@@ -952,11 +1070,12 @@ fn mark_recording_failed(ctx: &AppContext, recording_id: &str, err: &AppError) {
 
 pub fn apply_configured_retention(ctx: &AppContext) -> Result<Vec<String>, AppError> {
     let settings = ctx.settings.lock().clone();
-    apply_retention(
+    crate::history::retention::apply_retention_except(
         &ctx.history.lock(),
         &audio_dir(&ctx.data_dir),
         Retention::from_setting(&settings.retention),
         settings.storage_limit_bytes(),
+        &crate::app::operations::protected_recording_ids(ctx),
     )
 }
 

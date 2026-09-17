@@ -96,6 +96,15 @@ export function ComparePane({
         <Button type="button" onClick={() => void run()} disabled={!canRun}>
           {copy.compareRun}
         </Button>
+        {state.running ? (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={() => void api.cancelModelCompare().then(setState)}
+          >
+            {copy.cancel}
+          </Button>
+        ) : null}
         {models.length < 4 ? (
           <Button type="button" variant="outline" onClick={() => patchModels([...models, ""])}>
             {copy.compareAddModel}
@@ -125,7 +134,10 @@ export function ComparePane({
         {models.map((model, index) => {
           const slot = state.slots[index];
           return (
-            <div key={`${index}-${model}`} className="rounded-lg border border-border p-3">
+            <div
+              key={slot?.slotId ?? `model-${index}`}
+              className="rounded-lg border border-border p-3"
+            >
               <Input
                 aria-label={`model-${index + 1}`}
                 value={model}

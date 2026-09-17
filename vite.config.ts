@@ -46,6 +46,7 @@ export default defineConfig({
         "src/lib/utils.ts",
         "src/lib/theme.ts",
         "src/lib/history-sync.ts",
+        "src/lib/settings-persist.ts",
         "src/lib/overlay-wave.ts",
         "src/lib/dsp-level.ts",
         "src/components/settings/SettingsField.tsx",

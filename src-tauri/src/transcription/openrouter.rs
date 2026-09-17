@@ -170,7 +170,17 @@ pub struct SttModel {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SttProgress {
     Attempt(u32),
-    Waiting { attempt: u32, delay: Duration },
+    Waiting {
+        attempt: u32,
+        delay: Duration,
+    },
+    Finished {
+        attempt: u32,
+        outcome: &'static str,
+        http_status: Option<u16>,
+        latency_ms: u128,
+        category: Option<String>,
+    },
 }
 
 pub async fn transcribe_file(
@@ -255,14 +265,37 @@ pub async fn transcribe_file_with_progress(
                     ) => Some(result),
                 };
                 match outcome {
-                    None => return Err(AppError::Cancelled),
+                    None => {
+                        on_progress(SttProgress::Finished {
+                            attempt,
+                            outcome: "cancelled",
+                            http_status: None,
+                            latency_ms: started.elapsed().as_millis(),
+                            category: Some("cancelled".into()),
+                        });
+                        return Err(AppError::Cancelled);
+                    }
                     Some(Ok(mut success)) => {
                         if *cancel.borrow() {
+                            on_progress(SttProgress::Finished {
+                                attempt,
+                                outcome: "cancelled",
+                                http_status: None,
+                                latency_ms: started.elapsed().as_millis(),
+                                category: Some("cancelled".into()),
+                            });
                             return Err(AppError::Cancelled);
                         }
                         success.attempt = attempt;
                         success.latency_ms = started.elapsed().as_millis();
                         success.model = model.to_string();
+                        on_progress(SttProgress::Finished {
+                            attempt,
+                            outcome: "success",
+                            http_status: Some(200),
+                            latency_ms: success.latency_ms,
+                            category: None,
+                        });
                         return Ok(success);
                     }
                     Some(Err(classified)) => {
@@ -276,11 +309,27 @@ pub async fn transcribe_file_with_progress(
                             "stt attempt failed"
                         );
                         match scheduler.after_failure(&classified, Instant::now(), 0.08) {
-                            AttemptDecision::GiveUp(err) => return Err(err),
+                            AttemptDecision::GiveUp(err) => {
+                                on_progress(SttProgress::Finished {
+                                    attempt,
+                                    outcome: "error",
+                                    http_status: classified.http_status,
+                                    latency_ms: started.elapsed().as_millis(),
+                                    category: Some(error_category(&classified.error).into()),
+                                });
+                                return Err(err);
+                            }
                             AttemptDecision::Wait {
                                 delay,
                                 attempt: wait_attempt,
                             } => {
+                                on_progress(SttProgress::Finished {
+                                    attempt,
+                                    outcome: "error",
+                                    http_status: classified.http_status,
+                                    latency_ms: started.elapsed().as_millis(),
+                                    category: Some(error_category(&classified.error).into()),
+                                });
                                 tracing::warn!(
                                     attempt,
                                     delay_ms = delay.as_millis() as u64,
@@ -542,7 +591,15 @@ mod tests {
         .await
         .unwrap();
         let recorded = events.lock().unwrap().clone();
-        assert_eq!(recorded, vec![SttProgress::Attempt(1)]);
+        assert!(matches!(recorded.first(), Some(SttProgress::Attempt(1))));
+        assert!(recorded.iter().any(|event| matches!(
+            event,
+            SttProgress::Finished {
+                attempt: 1,
+                outcome: "success",
+                ..
+            }
+        )));
     }
 
     #[tokio::test]
@@ -593,11 +650,12 @@ mod tests {
         assert_eq!(result.unwrap().text, "ok");
         let recorded = events.lock().unwrap().clone();
         assert!(matches!(recorded.first(), Some(SttProgress::Attempt(1))));
-        assert!(matches!(
-            recorded.get(1),
-            Some(SttProgress::Waiting { attempt: 1, .. })
-        ));
-        assert!(matches!(recorded.get(2), Some(SttProgress::Attempt(2))));
+        assert!(recorded
+            .iter()
+            .any(|event| matches!(event, SttProgress::Waiting { attempt: 1, .. })));
+        assert!(recorded
+            .iter()
+            .any(|event| matches!(event, SttProgress::Attempt(2))));
     }
 
     #[tokio::test]

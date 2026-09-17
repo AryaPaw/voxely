@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, type AppSettings } from "../../../lib/api";
-import type { Messages } from "../../../lib/i18n";
+import { formatInvokeError, type Messages } from "../../../lib/i18n";
 import { reportError } from "../../../lib/system-notify";
 import { speechLanguageOptions } from "../../../lib/speech-languages";
 import { PageHeader } from "../../../components/settings/PageHeader";
@@ -11,6 +11,42 @@ import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import { SimpleSelect } from "../../../components/ui/simple-select";
 import { SECTION_ICONS } from "../sectionNav";
+
+const CUSTOM_MODEL = "__custom__";
+
+function draftNumber(value: number): string {
+  return String(value);
+}
+
+function parseDraft(raw: string, fallback: number): number | null {
+  const trimmed = raw.trim();
+  if (trimmed === "") {
+    return null;
+  }
+  const next = Number(trimmed);
+  return Number.isFinite(next) ? next : fallback;
+}
+
+type RetryNumberField =
+  | "additionalRetries"
+  | "connectTimeoutMs"
+  | "requestTimeoutMs"
+  | "initialRetryDelayMs"
+  | "maxRetryDelayMs"
+  | "totalOperationTimeoutMs";
+
+function commitRetry(
+  field: RetryNumberField,
+  raw: string,
+  settings: AppSettings,
+  onChange: (patch: Partial<AppSettings>) => void,
+) {
+  const parsed = parseDraft(raw, settings.retry[field]);
+  if (parsed == null) {
+    return;
+  }
+  onChange({ retry: { ...settings.retry, [field]: parsed } });
+}
 
 export function TranscriptionSettings({
   settings,
@@ -26,6 +62,38 @@ export function TranscriptionSettings({
   onChange: (patch: Partial<AppSettings>) => void;
 }) {
   const [keyDraft, setKeyDraft] = useState("");
+  const [catalog, setCatalog] = useState<Array<{ id: string; name: string }>>([]);
+  const [catalogError, setCatalogError] = useState(false);
+  const [customDraft, setCustomDraft] = useState(settings.customModel ?? settings.model);
+  const [extraDraft, setExtraDraft] = useState(draftNumber(settings.retry.additionalRetries));
+  const [connectDraft, setConnectDraft] = useState(draftNumber(settings.retry.connectTimeoutMs));
+  const [requestDraft, setRequestDraft] = useState(draftNumber(settings.retry.requestTimeoutMs));
+  const [initialDraft, setInitialDraft] = useState(draftNumber(settings.retry.initialRetryDelayMs));
+  const [maxDraft, setMaxDraft] = useState(draftNumber(settings.retry.maxRetryDelayMs));
+  const [totalDraft, setTotalDraft] = useState(draftNumber(settings.retry.totalOperationTimeoutMs));
+  const catalogIds = new Set(catalog.map((item) => item.id));
+  const selected = catalogIds.has(settings.model) ? settings.model : CUSTOM_MODEL;
+
+  useEffect(() => {
+    let cancelled = false;
+    void api
+      .models()
+      .then((items) => {
+        if (!cancelled) {
+          setCatalog(items);
+          setCatalogError(false);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCatalogError(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [keyConfigured]);
+
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.transcription} title={copy.navTranscription} />
@@ -50,7 +118,7 @@ export function TranscriptionSettings({
               setKeyDraft("");
               toast.success(copy.keySavedToast);
             } catch (error) {
-              reportError(error instanceof Error ? error.message : copy.keyNotSaved);
+              reportError(formatInvokeError(error, copy));
             }
           }}
         >
@@ -63,7 +131,7 @@ export function TranscriptionSettings({
               const count = await api.testConnection();
               toast.success(copy.modelsFound.replace("{n}", String(count)));
             } catch (error) {
-              reportError(error instanceof Error ? error.message : copy.noConnection);
+              reportError(formatInvokeError(error, copy));
             }
           }}
         >
@@ -72,11 +140,43 @@ export function TranscriptionSettings({
       </div>
       <p className="mb-3 max-w-lg text-sm text-muted-foreground">{copy.timeoutHint}</p>
       <SettingsField label={copy.modelLabel}>
-        <Input
-          value={settings.model}
-          onChange={(event) => onChange({ model: event.target.value })}
+        <SimpleSelect
+          aria-label={copy.modelLabel}
+          value={selected}
+          onValueChange={(value) => {
+            if (value === CUSTOM_MODEL) {
+              const next = customDraft.trim();
+              onChange({ model: next, customModel: next || null });
+              return;
+            }
+            onChange({ model: value, customModel: null });
+          }}
+          options={[
+            ...catalog.map((item) => ({ value: item.id, label: item.name || item.id })),
+            { value: CUSTOM_MODEL, label: copy.customModel },
+          ]}
         />
       </SettingsField>
+      {selected === CUSTOM_MODEL ? (
+        <SettingsField label={copy.customModel}>
+          <Input
+            value={customDraft}
+            aria-invalid={!customDraft.trim()}
+            onChange={(event) => setCustomDraft(event.target.value)}
+            onBlur={() => {
+              const next = customDraft.trim();
+              if (!next) {
+                reportError(copy.modelRequired);
+                return;
+              }
+              onChange({ model: next, customModel: next });
+            }}
+          />
+        </SettingsField>
+      ) : null}
+      {catalogError ? (
+        <p className="mb-4 text-sm text-muted-foreground">{copy.catalogUnavailable}</p>
+      ) : null}
       <SettingsField label={copy.language}>
         <SimpleSelect
           aria-label={copy.language}
@@ -99,71 +199,50 @@ export function TranscriptionSettings({
       />
       <SettingsField label={copy.extraAttempts}>
         <Input
-          type="number"
-          min={0}
-          max={5}
-          value={settings.retry.additionalRetries}
-          onChange={(event) =>
-            onChange({
-              retry: { ...settings.retry, additionalRetries: Number(event.target.value) },
-            })
-          }
+          inputMode="numeric"
+          value={extraDraft}
+          onChange={(event) => setExtraDraft(event.target.value)}
+          onBlur={() => commitRetry("additionalRetries", extraDraft, settings, onChange)}
         />
       </SettingsField>
       <SettingsField label={copy.connectTimeout}>
         <Input
-          type="number"
-          min={8000}
-          value={settings.retry.connectTimeoutMs}
-          onChange={(event) =>
-            onChange({
-              retry: { ...settings.retry, connectTimeoutMs: Number(event.target.value) },
-            })
-          }
+          inputMode="numeric"
+          value={connectDraft}
+          onChange={(event) => setConnectDraft(event.target.value)}
+          onBlur={() => commitRetry("connectTimeoutMs", connectDraft, settings, onChange)}
         />
       </SettingsField>
       <SettingsField label={copy.requestTimeout}>
         <Input
-          type="number"
-          value={settings.retry.requestTimeoutMs}
-          onChange={(event) =>
-            onChange({
-              retry: { ...settings.retry, requestTimeoutMs: Number(event.target.value) },
-            })
-          }
+          inputMode="numeric"
+          value={requestDraft}
+          onChange={(event) => setRequestDraft(event.target.value)}
+          onBlur={() => commitRetry("requestTimeoutMs", requestDraft, settings, onChange)}
         />
       </SettingsField>
       <SettingsField label={copy.initialDelay}>
         <Input
-          type="number"
-          value={settings.retry.initialRetryDelayMs}
-          onChange={(event) =>
-            onChange({
-              retry: { ...settings.retry, initialRetryDelayMs: Number(event.target.value) },
-            })
-          }
+          inputMode="numeric"
+          value={initialDraft}
+          onChange={(event) => setInitialDraft(event.target.value)}
+          onBlur={() => commitRetry("initialRetryDelayMs", initialDraft, settings, onChange)}
         />
       </SettingsField>
       <SettingsField label={copy.maxDelay}>
         <Input
-          type="number"
-          value={settings.retry.maxRetryDelayMs}
-          onChange={(event) =>
-            onChange({
-              retry: { ...settings.retry, maxRetryDelayMs: Number(event.target.value) },
-            })
-          }
+          inputMode="numeric"
+          value={maxDraft}
+          onChange={(event) => setMaxDraft(event.target.value)}
+          onBlur={() => commitRetry("maxRetryDelayMs", maxDraft, settings, onChange)}
         />
       </SettingsField>
       <SettingsField label={copy.totalLimit}>
         <Input
-          type="number"
-          value={settings.retry.totalOperationTimeoutMs}
-          onChange={(event) =>
-            onChange({
-              retry: { ...settings.retry, totalOperationTimeoutMs: Number(event.target.value) },
-            })
-          }
+          inputMode="numeric"
+          value={totalDraft}
+          onChange={(event) => setTotalDraft(event.target.value)}
+          onBlur={() => commitRetry("totalOperationTimeoutMs", totalDraft, settings, onChange)}
         />
       </SettingsField>
     </div>

@@ -125,19 +125,31 @@ const meter: MeterSample = {
   ],
 };
 
-export async function invoke<T>(cmd: string): Promise<T> {
+export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): Promise<T> {
   switch (cmd) {
     case "get_settings":
       return settings as T;
+    case "get_overlay_snapshot":
+      return {
+        revision: 1,
+        visible: window.location.search.includes("overlay"),
+        state: sessionFromSearch(),
+      } as T;
     case "get_runtime_info":
-      return { localBuild: false, buildDate: "2026-09-15" } as T;
+      return { localBuild: false, buildDate: "2026-09-15", settingsRecovered: false } as T;
     case "save_settings":
-      return settings as T;
+      return { ...settings, ...(_args?.settings as object | undefined) } as T;
     case "get_session_state":
       return sessionFromSearch() as T;
     case "list_history":
     case "list_history_summaries":
-      return history as T;
+    case "search_history":
+      return {
+        items: history,
+        nextCursor: null,
+        total: history.length,
+        hasMore: false,
+      } as T;
     case "api_key_configured":
       return true as T;
     case "list_microphones":
@@ -162,6 +174,7 @@ export async function invoke<T>(cmd: string): Promise<T> {
       } as T;
     case "start_model_compare":
     case "clear_model_compare":
+    case "cancel_model_compare":
     case "play_cue":
     case "preview_error_notification":
     case "open_audio_dir":

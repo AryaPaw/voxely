@@ -112,6 +112,7 @@ describe("FilterSettings", () => {
     );
     expect(screen.queryByText("Быстрая диктовка")).not.toBeInTheDocument();
     expect(screen.queryByText("Качество (медленнее)")).not.toBeInTheDocument();
+    expect(screen.queryByText(/OBS/)).not.toBeInTheDocument();
   });
 
   it("edits the stored preset instead of micTune sliders", async () => {

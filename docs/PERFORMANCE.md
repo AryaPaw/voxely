@@ -132,7 +132,7 @@ Default remains hide (not destroy) for overlay (created hidden at launch) and ma
 
 ## Supply chain
 
-Claimed MSRV is `1.85.0` to match the Tauri lock graph (`reqwest` 0.13 via updater). Hosted CI `stable` plus a field check; compiling on 1.85 is `NOT RUN` on this machine (`rustc 1.98.1`).
+Claimed MSRV is `1.85.0`. CI compiles on that toolchain (`cargo build --locked --all-targets`).
 
 Removed unused direct Rust crates: `rand`, `sha2`, `directories`, `once_cell`, `bytes`, `base64`. Dropped unused `reqwest` `blocking`, `nnnoiseless` default `bin` features, and `tracing-subscriber` `json`. Frontend dropped unused JS wrappers `@tauri-apps/plugin-opener`, `plugin-process`, `plugin-updater` (Rust plugins stay). `shadcn` stays because `src/styles.css` imports `shadcn/tailwind.css`.
 

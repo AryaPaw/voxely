@@ -394,7 +394,7 @@ impl RetryScheduler {
         if let Some(retry_after) = classified.retry_after {
             delay = delay.max(retry_after);
         }
-        delay = delay.min(self.policy.max_retry_delay).min(remaining);
+        delay = delay.min(remaining);
         if delay >= remaining {
             return AttemptDecision::GiveUp(AppError::RetryDeadlineExceeded);
         }
@@ -529,11 +529,21 @@ mod tests {
     }
 
     #[test]
-    fn retry_after_seconds() {
-        assert_eq!(
-            parse_retry_after("2", chrono::Utc::now()),
-            Some(Duration::from_secs(2))
-        );
+    fn retry_after_is_not_clipped_by_local_backoff_cap() {
+        let mut policy = RetryPolicy::default();
+        policy.max_retry_delay = Duration::from_secs(8);
+        policy.total_operation_timeout = Duration::from_secs(180);
+        let start = Instant::now();
+        let mut scheduler = RetryScheduler::new(policy, start);
+        let _ = scheduler.start_attempt(start, Duration::from_secs(1));
+        let classified = classify_http_status(429, Some(Duration::from_secs(120)));
+        let decision = scheduler.after_failure(&classified, start, 0.0);
+        match decision {
+            AttemptDecision::Wait { delay, .. } => {
+                assert_eq!(delay, Duration::from_secs(120));
+            }
+            other => panic!("expected wait, got {other:?}"),
+        }
     }
 
     #[test]

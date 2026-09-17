@@ -14,16 +14,13 @@ Voxely is a Windows-first Tauri 2 desktop app. The WebView is only UI. Recording
 
 ## Domains
 
-## Domains
-
 - `app`: lifecycle, tray, hotkey, session machine
 - `audio`: devices, capture, resample, WAV
-- `dsp`: filters, presets, OBS mapping
+- `dsp`: filter graph, presets, listen-only preview loudness
 - `transcription`: one `OpenRouterTransport` (HTTP/1.1, idle pool 2) plus retry policy
 - `history`: SQLite + retention
 - `windows_int`: credentials, injector
 - `updates`: Tauri updater coordinator and version policy
-- `obs`: local scene collection import
 
 ## Overlay
 

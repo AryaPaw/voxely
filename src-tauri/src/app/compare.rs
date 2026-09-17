@@ -19,6 +19,7 @@ use crate::windows_int::credentials::get_api_key;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CompareSlot {
+    pub slot_id: String,
     pub model: String,
     pub status: String,
     pub text: Option<String>,
@@ -26,6 +27,8 @@ pub struct CompareSlot {
     pub attempt: u32,
     pub cost: Option<f64>,
     pub latency_ms: Option<u128>,
+    pub clip_nonce: u64,
+    pub run_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -75,9 +78,7 @@ pub fn validate_compare_models(models: &[String]) -> Result<Vec<String>, AppErro
 }
 
 pub fn keep_compare_wav(name: &str) -> bool {
-    name == "filter-sample.wav"
-        || name.starts_with("filter-preview")
-        || name.starts_with("model-compare")
+    crate::history::retention::keep_temp_wav(name)
 }
 
 pub fn compare_busy(ctx: &AppContext) -> bool {
@@ -189,7 +190,28 @@ pub fn clear_model_compare(app: &AppHandle) -> Result<(), AppError> {
     Ok(())
 }
 
-pub fn cancel_model_compare(ctx: &AppContext) {
+pub fn cancel_model_compare(app: &AppHandle) -> Result<CompareState, AppError> {
+    let ctx = app.state::<Arc<AppContext>>();
+    if let Some(tx) = ctx.compare_cancel.lock().as_ref() {
+        let _ = tx.send(true);
+    }
+    {
+        let mut state = ctx.compare_state.lock();
+        for slot in &mut state.slots {
+            if slot.status == "running" {
+                slot.status = "cancelled".into();
+            }
+        }
+        state.running = false;
+    }
+    ctx.compare_running
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    emit_compare(app);
+    let snapshot = ctx.compare_state.lock().clone();
+    Ok(snapshot)
+}
+
+pub fn cancel_model_compare_internal(ctx: &AppContext) {
     if let Some(tx) = ctx.compare_cancel.lock().as_ref() {
         let _ = tx.send(true);
     }
@@ -230,9 +252,11 @@ async fn run_compare_inner(app: AppHandle) -> Result<CompareState, AppError> {
         state.running = true;
         state.run_id = Some(run_id.clone());
         state.stt_path = Some(frozen.to_string_lossy().into_owned());
+        let clip_nonce = state.nonce;
         state.slots = models
             .iter()
             .map(|model| CompareSlot {
+                slot_id: uuid::Uuid::new_v4().to_string(),
                 model: model.clone(),
                 status: "running".into(),
                 text: None,
@@ -240,6 +264,8 @@ async fn run_compare_inner(app: AppHandle) -> Result<CompareState, AppError> {
                 attempt: 0,
                 cost: None,
                 latency_ms: None,
+                clip_nonce,
+                run_id: Some(run_id.clone()),
             })
             .collect();
     }
@@ -252,8 +278,17 @@ async fn run_compare_inner(app: AppHandle) -> Result<CompareState, AppError> {
     };
     let base = crate::transcription::openrouter::default_base_url().to_string();
     let client = ctx.clone_transport_client()?;
+    let audio_duration = {
+        let (pcm, rate) =
+            read_pcm16_wav_with_rate(&frozen).unwrap_or((Vec::new(), STT_SAMPLE_RATE));
+        if rate == 0 {
+            Duration::from_millis(1)
+        } else {
+            Duration::from_millis((pcm.len() as u64 * 1000) / u64::from(rate))
+        }
+    };
     let mut set = tokio::task::JoinSet::new();
-    for (index, model) in models.into_iter().enumerate() {
+    for slot in ctx.compare_state.lock().slots.clone() {
         let key = key.clone();
         let frozen = frozen.clone();
         let language = language.clone();
@@ -261,6 +296,8 @@ async fn run_compare_inner(app: AppHandle) -> Result<CompareState, AppError> {
         let rx = tx.subscribe();
         let base = base.clone();
         let client = client.clone();
+        let slot_id = slot.slot_id.clone();
+        let model = slot.model.clone();
         set.spawn(async move {
             let outcome = transcribe_file(
                 &client,
@@ -270,20 +307,20 @@ async fn run_compare_inner(app: AppHandle) -> Result<CompareState, AppError> {
                 language.as_deref(),
                 &frozen,
                 policy,
-                Duration::from_secs(1),
+                audio_duration,
                 rx,
             )
             .await;
-            (index, model, outcome)
+            (slot_id, model, outcome)
         });
     }
     while let Some(joined) = set.join_next().await {
         match joined {
-            Ok((index, model, Ok(success))) => {
-                apply_slot_success(&app, index, &model, success);
+            Ok((slot_id, model, Ok(success))) => {
+                apply_slot_success(&app, &slot_id, &model, success);
             }
-            Ok((index, model, Err(err))) => {
-                apply_slot_error(&app, index, &model, err);
+            Ok((slot_id, model, Err(err))) => {
+                apply_slot_error(&app, &slot_id, &model, err);
             }
             Err(err) => {
                 tracing::error!(error = %err, "compare join failed");
@@ -305,10 +342,10 @@ fn compare_retry_policy(mut policy: RetryPolicy) -> RetryPolicy {
     policy
 }
 
-fn apply_slot_success(app: &AppHandle, index: usize, model: &str, success: TranscriptionSuccess) {
+fn apply_slot_success(app: &AppHandle, slot_id: &str, model: &str, success: TranscriptionSuccess) {
     let ctx = app.state::<Arc<AppContext>>();
     let mut state = ctx.compare_state.lock();
-    if let Some(slot) = state.slots.get_mut(index) {
+    if let Some(slot) = state.slots.iter_mut().find(|slot| slot.slot_id == slot_id) {
         slot.model = model.into();
         slot.status = "done".into();
         slot.text = Some(success.text);
@@ -319,14 +356,19 @@ fn apply_slot_success(app: &AppHandle, index: usize, model: &str, success: Trans
     }
 }
 
-fn apply_slot_error(app: &AppHandle, index: usize, model: &str, err: AppError) {
+fn apply_slot_error(app: &AppHandle, slot_id: &str, model: &str, err: AppError) {
     let ctx = app.state::<Arc<AppContext>>();
     let mut state = ctx.compare_state.lock();
-    if let Some(slot) = state.slots.get_mut(index) {
+    if let Some(slot) = state.slots.iter_mut().find(|slot| slot.slot_id == slot_id) {
         slot.model = model.into();
-        slot.status = "error".into();
+        slot.status = if matches!(err, AppError::Cancelled) {
+            "cancelled".into()
+        } else {
+            "error".into()
+        };
         slot.error = Some(err.code().to_string());
         slot.text = None;
+        slot.attempt = slot.attempt.max(1);
     }
 }
 

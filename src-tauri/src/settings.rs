@@ -37,6 +37,8 @@ pub struct AppSettings {
     pub auto_update_enabled: bool,
     #[serde(default = "default_compare_models")]
     pub compare_models: Vec<String>,
+    #[serde(default)]
+    pub write_seq: u64,
 }
 
 fn default_ui_language() -> String {
@@ -155,6 +157,7 @@ impl Default for AppSettings {
             ui_language: default_ui_language(),
             auto_update_enabled: default_auto_update(),
             compare_models: default_compare_models(),
+            write_seq: 0,
         }
     }
 }
@@ -167,13 +170,23 @@ impl AppSettings {
     }
 
     pub fn load(path: &Path) -> Result<Self, AppError> {
+        Ok(Self::load_with_recovery(path)?.0)
+    }
+
+    pub fn load_with_recovery(path: &Path) -> Result<(Self, bool), AppError> {
         if !path.exists() {
-            return Ok(Self::default());
+            return Ok((Self::default(), false));
         }
         let text =
             std::fs::read_to_string(path).map_err(|e| AppError::StorageFailed(e.to_string()))?;
-        let mut loaded: Self =
-            serde_json::from_str(&text).map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        let mut loaded: Self = match serde_json::from_str(&text) {
+            Ok(value) => value,
+            Err(_) => {
+                let backup = path.with_extension("json.corrupt");
+                let _ = std::fs::write(&backup, &text);
+                return Ok((Self::default(), true));
+            }
+        };
         let original_revision = loaded.config_revision;
         if original_revision < 5 {
             if original_revision < 4 && path.exists() {
@@ -201,7 +214,7 @@ impl AppSettings {
         if loaded.apply_connect_timeout_floor() {
             let _ = loaded.save(path);
         }
-        Ok(loaded)
+        Ok((loaded, false))
     }
 
     pub fn migrate_factory_defaults(&mut self) {
@@ -311,6 +324,19 @@ impl AppSettings {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn corrupt_settings_are_backed_up_and_defaults_load() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        std::fs::write(&path, "{not json").unwrap();
+        let (loaded, recovered) = AppSettings::load_with_recovery(&path).unwrap();
+        assert!(recovered);
+        assert_eq!(loaded.model, AppSettings::default().model);
+        assert!(path.with_extension("json.corrupt").exists());
+        let original = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(original, "{not json");
+    }
 
     #[test]
     fn roundtrip() {

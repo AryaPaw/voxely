@@ -33,12 +33,21 @@ pub fn is_local_build() -> bool {
 pub struct RuntimeInfo {
     pub local_build: bool,
     pub build_date: String,
+    pub settings_recovered: bool,
 }
 
 pub fn runtime_info() -> RuntimeInfo {
     RuntimeInfo {
         local_build: is_local_build(),
         build_date: env!("VOXELY_BUILD_DATE").to_string(),
+        settings_recovered: false,
+    }
+}
+
+pub fn runtime_info_with_recovery(recovered: bool) -> RuntimeInfo {
+    RuntimeInfo {
+        settings_recovered: recovered,
+        ..runtime_info()
     }
 }
 
@@ -175,13 +184,21 @@ pub fn show_main(app: &AppHandle, route: &str) {
     let _ = app.emit("app://navigate", section);
 }
 
-pub fn sync_autostart(app: &AppHandle, start_with_windows: bool) {
+pub fn sync_autostart(app: &AppHandle, start_with_windows: bool) -> Result<(), AppError> {
     let autostart = app.autolaunch();
     if start_with_windows {
-        let _ = autostart.enable();
+        autostart
+            .enable()
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+        if !autostart.is_enabled().unwrap_or(false) {
+            return Err(AppError::StorageFailed("autostart was not enabled".into()));
+        }
     } else {
-        let _ = autostart.disable();
+        autostart
+            .disable()
+            .map_err(|e| AppError::StorageFailed(e.to_string()))?;
     }
+    Ok(())
 }
 
 pub fn center_main_window(app: &AppHandle) {

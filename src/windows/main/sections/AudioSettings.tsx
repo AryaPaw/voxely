@@ -83,11 +83,11 @@ export function AudioSettings({
           ]}
         />
       </SettingsField>
-      {error ? <p className="text-sm text-danger">{error}</p> : null}
+      {error ? <p className="text-sm text-destructive">{error}</p> : null}
       <div className="mt-4 max-w-lg">
         <Label className="mb-1 text-sm">{copy.micLevel}</Label>
         <Progress value={level} className="h-2" />
-        {warning ? <p className="mt-1 text-xs text-danger">{warning}</p> : null}
+        {warning ? <p className="mt-1 text-xs text-destructive">{warning}</p> : null}
       </div>
     </div>
   );

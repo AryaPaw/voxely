@@ -24,8 +24,11 @@ jobs:
           bun-version: 1.4.2
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
         with:
-          toolchain: stable
+          toolchain: 1.85.0
           components: rustfmt, clippy
+      - name: MSRV compile
+        working-directory: src-tauri
+        run: cargo build --locked --all-targets
       - name: Build date from CI
         shell: pwsh
         run: echo "VOXELY_BUILD_DATE=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))" >> $env:GITHUB_ENV

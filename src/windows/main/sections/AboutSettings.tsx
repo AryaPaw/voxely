@@ -2,13 +2,35 @@ import { useEffect, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { CircleAlert, ExternalLink, Github } from "lucide-react";
 import { toast } from "sonner";
-import { api } from "../../../lib/api";
+import { api, type UpdateOutcome } from "../../../lib/api";
 import { reportError } from "../../../lib/system-notify";
 import { formatInvokeError, updateToast, type Messages, appDisplayName } from "../../../lib/i18n";
 import { formatReleaseDate } from "../../../lib/release-meta";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
 import { SECTION_ICONS, sectionLabel } from "../sectionNav";
+
+function announceUpdate(code: UpdateOutcome, copy: Messages) {
+  const message = updateToast(code, copy);
+  switch (code) {
+    case "failed":
+      toast.error(message);
+      return;
+    case "busy":
+    case "deferred":
+      toast.message(message);
+      return;
+    case "none":
+    case "available":
+    case "installed":
+      toast.success(message);
+      return;
+    default: {
+      const exhaustive: never = code;
+      void exhaustive;
+    }
+  }
+}
 
 function LinkRow({
   icon,
@@ -92,7 +114,7 @@ export function AboutSettings({ copy }: { copy: Messages }) {
             try {
               const code = await api.checkForUpdates();
               setUpdateReady(code === "available");
-              toast.success(updateToast(code, copy));
+              announceUpdate(code, copy);
             } catch (error) {
               reportError(formatInvokeError(error, copy));
             } finally {
@@ -112,7 +134,7 @@ export function AboutSettings({ copy }: { copy: Messages }) {
                 if (code === "installed" || code === "none") {
                   setUpdateReady(false);
                 }
-                toast.success(updateToast(code, copy));
+                announceUpdate(code, copy);
               } catch (error) {
                 reportError(formatInvokeError(error, copy));
               } finally {

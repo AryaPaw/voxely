@@ -34,9 +34,13 @@ import { SECTION_ICONS, sectionLabel } from "../sectionNav";
 export function HistoryPane({
   items,
   query,
+  hasMore = false,
+  recovered = false,
   keyConfigured,
   hotkey,
   onQuery,
+  onClearQuery,
+  onLoadMore,
   onRefresh,
   onOpenKey,
   onOpenSettings,
@@ -44,9 +48,13 @@ export function HistoryPane({
 }: {
   items: Recording[];
   query: string;
+  hasMore?: boolean;
+  recovered?: boolean;
   keyConfigured: boolean;
   hotkey: string;
   onQuery: (value: string) => void;
+  onClearQuery?: () => void;
+  onLoadMore?: () => void;
   onRefresh: () => Promise<void>;
   onOpenKey: () => void;
   onOpenSettings: () => void;
@@ -67,6 +75,9 @@ export function HistoryPane({
       <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-6 py-6">
         <PageHeader icon={SECTION_ICONS.history} title={sectionLabel(copy, "history")} />
         <p className="mt-1 text-sm text-muted-foreground">{copy.historyHint}</p>
+        {recovered ? (
+          <p className="mt-3 rounded-lg bg-muted px-3 py-2 text-sm">{copy.settingsRecovered}</p>
+        ) : null}
         <div className="mt-4 flex items-center gap-2">
           <Input
             value={query}
@@ -75,6 +86,11 @@ export function HistoryPane({
             aria-label={copy.search}
             className="flex-1"
           />
+          {query.trim() ? (
+            <Button type="button" variant="outline" onClick={() => onClearQuery?.()}>
+              {copy.clearSearch}
+            </Button>
+          ) : null}
           <Button variant="outline" onClick={() => void api.openAudioDir()}>
             <FolderOpen className="h-4 w-4" /> {copy.folder}
           </Button>
@@ -85,7 +101,7 @@ export function HistoryPane({
         <div className="mt-5 min-h-0 flex-1 space-y-3 overflow-auto pb-8">
           {items.length === 0 ? (
             <div className="rounded-2xl bg-muted px-5 py-10 text-sm text-muted-foreground">
-              {copy.emptyHistory.replace("{hotkey}", hotkey)}
+              {query.trim() ? copy.noSearchResults : copy.emptyHistory.replace("{hotkey}", hotkey)}
             </div>
           ) : (
             items.map((item) => (
@@ -101,6 +117,11 @@ export function HistoryPane({
               />
             ))
           )}
+          {hasMore ? (
+            <Button type="button" variant="outline" onClick={() => onLoadMore?.()}>
+              {copy.loadMore}
+            </Button>
+          ) : null}
         </div>
       </div>
     </div>
@@ -131,8 +152,9 @@ export function HistoryCard({
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingPlay = useRef(false);
   const copiedTimer = useRef<number | null>(null);
-  const failed = (item.status === "failed" || item.status === "interrupted") && !item.transcript;
-  const processing = item.status === "processing" && !item.transcript;
+  const failed = item.status === "failed" || item.status === "interrupted";
+  const processing = item.status === "processing";
+  const emptySuccess = item.status === "completed" && !(item.transcript ?? "").trim();
   const canRetry = Boolean(item.rawAudioPath || item.processedAudioPath);
   const processingLabel = item.processedAudioPath ? copy.processing : copy.processingAudio;
 
@@ -186,7 +208,10 @@ export function HistoryCard({
     const node = audioRef.current;
     if (node) {
       if (node.paused) {
-        void node.play();
+        void node.play().catch(() => {
+          setAudioMissing(true);
+          reportError(copy.playbackFailed);
+        });
       } else {
         node.pause();
       }
@@ -286,8 +311,12 @@ export function HistoryCard({
                 <AlertDialogAction
                   variant="destructive"
                   onClick={async () => {
-                    await api.deleteItem(item.id);
-                    await onRefresh();
+                    try {
+                      await api.deleteItem(item.id);
+                      await onRefresh();
+                    } catch (error) {
+                      reportError(formatInvokeError(error, copy));
+                    }
                   }}
                 >
                   {copy.delete}
@@ -297,8 +326,8 @@ export function HistoryCard({
           </AlertDialog>
         </div>
       </div>
-      <p className="mt-2 text-sm leading-6">
-        {failed ? (
+      <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">
+        {failed && !item.transcript ? (
           <>
             {copy.transcriptUnavailable}{" "}
             <button
@@ -309,7 +338,7 @@ export function HistoryCard({
               {copy.retry}
             </button>
           </>
-        ) : processing ? (
+        ) : processing && !item.transcript ? (
           <span className="status-live">
             {processingLabel}
             <span className="overlay-ellipsis" aria-hidden="true">
@@ -318,6 +347,8 @@ export function HistoryCard({
               <span>.</span>
             </span>
           </span>
+        ) : emptySuccess ? (
+          copy.emptyTranscript
         ) : (
           (item.transcript ?? copy.processing)
         )}
@@ -353,6 +384,15 @@ export function HistoryCard({
             const node = event.currentTarget;
             setCurrent(node.currentTime * 1000);
             setProgress(node.duration > 0 ? node.currentTime / node.duration : 0);
+          }}
+          onEnded={() => {
+            setPlaying(false);
+            setProgress(1);
+          }}
+          onError={() => {
+            setPlaying(false);
+            setAudioMissing(true);
+            reportError(copy.playbackFailed);
           }}
         />
       ) : null}

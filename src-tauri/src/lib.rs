@@ -10,7 +10,6 @@ mod error;
 mod history;
 mod logging;
 mod notify;
-mod obs;
 mod settings;
 mod transcription;
 mod updates;
@@ -83,7 +82,9 @@ pub fn run() {
             init_logging(debug, Some(&logs));
             app.manage(ctx);
             configure_tray(app.handle())?;
-            sync_autostart(app.handle(), start_with_windows);
+            if let Err(err) = sync_autostart(app.handle(), start_with_windows) {
+                tracing::error!(error = %err, "autostart failed");
+            }
             crate::updates::spawn_background_loop(app.handle().clone());
             if let Err(err) = reregister_hotkey(app.handle(), &hotkey) {
                 tracing::error!(error = %err, "hotkey failed");
@@ -96,9 +97,12 @@ pub fn run() {
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         let ctx = handle.state::<Arc<AppContext>>();
+                        api.prevent_close();
                         if ctx.settings.lock().close_to_tray {
-                            api.prevent_close();
                             hide_main_to_tray(&handle);
+                        } else {
+                            crate::app::session::shutdown_session(&handle);
+                            handle.exit(0);
                         }
                     }
                 });
@@ -112,6 +116,7 @@ pub fn run() {
             save_settings,
             list_history,
             list_history_summaries,
+            search_history,
             get_recording,
             delete_history_item,
             delete_all_history,
@@ -129,9 +134,6 @@ pub fn run() {
             open_settings_dir,
             reset_settings,
             open_audio_dir,
-            preview_obs_import,
-            import_obs_preset,
-            parse_obs_json,
             copy_transcript,
             run_retention,
             overlay_timing,
@@ -152,6 +154,7 @@ pub fn run() {
             run_model_compare,
             get_model_compare,
             clear_model_compare,
+            cancel_model_compare,
             get_runtime_info,
             play_cue,
             preview_error_notification

@@ -7,7 +7,7 @@ use super::rnnoise::Rnnoise;
 use crate::audio::resample::resample_sinc;
 use crate::error::AppError;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "camelCase")]
 pub enum FilterKind {
     HighPass,
@@ -319,15 +319,27 @@ pub fn apply_listen_gain(samples: &[f32], gain: f32) -> (Vec<f32>, AudioMetrics)
 
 pub type ListenPreview = (Vec<f32>, Vec<f32>, AudioMetrics, Vec<f32>);
 
+pub fn match_pair_loudness(a: &[f32], b: &[f32]) -> (Vec<f32>, Vec<f32>) {
+    let ra = metrics(a).rms.max(1.0e-6);
+    let rb = metrics(b).rms.max(1.0e-6);
+    let target = ra.max(rb);
+    let scale_a = target / ra;
+    let scale_b = target / rb;
+    let out_a: Vec<f32> = a.iter().map(|s| (s * scale_a).clamp(-0.999, 1.0)).collect();
+    let out_b: Vec<f32> = b.iter().map(|s| (s * scale_b).clamp(-0.999, 1.0)).collect();
+    (out_a, out_b)
+}
+
 pub fn prepare_listen_preview(
     preset: DspPreset,
     samples: Vec<f32>,
 ) -> Result<ListenPreview, AppError> {
     let (filtered, _) = prepare_listen(preset, samples.clone())?;
     let stt = filtered.clone();
-    let gain = listen_gain(&samples);
-    let (original, _) = apply_listen_gain(&samples, gain);
-    let (preview, preview_metrics) = apply_listen_gain(&filtered, gain);
+    let (original, _) = apply_listen_gain(&samples, listen_gain(&samples));
+    let (preview, _) = apply_listen_gain(&filtered, listen_gain(&filtered));
+    let (original, preview) = match_pair_loudness(&original, &preview);
+    let preview_metrics = metrics(&preview);
     Ok((original, preview, preview_metrics, stt))
 }
 
@@ -401,21 +413,26 @@ mod tests {
     }
 
     #[test]
-    fn linked_listen_gain_keeps_filter_loudness_audible() {
+    fn listen_preview_matches_loudness_without_changing_stt() {
         let sine: Vec<f32> = (0..4800)
             .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.05)
             .collect();
         let six = gain_only(6.0);
         let twelve = gain_only(12.0);
-        let (original_six, preview_six, _, _) = prepare_listen_preview(six, sine.clone()).unwrap();
+        let (original_six, preview_six, _, stt_six) =
+            prepare_listen_preview(six.clone(), sine.clone()).unwrap();
+        let (listen, _) = prepare_listen(six, sine.clone()).unwrap();
+        assert_eq!(stt_six, listen);
         let (original_twelve, preview_twelve, _, _) = prepare_listen_preview(twelve, sine).unwrap();
         let original_six_peak = original_six.iter().fold(0.0f32, |a, s| a.max(s.abs()));
         let original_twelve_peak = original_twelve.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        let preview_six_peak = preview_six.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        let preview_twelve_peak = preview_twelve.iter().fold(0.0f32, |a, s| a.max(s.abs()));
-        assert!((original_six_peak - original_twelve_peak).abs() < 0.01);
-        assert!(preview_twelve_peak > preview_six_peak);
-        assert!(preview_twelve_peak > original_twelve_peak);
+        assert!((original_six_peak - original_twelve_peak).abs() < 0.05);
+        let six_rms = metrics(&preview_six).rms;
+        let orig_rms = metrics(&original_six).rms;
+        assert!((six_rms - orig_rms).abs() < 0.02);
+        let twelve_rms = metrics(&preview_twelve).rms;
+        let orig12 = metrics(&original_twelve).rms;
+        assert!((twelve_rms - orig12).abs() < 0.02);
     }
 
     fn gain_only(db: f32) -> DspPreset {

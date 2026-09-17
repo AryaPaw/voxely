@@ -72,7 +72,6 @@ History keeps transcripts locally so you can copy, listen, and search.
 - Recording HUD: waveform, timer, hover to cancel
 - Speech filters: high-pass, gain, noise reduction, compressor, limiter
 - A/B listen of original vs processed audio at matched loudness
-- Import a filter chain from OBS
 - Local history, search, retention, and storage limits
 - English and Russian UI, light, dark, and system theme
 - Signed Tauri updates once a release is published

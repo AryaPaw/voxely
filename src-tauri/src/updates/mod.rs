@@ -7,7 +7,6 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_updater::UpdaterExt;
 
 use crate::app::lifecycle::is_local_build;
-use crate::app::machine::is_cancellable;
 use crate::app::session::AppContext;
 
 use policy::{install_allowed, is_newer_stable};
@@ -108,7 +107,7 @@ async fn run_check(app: &AppHandle, force: bool, install: bool) -> UpdateCode {
     if !force && !settings.auto_update_enabled {
         return UpdateCode::None;
     }
-    let busy = is_cancellable(&ctx.state.lock()) || crate::app::compare::compare_busy(&ctx);
+    let busy = crate::app::operations::system_busy(&ctx);
     if should_defer_update(install, busy) {
         return UpdateCode::Deferred;
     }
@@ -151,7 +150,16 @@ async fn try_check(app: &AppHandle, install: bool) -> Result<UpdateCode, String>
             if !install {
                 return Ok(UpdateCode::Available);
             }
-            match update.download_and_install(|_, _| {}, || {}).await {
+            let ctx = app.state::<Arc<AppContext>>();
+            if crate::app::operations::system_busy(&ctx) {
+                return Ok(UpdateCode::Deferred);
+            }
+            ctx.update_installing
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+            let result = update.download_and_install(|_, _| {}, || {}).await;
+            ctx.update_installing
+                .store(false, std::sync::atomic::Ordering::SeqCst);
+            match result {
                 Ok(()) => Ok(UpdateCode::Installed),
                 Err(err) => {
                     tracing::error!(error = %err, "update install failed");
