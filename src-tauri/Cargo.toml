@@ -79,6 +79,10 @@ opt-level = 3
 panic = "unwind"
 strip = true
 
+[profile.dev]
+debug = "line-tables-only"
+incremental = false
+
 [profile.dev.package.nnnoiseless]
 opt-level = 3
 

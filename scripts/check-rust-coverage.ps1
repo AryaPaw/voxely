@@ -18,4 +18,14 @@ if (-not $llvmCov) {
     exit 0
 }
 
-cargo llvm-cov --locked --lib --fail-under-lines $FailUnder --ignore-filename-regex "benches|main.rs"
+$covTarget = Join-Path (Get-Location) "target/llvm-cov"
+$env:CARGO_TARGET_DIR = $covTarget
+$env:CARGO_INCREMENTAL = "0"
+try {
+    cargo llvm-cov --locked --lib --fail-under-lines $FailUnder --ignore-filename-regex "benches|main.rs"
+    if ($LASTEXITCODE -ne 0) { throw "cargo llvm-cov failed: $LASTEXITCODE" }
+} finally {
+    if (Test-Path $covTarget) {
+        Remove-Item -LiteralPath $covTarget -Recurse -Force
+    }
+}
