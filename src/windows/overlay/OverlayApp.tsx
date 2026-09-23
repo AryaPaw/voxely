@@ -5,7 +5,11 @@ import { api, type AppSettings, type OverlaySnapshot, type SessionState } from "
 import { applyUiLocale, messagesFor, resolveUiLocale } from "../../lib/i18n";
 import { overlayHudLabel, overlayIsBusy, overlayShouldRender } from "../../lib/session-copy";
 import { acceptOverlayRevision, applyOverlaySnapshot } from "../../lib/overlay-snapshot";
-import { overlayCancelArmed, overlayHoverFromElement } from "../../lib/overlay-wave";
+import {
+  overlayCancelArmed,
+  overlayHoverFromElement,
+  overlayHoverFromPoll,
+} from "../../lib/overlay-wave";
 import { applyTheme, watchSystemTheme } from "../../lib/theme";
 import { OverlayWave } from "./OverlayWave";
 
@@ -93,18 +97,26 @@ export function OverlayApp() {
       return;
     }
     const sync = () => {
-      if (overlayHoverFromElement(pillRef.current)) {
-        setCancelHover(true);
-      }
+      setCancelHover((previous) =>
+        overlayHoverFromPoll(previous, overlayHoverFromElement(pillRef.current)),
+      );
     };
+    const disarm = () => setCancelHover(false);
     sync();
-    const frame = window.requestAnimationFrame(sync);
-    const timer = window.setTimeout(sync, 40);
-    window.addEventListener("pointermove", sync);
+    let frame = 0;
+    const tick = () => {
+      sync();
+      frame = window.requestAnimationFrame(tick);
+    };
+    if (import.meta.env.MODE !== "test") {
+      frame = window.requestAnimationFrame(tick);
+    }
+    window.addEventListener("pointerleave", disarm);
+    window.addEventListener("blur", disarm);
     return () => {
       window.cancelAnimationFrame(frame);
-      window.clearTimeout(timer);
-      window.removeEventListener("pointermove", sync);
+      window.removeEventListener("pointerleave", disarm);
+      window.removeEventListener("blur", disarm);
     };
   }, [busy]);
 

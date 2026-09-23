@@ -1,6 +1,6 @@
 [package]
 name = "voxely"
-version = "0.2.11"
+version = "0.2.12"
 description = "Windows voice dictation with bounded OpenRouter retries"
 authors = ["Voxely"]
 edition = "2021"
@@ -46,6 +46,7 @@ tauri-plugin-notification = "2.4.0"
 
 [target.'cfg(windows)'.dependencies]
 notify-rust = "4.18"
+winreg = "0.55"
 windows = { version = "0.58", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",

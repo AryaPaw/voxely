@@ -1,3 +1,4 @@
+pub mod autostart_run;
 pub mod compare;
 pub mod lifecycle;
 pub mod locale;

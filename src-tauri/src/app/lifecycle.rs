@@ -8,6 +8,7 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Position};
 
 use tauri_plugin_autostart::ManagerExt;
 
+use crate::app::autostart_run::extra_run_value_names;
 use crate::app::overlay::{center_physical_position, WorkArea};
 use crate::app::session::AppContext;
 use crate::app::shortcuts::sync_shortcuts;
@@ -197,6 +198,61 @@ pub fn sync_autostart(app: &AppHandle, start_with_windows: bool) -> Result<(), A
         autostart
             .disable()
             .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    }
+    prune_stale_autostart_run_keys(&app.package_info().name);
+    Ok(())
+}
+
+fn prune_stale_autostart_run_keys(keep: &str) {
+    #[cfg(windows)]
+    if let Err(err) = prune_stale_autostart_run_keys_windows(keep) {
+        tracing::warn!(error = %err, "stale autostart run keys");
+    }
+    #[cfg(not(windows))]
+    let _ = keep;
+}
+
+#[cfg(windows)]
+fn prune_stale_autostart_run_keys_windows(keep: &str) -> Result<(), AppError> {
+    use winreg::enums::{HKEY_CURRENT_USER, KEY_READ, KEY_SET_VALUE};
+    use winreg::RegKey;
+
+    const RUN: &str = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
+    const APPROVED: &str =
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run";
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let read = hkcu
+        .open_subkey_with_flags(RUN, KEY_READ)
+        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    let entries: Vec<(String, String)> = read
+        .enum_values()
+        .filter_map(|item| item.ok())
+        .filter_map(|(name, _)| {
+            read.get_value::<String, _>(&name)
+                .ok()
+                .map(|command| (name, command))
+        })
+        .collect();
+    let stale = extra_run_value_names(
+        entries
+            .iter()
+            .map(|(name, command)| (name.as_str(), command.as_str())),
+        keep,
+    );
+    if stale.is_empty() {
+        return Ok(());
+    }
+    let write = hkcu
+        .open_subkey_with_flags(RUN, KEY_SET_VALUE)
+        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    for name in &stale {
+        let _ = write.delete_value(name);
+    }
+    if let Ok(approved) = hkcu.open_subkey_with_flags(APPROVED, KEY_SET_VALUE) {
+        for name in &stale {
+            let _ = approved.delete_value(name);
+        }
     }
     Ok(())
 }

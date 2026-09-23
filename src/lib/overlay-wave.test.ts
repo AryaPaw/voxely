@@ -6,6 +6,7 @@ import {
   overlayAmplitude,
   overlayCancelArmed,
   overlayHoverFromElement,
+  overlayHoverFromPoll,
   OVERLAY_BAR_COUNT,
   METER_POLL_MS,
 } from "./overlay-wave";
@@ -63,6 +64,18 @@ describe("overlayCancelArmed", () => {
     const node = { matches: () => true } as unknown as Element;
     expect(overlayHoverFromElement(node)).toBe(true);
     expect(overlayHoverFromElement(null)).toBe(false);
+  });
+
+  it("disarms cancel when :hover is gone", () => {
+    const hovered = { matches: () => true } as unknown as Element;
+    const left = { matches: () => false } as unknown as Element;
+    expect(overlayCancelArmed(true, overlayHoverFromElement(hovered))).toBe(true);
+    expect(overlayCancelArmed(true, overlayHoverFromElement(left))).toBe(false);
+  });
+
+  it("does not latch a previous hover after the pointer leaves", () => {
+    expect(overlayHoverFromPoll(true, false)).toBe(false);
+    expect(overlayHoverFromPoll(false, true)).toBe(true);
   });
 });
 

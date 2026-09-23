@@ -38,6 +38,11 @@ export function overlayHoverFromElement(node: Element | null): boolean {
   return Boolean(node?.matches(":hover"));
 }
 
+export function overlayHoverFromPoll(previous: boolean, matchesHover: boolean): boolean {
+  void previous;
+  return matchesHover;
+}
+
 export function overlayCancelArmed(busy: boolean, hovered: boolean): boolean {
   return busy && hovered;
 }

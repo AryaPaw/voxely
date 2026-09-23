@@ -55,7 +55,18 @@ describe("OverlayApp", () => {
     fireEvent.click(pill);
     expect(invoke).toHaveBeenCalledWith("cancel_dictation");
     fireEvent.mouseLeave(pill);
+    expect(pill).not.toHaveClass("overlay-pill-cancel");
     expect(document.documentElement.lang).toBe("en");
+  });
+
+  it("drops cancel copy after mouseleave even if :hover was latched", async () => {
+    render(<OverlayApp />);
+    const pill = await screen.findByRole("button", { name: /Hover to cancel|Наведите/ });
+    fireEvent.mouseEnter(pill);
+    expect(pill).toHaveClass("overlay-pill-cancel");
+    fireEvent.mouseLeave(pill);
+    expect(pill).not.toHaveClass("overlay-pill-cancel");
+    expect(screen.queryByText(/Cancel recording|Отменить запись/)).not.toBeInTheDocument();
   });
 
   it("BUG-HUD-R1 keeps recording until a newer overlay revision arrives", async () => {
