@@ -40,6 +40,10 @@
   "bundle": {
     "active": true,
     "targets": ["nsis"],
+    "publisher": "AryaPaw",
+    "homepage": "https://github.com/AryaPaw/voxely",
+    "license": "AGPL-3.0-or-later",
+    "shortDescription": "Windows voice dictation that inserts speech into the window you started in",
     "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
@@ -53,7 +57,8 @@
         "installMode": "currentUser"
       },
       "webviewInstallMode": {
-        "type": "downloadBootstrapper"
+        "type": "downloadBootstrapper",
+        "silent": true
       }
     }
   },

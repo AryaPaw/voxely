@@ -121,7 +121,7 @@ Needs Bun 1.4+, Rust stable, and Visual Studio 2022 Build Tools with C++.
 .\scripts\dev.ps1
 ```
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/RELEASE.md`](docs/RELEASE.md), and [`docs/OPENROUTER.md`](docs/OPENROUTER.md).
+See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/RELEASE.md`](docs/RELEASE.md), [`docs/WINGET.md`](docs/WINGET.md), and [`docs/OPENROUTER.md`](docs/OPENROUTER.md).
 
 Refresh README screenshots from the real UI with a Tauri mock:
 

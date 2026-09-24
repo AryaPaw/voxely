@@ -63,6 +63,9 @@ jobs:
       - name: Version SSOT
         shell: pwsh
         run: ./scripts/check-version.ps1
+      - name: WinGet helpers
+        shell: pwsh
+        run: ./scripts/winget-lib.test.ps1
       - name: Icon SSOT
         shell: pwsh
         run: ./scripts/check-icons.ps1

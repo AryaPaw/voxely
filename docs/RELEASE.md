@@ -16,6 +16,7 @@ Do not create tags or GitHub Releases unless asked.
 - `TAURI_SIGNING_PRIVATE_KEY`: minisign private key (never commit)
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`: optional if the key has a password
 - Losing the private key means installed copies cannot receive signed updates
+- WinGet (after the first community PR merges): secret `WINGET_CREATE_GITHUB_TOKEN` and variable `WINGET_AUTO_UPDATE=true`. See [WINGET.md](WINGET.md). Do not enable auto-update before `AryaPaw.Voxely` exists.
 
 Generate keys with `bunx tauri signer generate --ci -w <path-outside-repo>`.
 
@@ -38,3 +39,5 @@ bun run tauri build
 Push a `vX.Y.Z` tag only after manifests already contain `X.Y.Z`. The release workflow builds signed NSIS, runs installer smoke, then publishes one GitHub Release named `vX.Y.Z`. It must not leave a leftover draft.
 
 Rollback: keep the previous NSIS on its GitHub tag. A failed update must leave the running app intact. To roll the Tauri updater back, replace the published `latest.json` with the previous signed manifest; do not rely on GitHub `latest` alone.
+
+WinGet uses the same versioned NSIS URL as the updater platform entry, never `releases/latest/download`. A failed WinGet job does not roll back the GitHub Release. First submission is manual; later versions can call `.github/workflows/winget.yml`.
