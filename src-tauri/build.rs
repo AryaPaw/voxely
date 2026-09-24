@@ -1,6 +1,14 @@
 fn main() {
     println!("cargo:rerun-if-env-changed=VOXELY_BUILD_DATE");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
+    println!("cargo:rerun-if-env-changed=VOXELY_LOCAL_BUILD");
+    println!(
+        "cargo:rustc-env=VOXELY_LOCAL_BUILD={}",
+        match std::env::var("VOXELY_LOCAL_BUILD") {
+            Ok(value) if matches!(value.as_str(), "1" | "true" | "TRUE") => "1",
+            _ => "0",
+        }
+    );
     let git_head = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../.git/HEAD");
     if git_head.exists() {
         println!("cargo:rerun-if-changed={}", git_head.display());

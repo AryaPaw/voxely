@@ -25,8 +25,12 @@ pub fn github_page_url(page: Option<&str>) -> &'static str {
     }
 }
 
+pub fn local_build_from(debug_assertions: bool, flag: Option<&str>) -> bool {
+    debug_assertions || matches!(flag, Some("1") | Some("true") | Some("TRUE"))
+}
+
 pub fn is_local_build() -> bool {
-    cfg!(debug_assertions)
+    local_build_from(cfg!(debug_assertions), Some(env!("VOXELY_LOCAL_BUILD")))
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -57,7 +61,11 @@ pub fn app_display_name(_locale: &str) -> &'static str {
 }
 
 pub fn window_title(locale: &str) -> &'static str {
-    if !is_local_build() {
+    window_title_for(is_local_build(), locale)
+}
+
+pub fn window_title_for(local_build: bool, locale: &str) -> &'static str {
+    if !local_build {
         return "Voxely";
     }
     if locale.to_ascii_lowercase().starts_with("ru") {
@@ -401,14 +409,23 @@ mod tests {
     }
 
     #[test]
+    fn local_build_flag_is_independent_of_rust_profile() {
+        assert!(local_build_from(true, None));
+        assert!(local_build_from(true, Some("0")));
+        assert!(!local_build_from(false, None));
+        assert!(!local_build_from(false, Some("0")));
+        assert!(local_build_from(false, Some("1")));
+        assert!(local_build_from(false, Some("true")));
+        assert_eq!(window_title_for(true, "ru"), "Voxely (локальная версия)");
+        assert_eq!(window_title_for(true, "en"), "Voxely (local)");
+        assert_eq!(window_title_for(false, "ru"), "Voxely");
+        assert_eq!(window_title_for(false, "en"), "Voxely");
+    }
+
+    #[test]
     fn window_title_marks_local_build_not_sandbox() {
-        if is_local_build() {
-            assert_eq!(window_title("ru"), "Voxely (локальная версия)");
-            assert_eq!(window_title("en"), "Voxely (local)");
-        } else {
-            assert_eq!(window_title("ru"), "Voxely");
-            assert_eq!(window_title("en"), "Voxely");
-        }
+        assert_eq!(window_title("ru"), window_title_for(is_local_build(), "ru"));
+        assert_eq!(window_title("en"), window_title_for(is_local_build(), "en"));
         assert_eq!(app_display_name("en"), "Voxely");
         assert_eq!(app_display_name("ru"), "Voxely");
         assert_eq!(runtime_info().local_build, is_local_build());

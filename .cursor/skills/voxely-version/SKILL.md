@@ -35,7 +35,7 @@ That is the whole bump. The script writes `package.json` and syncs `Cargo.toml` 
 
 Do not write a date into source. About shows the build day from `get_runtime_info.buildDate`, baked in `build.rs` as `VOXELY_BUILD_DATE`.
 
-CI is GitHub Actions (`.github/workflows/*`). Set `VOXELY_BUILD_DATE=yyyy-MM-dd` in the workflow; local debug uses git `%cs` or UTC today.
+CI is GitHub Actions (`.github/workflows/*`). Set `VOXELY_BUILD_DATE=yyyy-MM-dd` in the workflow; local production uses git `%cs` or UTC today. Daily driver: `VOXELY_LOCAL_BUILD=1` + `bunx tauri build --no-bundle`.
 
 ## After the script
 

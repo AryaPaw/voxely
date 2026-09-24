@@ -2,11 +2,11 @@
 # This script does not insert text or change user WAV/SQLite. It only reports process evidence.
 
 $ErrorActionPreference = "Stop"
-$exe = Join-Path (Split-Path -Parent $PSScriptRoot) "src-tauri\target\debug\voxely.exe"
+$exe = Join-Path (Split-Path -Parent $PSScriptRoot) "src-tauri\target\release\voxely.exe"
 
 Write-Host "Daily driver: $exe"
 if (-not (Test-Path $exe)) {
-    Write-Host "BLOCKED: debug exe missing. Build with: bunx tauri build -d --no-bundle"
+    Write-Host "BLOCKED: release exe missing. Build with: bun run local:release"
     exit 2
 }
 
@@ -17,8 +17,8 @@ $proc = Get-CimInstance Win32_Process -Filter "Name='voxely.exe'" -ErrorAction S
     Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq $exe) }
 
 if (-not $proc) {
-    Write-Host "BLOCKED: src-tauri/target/debug/voxely.exe is not running"
-    Write-Host "Start that exe after rebuild. Do not use tauri dev or LocalAppData install."
+    Write-Host "BLOCKED: src-tauri/target/release/voxely.exe is not running"
+    Write-Host "Start that exe after rebuild. Do not use tauri dev, -d, or LocalAppData install."
     exit 2
 }
 

@@ -2,7 +2,7 @@
 
 Machine: AryaPaw-PC, Windows 11 Pro, AMD Ryzen 9 3900 12-core, ~128 GB RAM.
 
-Daily driver is the debug binary (`bunx tauri build -d --no-bundle` → `src-tauri/target/debug/voxely.exe`). Release Criterion is an upper bound, not that binary. Dev objects use line tables only and no incremental cache; `target/` is disposable (`scripts/clean-rust-artifacts.ps1`).
+Daily driver is the local production binary (`VOXELY_LOCAL_BUILD=1` + `bunx tauri build --no-bundle` → `src-tauri/target/release/voxely.exe`). Criterion benches are a separate upper bound. Dev objects use line tables only and no incremental cache; `target/` is disposable (`scripts/clean-rust-artifacts.ps1`).
 
 Dev DSP crates (`nnnoiseless`, `rubato`, `rustfft`, `realfft`, `easyfft`) use `opt-level = 3` in `[profile.dev.package.*]`.
 

@@ -1,18 +1,18 @@
 ---
-description: "Keep the user's daily-driver debug Voxely exe current after code changes"
+description: "Keep the user's daily-driver local production Voxely exe current after code changes"
 alwaysApply: true
 ---
 
 # voxely-local-runtime
 
-The daily driver is `src-tauri/target/debug/voxely.exe` (local debug build), not `tauri dev` and not the installed `%LOCALAPPDATA%\Voxely` copy.
+The daily driver is `src-tauri/target/release/voxely.exe` (optimized Rust/Vite, compile flag `VOXELY_LOCAL_BUILD=1` so the UI still says local). Not `tauri dev`, not `tauri build -d`, and not the installed `%LOCALAPPDATA%\Voxely` copy.
 
 After a wave that changes Rust, frontend, or anything the running app should show:
 
 1. Stop running `voxely.exe` if it locks the binary (`Access is denied` on overwrite means it is still running).
-2. Rebuild with `bunx tauri build -d --no-bundle`.
-3. Start `src-tauri/target/debug/voxely.exe` again.
-4. Prove the user is on that build before claiming the wave is done: the running process path is that debug exe, `CreationDate`/`StartTime` is at or after the exe `LastWriteTime`, and the expected HWND exists (main and/or overlay, matching the change).
+2. Rebuild with `bun run local:release` (or `$env:VOXELY_LOCAL_BUILD='1'; bunx tauri build --no-bundle`).
+3. Start `src-tauri/target/release/voxely.exe` again if the script did not.
+4. Prove the user is on that build before claiming the wave is done: the running process path is that release exe, `CreationDate`/`StartTime` is at or after the exe `LastWriteTime`, and the expected HWND exists (main and/or overlay, matching the change). Title is `Voxely (local)` / `Voxely (локальная версия)`.
 
 Do not leave the user on a stale exe. Do this on every such wave without waiting to be asked.
 
