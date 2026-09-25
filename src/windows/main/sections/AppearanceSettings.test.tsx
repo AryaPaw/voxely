@@ -60,7 +60,11 @@ describe("AppearanceSettings", () => {
   it("resets the main window to the default size", async () => {
     invoke.mockResolvedValue(undefined);
     render(
-      <AppearanceSettings settings={settings()} copy={messagesFor("en")} onChange={() => undefined} />,
+      <AppearanceSettings
+        settings={settings()}
+        copy={messagesFor("en")}
+        onChange={() => undefined}
+      />,
     );
     fireEvent.click(screen.getByRole("button", { name: "Reset window size" }));
     await waitFor(() => {

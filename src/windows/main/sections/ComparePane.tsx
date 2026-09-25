@@ -8,7 +8,11 @@ import {
   useSensors,
   type DragEndEvent,
 } from "@dnd-kit/core";
-import { SortableContext, rectSortingStrategy, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
+import {
+  SortableContext,
+  rectSortingStrategy,
+  sortableKeyboardCoordinates,
+} from "@dnd-kit/sortable";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -18,7 +22,12 @@ import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
 import { SECTION_ICONS, sectionLabel } from "../sectionNav";
 import { CompareModelCard } from "./CompareModelCard";
-import { COMPARE_MODEL_MAX, COMPARE_MODEL_MIN, compareSlotIds, moveCompareModel } from "./compare-models";
+import {
+  COMPARE_MODEL_MAX,
+  COMPARE_MODEL_MIN,
+  compareSlotIds,
+  moveCompareModel,
+} from "./compare-models";
 
 const emptyState: CompareState = {
   recording: false,

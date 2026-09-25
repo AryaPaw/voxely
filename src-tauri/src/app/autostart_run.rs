@@ -1,5 +1,4 @@
 /// HKCU Run values that launch this exe besides the live plugin name.
-
 pub fn launches_voxely(command: &str) -> bool {
     command
         .to_ascii_lowercase()

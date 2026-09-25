@@ -1,0 +1,26 @@
+---
+description: "Before a Voxely release: local verify, then watch GitHub Actions until green"
+alwaysApply: true
+---
+
+# voxely-release
+
+A user request to release, tag, or "делай релиз" is not done when `git push` returns.
+
+## Before tag or push of a release commit
+
+Run the same gate CI uses, and wait for it:
+
+```text
+bun run verify
+```
+
+Do not tag if that command failed. Do not skip `format:check` or coverage because a subset of vitest passed earlier.
+
+## After push / tag
+
+Watch the GitHub Actions run that the push started (`release.yml` on `v*`, plus `ci` on `main` if that ran). Stay until `conclusion` is `success` or `failure`.
+
+If it fails: read the failed job log, fix, commit, push. For a failed `vX.Y.Z` that never published NSIS, move that same tag onto the fix (delete remote tag, retag, push). Do not leave the user with a red release run and no follow-up.
+
+`gh release create` is not a substitute for a green `release.yml` publish job.

@@ -30,8 +30,15 @@ export function CompareModelCard({
   onRemove: () => void;
   onMakeDefault: () => void;
 }) {
-  const { attributes, listeners, setNodeRef, setActivatorNodeRef, transform, transition, isDragging } =
-    useSortable({ id });
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
   const trimmed = model.trim();
   const isDefault = trimmed.length > 0 && trimmed === settings.model;
 

@@ -46,3 +46,15 @@ bun run rebuild:local-app
 ```
 
 That builds and starts `src-tauri/target/release/voxely.exe` with `VOXELY_LOCAL_BUILD=1`. It is not a GitHub Release. Do not use `tauri build -d`.
+
+## Release (only when the current message asks)
+
+Version must already be the confirmed `X.Y.Z` in `package.json`.
+
+1. `bun run verify` and wait. Do not tag on a red gate.
+2. Commit the product files (not ECC dumps).
+3. `git push origin HEAD` then `git tag vX.Y.Z` and `git push origin vX.Y.Z`.
+4. Watch `.github/workflows/release.yml` on that tag until success or failure. A failed Prettier/coverage job is your bug.
+5. If the tag never published NSIS, fix, push, delete and recreate `vX.Y.Z` on the fix. Do not walk away from a red run.
+
+The workflow publishes the GitHub Release. Do not `gh release create` as a workaround.
