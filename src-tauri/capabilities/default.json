@@ -57,6 +57,8 @@
     "allow-cancel-dictation",
     "allow-set-hotkey-capture",
     "allow-open-github",
+    "allow-open-openrouter-models",
+    "allow-reset-main-window",
     "allow-start-model-compare",
     "allow-stop-model-compare",
     "allow-run-model-compare",

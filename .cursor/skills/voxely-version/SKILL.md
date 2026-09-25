@@ -42,7 +42,7 @@ CI is GitHub Actions (`.github/workflows/*`). Set `VOXELY_BUILD_DATE=yyyy-MM-dd`
 Rebuild the daily driver if the running About screen must show the new number:
 
 ```text
-bunx tauri build -d --no-bundle
+bun run rebuild:local-app
 ```
 
-then start `src-tauri/target/debug/voxely.exe` (stop a locking `voxely.exe` first).
+That builds and starts `src-tauri/target/release/voxely.exe` with `VOXELY_LOCAL_BUILD=1`. It is not a GitHub Release. Do not use `tauri build -d`.

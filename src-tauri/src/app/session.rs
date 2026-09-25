@@ -31,7 +31,7 @@ use crate::history::repository::{
     audio_dir, can_retry_from_history, new_recording, HistoryRepo, RecordingStatus,
 };
 use crate::history::retention::{
-    apply_retention, cleanup_orphans, cleanup_orphans_except, Retention,
+    apply_retention, cleanup_orphans, cleanup_orphans_except, delete_recording, Retention,
 };
 use crate::settings::AppSettings;
 use crate::transcription::openrouter::{
@@ -195,9 +195,10 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
                     }
                 });
             }
-            *ctx.session_recording_id.lock() = None;
+            discard_uncommitted_recording(&ctx);
             ctx.abort_start.store(true, Ordering::SeqCst);
             *ctx.captured_target.lock() = None;
+            ctx.emit_history(app);
             ctx.emit_state(app);
             play_cancel_cue(&ctx);
             hide_overlay_now(app);
@@ -219,6 +220,26 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
             Ok(())
         }
         _ => Ok(()),
+    }
+}
+
+fn discard_uncommitted_recording(ctx: &AppContext) {
+    let Some(id) = ctx.session_recording_id.lock().take() else {
+        return;
+    };
+    let rec = match ctx.history.lock().get(&id) {
+        Ok(value) => value,
+        Err(err) => {
+            tracing::warn!(error = %err, id, "lookup cancelled live recording");
+            return;
+        }
+    };
+    let Some(rec) = rec else {
+        return;
+    };
+    let audio = audio_dir(&ctx.data_dir);
+    if let Err(err) = delete_recording(&ctx.history.lock(), &audio, &rec) {
+        tracing::warn!(error = %err, id, "discard cancelled live recording");
     }
 }
 
@@ -1114,18 +1135,11 @@ fn recover_stale_processing(
             rec.status = RecordingStatus::Interrupted;
             rec.last_error_code = Some(AppError::Interrupted.code().into());
             rec.last_error_message = Some(AppError::Interrupted.user_message());
+            rec.updated_at = chrono::Utc::now();
+            history.update(&rec)?;
         } else {
-            rec.status = RecordingStatus::Failed;
-            rec.last_error_code = Some(
-                AppError::StorageFailed("audio missing".into())
-                    .code()
-                    .into(),
-            );
-            rec.last_error_message =
-                Some(AppError::StorageFailed("audio missing".into()).user_message());
+            let _ = delete_recording(history, audio_root, &rec);
         }
-        rec.updated_at = chrono::Utc::now();
-        history.update(&rec)?;
     }
     Ok(())
 }
@@ -1671,7 +1685,7 @@ mod tests {
     }
 
     #[test]
-    fn startup_fails_stale_processing_without_audio() {
+    fn startup_drops_stale_processing_without_audio() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().to_path_buf();
         let history = HistoryRepo::open(&data.join("history.sqlite")).unwrap();
@@ -1682,9 +1696,21 @@ mod tests {
         drop(history);
 
         let ctx = AppContext::initialize(data).unwrap();
-        let kept = ctx.history.lock().get(&rec.id).unwrap().unwrap();
-        assert_eq!(kept.status, RecordingStatus::Failed);
-        assert_eq!(kept.last_error_code.as_deref(), Some("StorageFailed"));
+        assert!(ctx.history.lock().get(&rec.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn cancel_during_live_capture_drops_history_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let mut rec = new_recording("openai/gpt-transcribe".into());
+        rec.status = RecordingStatus::Processing;
+        rec.raw_audio_path = Some(format!("{}.raw.wav", rec.id));
+        ctx.history.lock().insert(&rec).unwrap();
+        *ctx.session_recording_id.lock() = Some(rec.id.clone());
+        discard_uncommitted_recording(&ctx);
+        assert!(ctx.session_recording_id.lock().is_none());
+        assert!(ctx.history.lock().get(&rec.id).unwrap().is_none());
     }
 
     #[test]

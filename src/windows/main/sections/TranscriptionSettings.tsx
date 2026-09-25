@@ -12,8 +12,6 @@ import { Input } from "../../../components/ui/input";
 import { SimpleSelect } from "../../../components/ui/simple-select";
 import { SECTION_ICONS } from "../sectionNav";
 
-const CUSTOM_MODEL = "__custom__";
-
 function draftNumber(value: number): string {
   return String(value);
 }
@@ -64,7 +62,7 @@ export function TranscriptionSettings({
   const [keyDraft, setKeyDraft] = useState("");
   const [catalog, setCatalog] = useState<Array<{ id: string; name: string }>>([]);
   const [catalogError, setCatalogError] = useState(false);
-  const [customDraft, setCustomDraft] = useState(settings.customModel ?? settings.model);
+  const [modelDraft, setModelDraft] = useState(settings.model);
   const [extraDraft, setExtraDraft] = useState(draftNumber(settings.retry.additionalRetries));
   const [connectDraft, setConnectDraft] = useState(draftNumber(settings.retry.connectTimeoutMs));
   const [requestDraft, setRequestDraft] = useState(draftNumber(settings.retry.requestTimeoutMs));
@@ -72,7 +70,11 @@ export function TranscriptionSettings({
   const [maxDraft, setMaxDraft] = useState(draftNumber(settings.retry.maxRetryDelayMs));
   const [totalDraft, setTotalDraft] = useState(draftNumber(settings.retry.totalOperationTimeoutMs));
   const catalogIds = new Set(catalog.map((item) => item.id));
-  const selected = catalogIds.has(settings.model) ? settings.model : CUSTOM_MODEL;
+  const catalogValue = catalogIds.has(settings.model) ? settings.model : "";
+
+  useEffect(() => {
+    setModelDraft(settings.model);
+  }, [settings.model]);
 
   useEffect(() => {
     let cancelled = false;
@@ -139,38 +141,42 @@ export function TranscriptionSettings({
         </Button>
       </div>
       <p className="mb-3 max-w-lg text-sm text-muted-foreground">{copy.timeoutHint}</p>
+      <div className="mb-4">
+        <Button type="button" variant="outline" onClick={() => void api.openOpenrouterModels()}>
+          {copy.openRouterCatalog}
+        </Button>
+      </div>
       <SettingsField label={copy.modelLabel}>
-        <SimpleSelect
+        <Input
           aria-label={copy.modelLabel}
-          value={selected}
-          onValueChange={(value) => {
-            if (value === CUSTOM_MODEL) {
-              const next = customDraft.trim();
-              onChange({ model: next, customModel: next || null });
+          value={modelDraft}
+          spellCheck={false}
+          autoComplete="off"
+          placeholder="openai/gpt-transcribe"
+          aria-invalid={!modelDraft.trim()}
+          onChange={(event) => setModelDraft(event.target.value)}
+          onBlur={() => {
+            const next = modelDraft.trim();
+            if (!next) {
+              setModelDraft(settings.model);
+              reportError(copy.modelRequired);
               return;
             }
-            onChange({ model: value, customModel: null });
+            onChange({ model: next, customModel: next });
           }}
-          options={[
-            ...catalog.map((item) => ({ value: item.id, label: item.name || item.id })),
-            { value: CUSTOM_MODEL, label: copy.customModel },
-          ]}
         />
       </SettingsField>
-      {selected === CUSTOM_MODEL ? (
-        <SettingsField label={copy.customModel}>
-          <Input
-            value={customDraft}
-            aria-invalid={!customDraft.trim()}
-            onChange={(event) => setCustomDraft(event.target.value)}
-            onBlur={() => {
-              const next = customDraft.trim();
-              if (!next) {
-                reportError(copy.modelRequired);
-                return;
-              }
-              onChange({ model: next, customModel: next });
+      <p className="-mt-3 mb-4 max-w-lg text-xs text-muted-foreground">{copy.modelIdHint}</p>
+      {catalog.length > 0 ? (
+        <SettingsField label={copy.catalogHint}>
+          <SimpleSelect
+            aria-label={copy.catalogHint}
+            value={catalogValue}
+            onValueChange={(value) => {
+              setModelDraft(value);
+              onChange({ model: value, customModel: value });
             }}
+            options={catalog.map((item) => ({ value: item.id, label: item.name || item.id }))}
           />
         </SettingsField>
       ) : null}

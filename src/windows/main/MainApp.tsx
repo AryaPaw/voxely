@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { reportError } from "../../lib/system-notify";
@@ -16,6 +17,7 @@ import {
   messagesFor,
   resolveUiLocale,
 } from "../../lib/i18n";
+import { bindEscapeCancel } from "../../lib/escape-cancel";
 import { HISTORY_CHANGED, historySearchQuery } from "../../lib/history-sync";
 import {
   APP_NAVIGATE,
@@ -45,6 +47,7 @@ export function MainApp() {
   const [keyConfigured, setKeyConfigured] = useState(false);
   const [query, setQuery] = useState("");
   const [localBuild, setLocalBuild] = useState(false);
+  const [version, setVersion] = useState("");
   const [historyHasMore, setHistoryHasMore] = useState(false);
   const [settingsRecovered, setSettingsRecovered] = useState(false);
   const historyCursorRef = useRef<string | null>(null);
@@ -79,7 +82,8 @@ export function MainApp() {
       applyUiLocale(resolveUiLocale(nextSettings.uiLanguage ?? "auto", navigator.language));
       setLoadError("");
       try {
-        const runtime = await api.runtimeInfo();
+        const [runtime, nextVersion] = await Promise.all([api.runtimeInfo(), getVersion()]);
+        setVersion(nextVersion);
         setLocalBuild(runtime.localBuild);
         setSettingsRecovered(Boolean(runtime.settingsRecovered));
         if (runtime.localBuild) {
@@ -120,7 +124,11 @@ export function MainApp() {
     const unlistenSettings = listen<AppSettings>("settings://changed", (event) => {
       setSettings((prev) => acceptSavedSettings(prev, event.payload));
     });
+    const unbindEscape = bindEscapeCancel(() => {
+      void api.cancel().catch(() => undefined);
+    });
     return () => {
+      unbindEscape();
       void unlistenHistory.then((fn) => fn());
       void unlistenInsert.then((fn) => fn());
       void unlistenSettings.then((fn) => fn());
@@ -199,7 +207,13 @@ export function MainApp() {
   return (
     <>
       <div className="flex h-full">
-        <SectionNav current={section} copy={copy} localBuild={localBuild} onSelect={setSection} />
+        <SectionNav
+          current={section}
+          copy={copy}
+          localBuild={localBuild}
+          version={version}
+          onSelect={setSection}
+        />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
           {section === "history" ? (
             <HistoryPane

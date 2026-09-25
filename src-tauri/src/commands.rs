@@ -488,6 +488,20 @@ pub fn open_github(page: Option<String>) -> Result<(), AppError> {
 }
 
 #[tauri::command]
+pub fn reset_main_window(app: AppHandle) -> Result<(), AppError> {
+    crate::app::lifecycle::reset_main_window(&app)
+}
+
+#[tauri::command]
+pub fn open_openrouter_models() -> Result<(), AppError> {
+    tauri_plugin_opener::open_url(
+        crate::app::lifecycle::OPENROUTER_TRANSCRIPTION_MODELS_URL,
+        None::<&str>,
+    )
+    .map_err(|e| AppError::StorageFailed(e.to_string()))
+}
+
+#[tauri::command]
 pub fn run_retention(ctx: State<'_, Arc<AppContext>>) -> Result<Vec<String>, AppError> {
     crate::app::session::apply_configured_retention(ctx.as_ref())
 }

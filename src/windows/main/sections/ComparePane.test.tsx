@@ -40,6 +40,10 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async () => () => undefined),
 }));
 
+vi.mock("sonner", () => ({
+  toast: { success: vi.fn(), error: vi.fn() },
+}));
+
 afterEach(() => cleanup());
 
 function settings(): AppSettings {
@@ -87,11 +91,30 @@ describe("ComparePane", () => {
     );
     expect(screen.getByRole("button", { name: "Compare" })).toBeDisabled();
     expect(screen.getByText(/Add an API key/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "OpenRouter catalog" })).toBeInTheDocument();
   });
 
-  it("adds a slot up to four and can set default", () => {
-    const onChange = vi.fn();
+  it("opens the OpenRouter transcription catalog", async () => {
+    const { invoke } = await import("@tauri-apps/api/core");
     render(
+      <ComparePane
+        settings={settings()}
+        copy={messagesFor("en")}
+        keyConfigured
+        onChange={() => undefined}
+        onOpenKey={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "OpenRouter catalog" }));
+    await waitFor(() => {
+      expect(invoke).toHaveBeenCalledWith("open_openrouter_models");
+    });
+  });
+
+  it("adds a fifth slot and confirms the default model", async () => {
+    const { toast } = await import("sonner");
+    const onChange = vi.fn();
+    const { rerender } = render(
       <ComparePane
         settings={settings()}
         copy={messagesFor("en")}
@@ -104,8 +127,38 @@ describe("ComparePane", () => {
     expect(onChange).toHaveBeenCalledWith({
       compareModels: ["openai/gpt-transcribe", "openai/whisper-large-v3", ""],
     });
-    fireEvent.click(screen.getAllByRole("button", { name: "Set as default" })[0]);
-    expect(onChange).toHaveBeenCalledWith({ model: "openai/gpt-transcribe" });
+    fireEvent.click(screen.getByRole("button", { name: "Set as default" }));
+    expect(onChange).toHaveBeenCalledWith({ model: "openai/whisper-large-v3" });
+    expect(toast.success).toHaveBeenCalledWith("This model is now the default for dictation.");
+    rerender(
+      <ComparePane
+        settings={{ ...settings(), model: "openai/whisper-large-v3" }}
+        copy={messagesFor("en")}
+        keyConfigured
+        onChange={onChange}
+        onOpenKey={() => undefined}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "Default" })).toBeDisabled();
+    expect(screen.getAllByRole("button", { name: "Drag to reorder" })).toHaveLength(2);
+  });
+
+  it("keeps add available past four models", () => {
+    const onChange = vi.fn();
+    render(
+      <ComparePane
+        settings={{
+          ...settings(),
+          compareModels: ["a", "b", "c", "d"],
+        }}
+        copy={messagesFor("en")}
+        keyConfigured
+        onChange={onChange}
+        onOpenKey={() => undefined}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Add model" }));
+    expect(onChange).toHaveBeenCalledWith({ compareModels: ["a", "b", "c", "d", ""] });
   });
 
   it("reloads the preview after a new take", async () => {
@@ -172,6 +225,7 @@ describe("ComparePane", () => {
       />,
     );
     expect(await screen.findByText("whisper text")).toBeInTheDocument();
+    expect(screen.getByText(/cost 0.01/)).toBeInTheDocument();
     const rows = screen.getAllByRole("textbox");
     expect(rows[0]).toHaveValue("openai/gpt-transcribe");
     expect(rows[1]).toHaveValue("openai/whisper-large-v3");

@@ -93,29 +93,41 @@ export function SectionNav({
   current,
   copy,
   localBuild,
+  version,
   onSelect,
 }: {
   current: Section;
   copy: Messages;
   localBuild: boolean;
+  version: string;
   onSelect: (section: Section) => void;
 }) {
   return (
-    <nav className="flex w-14 flex-col border-r border-border bg-panel p-2 sm:w-52 sm:p-3">
-      <div className="mb-4 hidden px-1 text-sm font-semibold tracking-tight sm:block">
-        {appDisplayName(copy)}
+    <nav className="flex h-full w-16 flex-col border-r border-border bg-panel p-2 sm:w-56 sm:p-3">
+      <div className="mb-4 flex items-center gap-2 px-1">
+        <img src="/favicon.png" alt="" className="h-9 w-9 rounded-lg sm:h-10 sm:w-10" />
+        <div className="hidden min-w-0 sm:block">
+          <div className="text-sm font-semibold tracking-tight">{appDisplayName(copy)}</div>
+        </div>
       </div>
-      <div className="mb-4 flex justify-center px-1 sm:hidden" aria-hidden="true">
-        <img src="/favicon.png" alt="" className="h-7 w-7 rounded-lg" />
+      <div className="min-h-0 flex-1 overflow-y-auto">
+        <SectionButton id="history" current={current} copy={copy} onSelect={onSelect} />
+        <SectionButton id="compare" current={current} copy={copy} onSelect={onSelect} />
+        <div className="mt-4 mb-1 hidden px-2 text-[11px] uppercase tracking-wide text-muted-foreground sm:block">
+          {copy.settings}
+        </div>
+        {settingsNavItems(localBuild).map((id) => (
+          <SectionButton key={id} id={id} current={current} copy={copy} onSelect={onSelect} />
+        ))}
       </div>
-      <SectionButton id="history" current={current} copy={copy} onSelect={onSelect} />
-      <SectionButton id="compare" current={current} copy={copy} onSelect={onSelect} />
-      <div className="mt-4 mb-1 hidden px-2 text-[11px] uppercase tracking-wide text-muted-foreground sm:block">
-        {copy.settings}
+      <div className="mt-3 px-1 text-center text-[11px] tabular-nums text-muted-foreground sm:text-left">
+        {version ? (
+          <span>
+            {version}
+            {localBuild ? ` (${copy.navLocalBuild})` : ""}
+          </span>
+        ) : null}
       </div>
-      {settingsNavItems(localBuild).map((id) => (
-        <SectionButton key={id} id={id} current={current} copy={copy} onSelect={onSelect} />
-      ))}
     </nav>
   );
 }

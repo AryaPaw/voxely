@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-openrouter-models"
+description = "Enables the open_openrouter_models command without any pre-configured scope."
+commands.allow = ["open_openrouter_models"]
+
+[[permission]]
+identifier = "deny-open-openrouter-models"
+description = "Denies the open_openrouter_models command without any pre-configured scope."
+commands.deny = ["open_openrouter_models"]

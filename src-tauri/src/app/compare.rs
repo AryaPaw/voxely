@@ -61,9 +61,9 @@ pub fn validate_compare_models(models: &[String]) -> Result<Vec<String>, AppErro
         .map(|model| model.trim().to_string())
         .filter(|model| !model.is_empty())
         .collect();
-    if !(2..=4).contains(&trimmed.len()) {
+    if !(2..=12).contains(&trimmed.len()) {
         return Err(AppError::RequestValidationFailed(
-            "compare needs 2-4 models".into(),
+            "compare needs 2-12 models".into(),
         ));
     }
     let mut unique = trimmed.clone();
@@ -408,6 +408,10 @@ mod tests {
             "d".into(),
             "e".into()
         ])
+        .is_ok());
+        assert!(validate_compare_models(
+            &(0..13).map(|index| format!("m{index}")).collect::<Vec<_>>()
+        )
         .is_err());
         assert_eq!(
             validate_compare_models(&[" a ".into(), "b".into()]).unwrap(),

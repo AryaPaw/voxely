@@ -48,32 +48,6 @@ fn default_rnnoise_mix() -> f32 {
 }
 
 impl DspPreset {
-    pub fn obs_imported() -> Self {
-        Self {
-            id: "obs-imported".into(),
-            name: "OBS Imported".into(),
-            order: vec![
-                slot("expander", FilterKind::Expander, true),
-                slot("rnnoise", FilterKind::Rnnoise, true),
-                slot("gate", FilterKind::Gate, false),
-                slot("compressor", FilterKind::Compressor, true),
-                slot("gain", FilterKind::Gain, true),
-                slot("limiter", FilterKind::Limiter, true),
-            ],
-            high_pass: HighPassConfig::default(),
-            gain: GainConfig { db: 2.0 },
-            compressor: DynamicsConfig::compressor_obs(),
-            expander: DynamicsConfig::expander_obs(),
-            gate: GateConfig::default(),
-            limiter: LimiterConfig {
-                threshold_db: -1.0,
-                release_ms: 60.0,
-                sample_rate: 48_000.0,
-            },
-            rnnoise_mix: 1.0,
-        }
-    }
-
     pub fn stt_fast() -> Self {
         Self {
             id: "stt-fast".into(),
@@ -540,7 +514,7 @@ mod tests {
 
     #[test]
     fn sine_stays_finite() {
-        let mut pipeline = DspPipeline::new(DspPreset::obs_imported()).unwrap();
+        let mut pipeline = DspPipeline::new(DspPreset::stt_optimized()).unwrap();
         let sine: Vec<f32> = (0..4800)
             .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
             .collect();

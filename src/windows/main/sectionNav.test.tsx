@@ -12,11 +12,13 @@ describe("SectionNav", () => {
         current="filters"
         copy={messagesFor("ru")}
         localBuild
+        version="0.2.13"
         onSelect={() => undefined}
       />,
     );
     expect(screen.getByRole("button", { name: /Фильтры/ })).toHaveAttribute("aria-current", "page");
     expect(screen.getByText("Voxely")).toBeInTheDocument();
+    expect(screen.getByText("0.2.13 (локальная)")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /История/ })).not.toHaveAttribute("aria-current");
     expect(screen.getByRole("button", { name: /Сравнение/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Песочница/ })).toBeInTheDocument();
@@ -28,10 +30,13 @@ describe("SectionNav", () => {
         current="filters"
         copy={messagesFor("ru")}
         localBuild={false}
+        version="0.2.13"
         onSelect={() => undefined}
       />,
     );
     expect(screen.getByText("Voxely")).toBeInTheDocument();
+    expect(screen.getByText("0.2.13")).toBeInTheDocument();
+    expect(screen.queryByText(/локальная/)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /Песочница/ })).not.toBeInTheDocument();
     expect(settingsNavItems(false)).not.toContain("debug");
     expect(settingsNavItems(true)).toContain("debug");

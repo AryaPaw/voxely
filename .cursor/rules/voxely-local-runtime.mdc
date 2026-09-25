@@ -10,7 +10,7 @@ The daily driver is `src-tauri/target/release/voxely.exe` (optimized Rust/Vite, 
 After a wave that changes Rust, frontend, or anything the running app should show:
 
 1. Stop running `voxely.exe` if it locks the binary (`Access is denied` on overwrite means it is still running).
-2. Rebuild with `bun run local:release` (or `$env:VOXELY_LOCAL_BUILD='1'; bunx tauri build --no-bundle`).
+2. Rebuild with `bun run rebuild:local-app` (or `$env:VOXELY_LOCAL_BUILD='1'; bunx tauri build --no-bundle`).
 3. Start `src-tauri/target/release/voxely.exe` again if the script did not.
 4. Prove the user is on that build before claiming the wave is done: the running process path is that release exe, `CreationDate`/`StartTime` is at or after the exe `LastWriteTime`, and the expected HWND exists (main and/or overlay, matching the change). Title is `Voxely (local)` / `Voxely (локальная версия)`.
 

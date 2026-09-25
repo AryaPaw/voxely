@@ -4,7 +4,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, Position};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, PhysicalPosition, Position, Size};
 
 use tauri_plugin_autostart::ManagerExt;
 
@@ -17,6 +17,10 @@ use crate::windows_int::overlay::{work_area_for_cursor, work_area_for_foreground
 
 pub const GITHUB_REPO_URL: &str = "https://github.com/AryaPaw/voxely";
 pub const GITHUB_ISSUES_URL: &str = "https://github.com/AryaPaw/voxely/issues";
+pub const OPENROUTER_TRANSCRIPTION_MODELS_URL: &str =
+    "https://openrouter.ai/models?output_modalities=transcription";
+pub const MAIN_WINDOW_WIDTH: f64 = 960.0;
+pub const MAIN_WINDOW_HEIGHT: f64 = 680.0;
 
 pub fn github_page_url(page: Option<&str>) -> &'static str {
     match page {
@@ -293,6 +297,21 @@ pub fn center_main_window(app: &AppHandle) {
     let _ = window.center();
 }
 
+pub fn reset_main_window(app: &AppHandle) -> Result<(), AppError> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| AppError::StorageFailed("main window missing".into()))?;
+    let _ = window.unmaximize();
+    window
+        .set_size(Size::Logical(LogicalSize::new(
+            MAIN_WINDOW_WIDTH,
+            MAIN_WINDOW_HEIGHT,
+        )))
+        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    center_main_window(app);
+    Ok(())
+}
+
 pub fn reregister_hotkey(app: &AppHandle, _spec: &str) -> Result<(), AppError> {
     sync_shortcuts(app)
 }
@@ -400,6 +419,12 @@ mod tests {
         assert_eq!(GITHUB_REPO_URL, "https://github.com/AryaPaw/voxely");
         assert_eq!(github_page_url(Some("issues")), GITHUB_ISSUES_URL);
         assert_eq!(github_page_url(None), GITHUB_REPO_URL);
+        assert_eq!(
+            OPENROUTER_TRANSCRIPTION_MODELS_URL,
+            "https://openrouter.ai/models?output_modalities=transcription"
+        );
+        assert_eq!(MAIN_WINDOW_WIDTH, 960.0);
+        assert_eq!(MAIN_WINDOW_HEIGHT, 680.0);
     }
 
     #[test]

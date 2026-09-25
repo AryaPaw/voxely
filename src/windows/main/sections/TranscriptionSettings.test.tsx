@@ -146,4 +146,33 @@ describe("TranscriptionSettings", () => {
     expect(onChange).not.toHaveBeenCalled();
     expect(reportError).toHaveBeenCalledWith("Enter a model");
   });
+
+  it("always shows a typed model id and opens the OpenRouter catalog", async () => {
+    const onChange = vi.fn();
+    invoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "discover_models") {
+        return [{ id: "openai/gpt-transcribe", name: "GPT Transcribe" }];
+      }
+      return undefined;
+    });
+    render(
+      <TranscriptionSettings
+        settings={settings()}
+        copy={messagesFor("en")}
+        keyConfigured
+        onConfigured={() => undefined}
+        onChange={onChange}
+      />,
+    );
+    const field = await screen.findByLabelText("Model");
+    expect(field).toHaveValue("openai/gpt-transcribe");
+    fireEvent.change(field, { target: { value: "openai/gpt-4o-transcribe" } });
+    fireEvent.blur(field);
+    expect(onChange).toHaveBeenCalledWith({
+      model: "openai/gpt-4o-transcribe",
+      customModel: "openai/gpt-4o-transcribe",
+    });
+    fireEvent.click(screen.getByRole("button", { name: "OpenRouter catalog" }));
+    expect(invoke).toHaveBeenCalledWith("open_openrouter_models", undefined);
+  });
 });

@@ -148,6 +148,9 @@ describe("MainApp", () => {
     expect(toast.error).toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: /Внешний вид/ }));
     expect(await screen.findByRole("combobox", { name: "Тема" })).toBeInTheDocument();
+    const { invoke } = await import("@tauri-apps/api/core");
+    fireEvent.keyDown(window, { key: "Escape", bubbles: true });
+    expect(invoke).toHaveBeenCalledWith("cancel_dictation");
   });
 
   it("navigates from tray payload and refreshes on history events", async () => {

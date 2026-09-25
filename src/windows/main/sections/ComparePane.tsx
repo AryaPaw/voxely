@@ -1,12 +1,24 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  DndContext,
+  KeyboardSensor,
+  PointerSensor,
+  closestCenter,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import { SortableContext, rectSortingStrategy, sortableKeyboardCoordinates } from "@dnd-kit/sortable";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { toast } from "sonner";
 import { api, type AppSettings, type CompareState } from "../../../lib/api";
 import { formatInvokeError, type Messages } from "../../../lib/i18n";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
-import { Input } from "../../../components/ui/input";
 import { SECTION_ICONS, sectionLabel } from "../sectionNav";
+import { CompareModelCard } from "./CompareModelCard";
+import { COMPARE_MODEL_MAX, COMPARE_MODEL_MIN, compareSlotIds, moveCompareModel } from "./compare-models";
 
 const emptyState: CompareState = {
   recording: false,
@@ -35,14 +47,19 @@ export function ComparePane({
   const [error, setError] = useState("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const models = useMemo(() => settings.compareModels ?? [], [settings.compareModels]);
+  const slotIds = useMemo(() => compareSlotIds(models.length), [models.length]);
   const unique = useMemo(() => new Set(models.map((item) => item.trim())), [models]);
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
   const canRun =
     keyConfigured &&
     Boolean(state.listenPath) &&
     !state.recording &&
     !state.running &&
-    models.length >= 2 &&
-    models.length <= 4 &&
+    models.length >= COMPARE_MODEL_MIN &&
+    models.length <= COMPARE_MODEL_MAX &&
     unique.size === models.length &&
     [...unique].every((item) => item.length > 0);
 
@@ -80,6 +97,16 @@ export function ComparePane({
     onChange({ compareModels: next });
   }
 
+  function onDragEnd(event: DragEndEvent) {
+    const { active, over } = event;
+    if (!over || active.id === over.id) {
+      return;
+    }
+    const from = slotIds.indexOf(String(active.id));
+    const to = slotIds.indexOf(String(over.id));
+    patchModels(moveCompareModel(models, from, to));
+  }
+
   async function toggleRecord() {
     setError("");
     try {
@@ -108,6 +135,9 @@ export function ComparePane({
       <PageHeader icon={SECTION_ICONS.compare} title={sectionLabel(copy, "compare")} />
       <p className="mb-4 max-w-lg text-sm text-muted-foreground">{copy.compareIntro}</p>
       <div className="mb-4 flex flex-wrap gap-2">
+        <Button type="button" variant="outline" onClick={() => void api.openOpenrouterModels()}>
+          {copy.openRouterCatalog}
+        </Button>
         <Button type="button" onClick={() => void toggleRecord()} disabled={state.running}>
           {state.recording ? copy.compareStop : copy.compareRecord}
         </Button>
@@ -128,7 +158,7 @@ export function ComparePane({
             {copy.cancel}
           </Button>
         ) : null}
-        {models.length < 4 ? (
+        {models.length < COMPARE_MODEL_MAX ? (
           <Button type="button" variant="outline" onClick={() => patchModels([...models, ""])}>
             {copy.compareAddModel}
           </Button>
@@ -154,58 +184,34 @@ export function ComparePane({
       ) : (
         <p className="mb-4 text-sm text-muted-foreground">{copy.compareNoClip}</p>
       )}
-      <div className="grid gap-3 md:grid-cols-2">
-        {models.map((model, index) => {
-          const slot = compareSlotForModel(state, model);
-          return (
-            <div
-              key={slot?.slotId ?? `compare-row-${index}`}
-              className="rounded-lg border border-border p-3"
-            >
-              <Input
-                aria-label={`model-${index + 1}`}
-                value={model}
-                onChange={(event) => {
+      <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
+        <SortableContext items={slotIds} strategy={rectSortingStrategy}>
+          <div className="grid gap-3 md:grid-cols-2">
+            {models.map((model, index) => (
+              <CompareModelCard
+                key={slotIds[index]}
+                id={slotIds[index]}
+                index={index}
+                model={model}
+                settings={settings}
+                copy={copy}
+                slot={compareSlotForModel(state, model)}
+                canRemove={models.length > COMPARE_MODEL_MIN}
+                onModelChange={(value) => {
                   const next = [...models];
-                  next[index] = event.target.value;
+                  next[index] = value;
                   patchModels(next);
                 }}
+                onRemove={() => patchModels(models.filter((_, item) => item !== index))}
+                onMakeDefault={() => {
+                  onChange({ model: model.trim() });
+                  toast.success(copy.compareDefaultSet);
+                }}
               />
-              <div className="mt-2 flex gap-2">
-                {models.length > 2 ? (
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    onClick={() => patchModels(models.filter((_, item) => item !== index))}
-                  >
-                    {copy.compareRemoveModel}
-                  </Button>
-                ) : null}
-                <Button
-                  type="button"
-                  variant="outline"
-                  disabled={!model.trim()}
-                  onClick={() => onChange({ model: model.trim() })}
-                >
-                  {copy.compareMakeDefault}
-                </Button>
-              </div>
-              {slot ? (
-                <div className="mt-3 text-sm">
-                  <div className="text-muted-foreground">
-                    {slot.status === "error"
-                      ? copy.compareSlotError
-                      : copy.compareAttempt.replace("{value}", String(slot.attempt))}
-                    {slot.cost != null ? ` / ${slot.cost}` : ""}
-                  </div>
-                  {slot.text ? <p className="mt-1 whitespace-pre-wrap">{slot.text}</p> : null}
-                  {slot.error ? <p className="mt-1 text-destructive">{slot.error}</p> : null}
-                </div>
-              ) : null}
-            </div>
-          );
-        })}
-      </div>
+            ))}
+          </div>
+        </SortableContext>
+      </DndContext>
     </div>
   );
 }

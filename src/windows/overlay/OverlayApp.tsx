@@ -10,6 +10,7 @@ import {
   overlayHoverFromElement,
   overlayHoverFromPoll,
 } from "../../lib/overlay-wave";
+import { bindEscapeCancel } from "../../lib/escape-cancel";
 import { applyTheme, watchSystemTheme } from "../../lib/theme";
 import { OverlayWave } from "./OverlayWave";
 
@@ -85,6 +86,12 @@ export function OverlayApp() {
   }, []);
 
   useEffect(() => watchSystemTheme(theme), [theme]);
+
+  useEffect(() => {
+    return bindEscapeCancel(() => {
+      void api.cancel().catch(() => undefined);
+    });
+  }, []);
 
   useEffect(() => {
     if (!busy) {

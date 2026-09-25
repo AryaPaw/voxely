@@ -1,7 +1,7 @@
 {
   "name": "voxely",
   "private": true,
-  "version": "0.2.12",
+  "version": "0.2.13",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -16,7 +16,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check \"src/**/*.{ts,tsx,css}\" \"docs/**/*.md\" README.md package.json vite.config.ts eslint.config.js",
     "version:set": "pwsh -File scripts/set-version.ps1",
-    "local:release": "pwsh -File scripts/build-local-release.ps1",
+    "rebuild:local-app": "pwsh -File scripts/rebuild-local-app.ps1",
     "winget:inspect": "pwsh -File scripts/winget-prepare.ps1 -Mode inspect",
     "winget:test-lib": "pwsh -File scripts/winget-lib.test.ps1",
     "verify": "bun run typecheck && bun run lint && bun run format:check && bun run coverage && cargo fmt --all --check --manifest-path src-tauri/Cargo.toml && cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings && cargo test --locked --manifest-path src-tauri/Cargo.toml --all && pwsh -File scripts/check-version.ps1 && pwsh -File scripts/check-rust-coverage.ps1",
@@ -24,6 +24,9 @@
   },
   "packageManager": "bun@1.4.2",
   "dependencies": {
+    "@dnd-kit/core": "^6.3.1",
+    "@dnd-kit/sortable": "^10.0.0",
+    "@dnd-kit/utilities": "^3.2.2",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-notification": "^2.4.0",
     "class-variance-authority": "^0.7.1",

@@ -46,11 +46,8 @@ describe("messagesFor", () => {
     expect(
       factoryPresetLabel({ id: "stt-optimized", name: "Качество (медленнее)" }, messagesFor("en")),
     ).toBe("Quality (slower)");
-    expect(
-      factoryPresetLabel({ id: "obs-imported", name: "OBS Imported" }, messagesFor("ru")),
-    ).toBe("Импорт из OBS");
-    expect(factoryPresetLabel({ id: "custom-1", name: "OBS Mic" }, messagesFor("en"))).toBe(
-      "OBS Mic",
+    expect(factoryPresetLabel({ id: "custom-1", name: "Custom mic" }, messagesFor("en"))).toBe(
+      "Custom mic",
     );
   });
 

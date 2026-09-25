@@ -6,7 +6,7 @@ $exe = Join-Path (Split-Path -Parent $PSScriptRoot) "src-tauri\target\release\vo
 
 Write-Host "Daily driver: $exe"
 if (-not (Test-Path $exe)) {
-    Write-Host "BLOCKED: release exe missing. Build with: bun run local:release"
+    Write-Host "BLOCKED: local app exe missing. Build with: bun run rebuild:local-app"
     exit 2
 }
 

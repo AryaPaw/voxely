@@ -1,9 +1,12 @@
+import { toast } from "sonner";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { SettingsField } from "../../../components/settings/SettingsField";
 import { SettingsSwitchRow } from "../../../components/settings/SettingsSwitchRow";
+import { Button } from "../../../components/ui/button";
 import { SimpleSelect } from "../../../components/ui/simple-select";
-import type { AppSettings } from "../../../lib/api";
-import type { Messages } from "../../../lib/i18n";
+import { api, type AppSettings } from "../../../lib/api";
+import { formatInvokeError, type Messages } from "../../../lib/i18n";
+import { reportError } from "../../../lib/system-notify";
 import { SECTION_ICONS } from "../sectionNav";
 
 export function AppearanceSettings({
@@ -47,6 +50,20 @@ export function AppearanceSettings({
         checked={settings.autoUpdateEnabled ?? true}
         onCheckedChange={(autoUpdateEnabled) => onChange({ autoUpdateEnabled })}
       />
+      <div className="mt-2">
+        <Button
+          type="button"
+          variant="outline"
+          onClick={() => {
+            void api
+              .resetMainWindow()
+              .then(() => toast.success(copy.resetWindowDone))
+              .catch((error: unknown) => reportError(formatInvokeError(error, copy)));
+          }}
+        >
+          {copy.resetWindow}
+        </Button>
+      </div>
     </div>
   );
 }

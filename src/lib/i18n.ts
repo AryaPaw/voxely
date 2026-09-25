@@ -21,12 +21,17 @@ const ru = {
   navAbout: "О программе",
   compareIntro:
     "Один клип, несколько моделей OpenRouter рядом. Это не идёт в историю и не вставляется в другое окно.",
+  openRouterCatalog: "Каталог OpenRouter",
   compareRecord: "Записать клип",
   compareStop: "Стоп",
   compareRun: "Сравнить",
   compareAddModel: "Добавить модель",
   compareRemoveModel: "Убрать",
   compareMakeDefault: "Сделать основной",
+  compareIsDefault: "Основная",
+  compareDefaultSet: "Эта модель теперь основная для диктовки.",
+  compareDrag: "Перетащить карточку",
+  compareCost: "стоимость {value}",
   compareNoKey: "Сначала добавьте API-ключ на странице расшифровки.",
   compareNoClip: "Сначала запишите клип.",
   compareBusy: "Сначала остановите диктовку или запись фильтра.",
@@ -75,6 +80,9 @@ const ru = {
   uiRu: "Русский",
   uiEn: "English",
   autoUpdate: "Автообновления",
+  resetWindow: "Сбросить размер окна",
+  resetWindowDone: "Размер окна сброшен до стандартного.",
+  navLocalBuild: "локальная",
   checkUpdates: "Проверить обновления",
   installUpdate: "Установить обновление",
   installing: "Установка…",
@@ -135,6 +143,8 @@ const ru = {
   stopListen: "Стоп",
   listen: "Слушать",
   modelLabel: "Модель",
+  modelIdHint: "Вставьте идентификатор OpenRouter, например openai/gpt-transcribe.",
+  catalogHint: "Подсказка из каталога",
   customModel: "Свой идентификатор модели",
   catalogUnavailable: "Каталог моделей сейчас недоступен. Можно ввести идентификатор вручную.",
   modelRequired: "Укажите модель",
@@ -227,7 +237,6 @@ const ru = {
   filterLimiter: "Лимитер",
   presetSttFast: "Быстрая диктовка",
   presetSttOptimized: "Качество (медленнее)",
-  presetObsImported: "Импорт из OBS",
   resetSettings: "Сбросить настройки",
   resetSettingsConfirm: "Сбросить настройки?",
   resetSettingsHint: "Вернутся значения по умолчанию. API-ключ не трогаем. История не удаляется.",
@@ -272,12 +281,17 @@ const en = {
   navAbout: "About",
   compareIntro:
     "One clip, several OpenRouter models side by side. This does not go into history and is not inserted into another window.",
+  openRouterCatalog: "OpenRouter catalog",
   compareRecord: "Record clip",
   compareStop: "Stop",
   compareRun: "Compare",
   compareAddModel: "Add model",
   compareRemoveModel: "Remove",
   compareMakeDefault: "Set as default",
+  compareIsDefault: "Default",
+  compareDefaultSet: "This model is now the default for dictation.",
+  compareDrag: "Drag to reorder",
+  compareCost: "cost {value}",
   compareNoKey: "Add an API key on the transcription page first.",
   compareNoClip: "Record a clip first.",
   compareBusy: "Stop dictation or the filter sample first.",
@@ -326,6 +340,9 @@ const en = {
   uiRu: "Русский",
   uiEn: "English",
   autoUpdate: "Automatic updates",
+  resetWindow: "Reset window size",
+  resetWindowDone: "Window size reset to the default.",
+  navLocalBuild: "local",
   checkUpdates: "Check for updates",
   installUpdate: "Install update",
   installing: "Installing…",
@@ -387,6 +404,8 @@ const en = {
   stopListen: "Stop",
   listen: "Listen",
   modelLabel: "Model",
+  modelIdHint: "Paste an OpenRouter id, for example openai/gpt-transcribe.",
+  catalogHint: "Catalog suggestion",
   customModel: "Custom model id",
   catalogUnavailable: "The model catalog is unavailable. You can type an id manually.",
   modelRequired: "Enter a model",
@@ -480,7 +499,6 @@ const en = {
   filterLimiter: "Limiter",
   presetSttFast: "Fast dictation",
   presetSttOptimized: "Quality (slower)",
-  presetObsImported: "OBS imported",
   resetSettings: "Reset settings",
   resetSettingsConfirm: "Reset settings?",
   resetSettingsHint:
@@ -528,8 +546,6 @@ export function factoryPresetLabel(preset: { id: string; name: string }, copy: M
       return copy.presetSttFast;
     case "stt-optimized":
       return copy.presetSttOptimized;
-    case "obs-imported":
-      return copy.presetObsImported;
     default:
       return preset.name;
   }

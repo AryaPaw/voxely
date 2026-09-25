@@ -11,7 +11,7 @@ afterEach(() => cleanup());
 describe("ui primitives", () => {
   it("renders a named button", () => {
     render(<Button>Save key</Button>);
-    expect(screen.getByRole("button", { name: "Save key" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save key" })).toHaveClass("cursor-pointer");
   });
 
   it("exposes switch checked state", () => {

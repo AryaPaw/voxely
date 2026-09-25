@@ -146,13 +146,9 @@ impl Default for AppSettings {
             debug_logging: false,
             retry: RetrySettings::default(),
             active_preset_id: "stt-optimized".into(),
-            presets: vec![
-                DspPreset::stt_fast(),
-                DspPreset::stt_optimized(),
-                DspPreset::obs_imported(),
-            ],
+            presets: vec![DspPreset::stt_fast(), DspPreset::stt_optimized()],
             first_run_complete: false,
-            config_revision: 5,
+            config_revision: 6,
             mic_tune: MicTune::default(),
             ui_language: default_ui_language(),
             auto_update_enabled: default_auto_update(),
@@ -188,7 +184,7 @@ impl AppSettings {
             }
         };
         let original_revision = loaded.config_revision;
-        if original_revision < 5 {
+        if original_revision < 6 {
             if original_revision < 4 && path.exists() {
                 let backup = path.with_extension("json.bak");
                 let _ = std::fs::copy(path, backup);
@@ -208,7 +204,10 @@ impl AppSettings {
             if original_revision < 5 {
                 loaded.migrate_stock_fast_to_quality();
             }
-            loaded.config_revision = 5;
+            if original_revision < 6 {
+                loaded.migrate_drop_obs_import();
+            }
+            loaded.config_revision = 6;
             let _ = loaded.save(path);
         }
         if loaded.apply_connect_timeout_floor() {
@@ -250,6 +249,16 @@ impl AppSettings {
             true
         } else {
             false
+        }
+    }
+
+    pub fn migrate_drop_obs_import(&mut self) {
+        self.presets.retain(|preset| preset.id != "obs-imported");
+        if self.active_preset_id == "obs-imported" {
+            self.active_preset_id = "stt-optimized".into();
+        }
+        if self.presets.is_empty() {
+            self.presets = vec![DspPreset::stt_fast(), DspPreset::stt_optimized()];
         }
     }
 
@@ -343,7 +352,7 @@ mod tests {
         assert_eq!(loaded.theme, "dark");
         assert_eq!(loaded.retention, "3d");
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 5);
+        assert_eq!(loaded.config_revision, 6);
         assert_eq!(loaded.mic_tune, MicTune::default());
         assert_eq!(loaded.retry.request_timeout_ms, 20_000);
         assert_eq!(loaded.retry.total_operation_timeout_ms, 12 * 60 * 1000);
@@ -362,7 +371,7 @@ mod tests {
         assert_eq!(loaded.theme, "system");
         assert_eq!(loaded.retention, "3d");
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 5);
+        assert_eq!(loaded.config_revision, 6);
     }
 
     #[test]
@@ -384,16 +393,12 @@ mod tests {
         let path = dir.path().join("s.json");
         let mut settings = AppSettings::default();
         settings.active_preset_id = "stt-fast".into();
-        settings.presets = vec![
-            DspPreset::stt_fast(),
-            DspPreset::stt_optimized_revision_4(),
-            DspPreset::obs_imported(),
-        ];
+        settings.presets = vec![DspPreset::stt_fast(), DspPreset::stt_optimized_revision_4()];
         settings.config_revision = 4;
         std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 5);
+        assert_eq!(loaded.config_revision, 6);
         let quality = loaded
             .presets
             .iter()
@@ -417,7 +422,28 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.active_preset_id, "stt-fast");
-        assert_eq!(loaded.config_revision, 5);
+        assert_eq!(loaded.config_revision, 6);
+    }
+
+    #[test]
+    fn revision_6_drops_obs_import() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("s.json");
+        let mut settings = AppSettings::default();
+        let mut leftover = DspPreset::stt_fast();
+        leftover.id = "obs-imported".into();
+        leftover.name = "OBS Imported".into();
+        settings.active_preset_id = "obs-imported".into();
+        settings.presets = vec![leftover, DspPreset::stt_optimized()];
+        settings.config_revision = 5;
+        std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
+        let loaded = AppSettings::load(&path).unwrap();
+        assert_eq!(loaded.active_preset_id, "stt-optimized");
+        assert_eq!(loaded.config_revision, 6);
+        assert!(loaded
+            .presets
+            .iter()
+            .all(|preset| preset.id != "obs-imported"));
     }
 
     #[test]
@@ -432,7 +458,7 @@ mod tests {
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.retry.request_timeout_ms, 20_000);
         assert_eq!(loaded.retry.total_operation_timeout_ms, 12 * 60 * 1000);
-        assert_eq!(loaded.config_revision, 5);
+        assert_eq!(loaded.config_revision, 6);
     }
 
     #[test]
@@ -488,7 +514,7 @@ mod tests {
         assert_eq!(reset.hotkey, AppSettings::default().hotkey);
         assert_eq!(reset.theme, AppSettings::default().theme);
         assert_eq!(reset.active_preset_id, "stt-optimized");
-        assert_eq!(reset.presets.len(), 3);
+        assert_eq!(reset.presets.len(), 2);
         assert!(reset.first_run_complete);
         let full = AppSettings::reset_user_settings(false);
         assert!(!full.first_run_complete);

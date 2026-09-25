@@ -123,6 +123,8 @@ pub fn run() {
             cancel_dictation,
             set_hotkey_capture,
             open_github,
+            open_openrouter_models,
+            reset_main_window,
             start_model_compare,
             stop_model_compare,
             run_model_compare,
