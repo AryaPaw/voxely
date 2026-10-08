@@ -15,6 +15,17 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 describe("verification preflight", () => {
+  test("WinGet release inspection and submission have separate credentials", () => {
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+    const winget = Bun.YAML.parse(
+      readFileSync(join(root, ".github/workflows/winget.yml"), "utf8"),
+    ) as any;
+    expect(winget.permissions.contents).toBe("read");
+    expect(winget.jobs.submit.env.GH_TOKEN).toBe("${{ github.token }}");
+    expect(winget.jobs.submit.env.WINGET_CREATE_GITHUB_TOKEN).toBe(
+      "${{ secrets.WINGET_CREATE_GITHUB_TOKEN }}",
+    );
+  });
   test("rejects compiler/runtime version drift", () => {
     expect(() => checkVersion("Rust", "1.99.0", "1.98.1")).toThrow("expected 1.98.1");
     expect(() => checkVersion("Bun", "1.4.3", "1.4.2")).toThrow("expected 1.4.2");
