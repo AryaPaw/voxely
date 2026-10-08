@@ -4624,7 +4624,7 @@ mod tests {
     }
 
     #[test]
-    fn pending_capture_completion_preserves_audio_when_cancel_delete_fails() {
+    fn pending_capture_completion_preserves_audio_when_cancel_sanitization_fails() {
         let dir = tempfile::tempdir().unwrap();
         let data = dir.path().to_path_buf();
         let ctx = AppContext::initialize(data.clone()).unwrap();
@@ -4641,8 +4641,8 @@ mod tests {
         Connection::open(database)
             .unwrap()
             .execute_batch(
-                "CREATE TRIGGER reject_cancelled_delete BEFORE DELETE ON recordings \
-                 BEGIN SELECT RAISE(ABORT, 'injected cancelled delete failure'); END;",
+                "CREATE TRIGGER reject_cancelled_sanitize BEFORE UPDATE ON recordings \
+                 BEGIN SELECT RAISE(ABORT, 'injected cancelled sanitization failure'); END;",
             )
             .unwrap();
 
@@ -4651,18 +4651,34 @@ mod tests {
         std::fs::write(raw_audio.with_extension("wav.tmp"), b"late partial capture").unwrap();
         cleanup.mark_finished();
 
-        assert!(ctx.history.lock().get(&rec.id).unwrap().is_some());
+        let retained = ctx.history.lock().get(&rec.id).unwrap().unwrap();
+        assert_eq!(retained.raw_audio_path, rec.raw_audio_path);
+        assert_eq!(retained.status, rec.status);
         assert!(raw_audio.is_file());
         assert!(raw_audio.with_extension("wav.tmp").is_file());
 
         Connection::open(data.join("history.sqlite"))
             .unwrap()
-            .execute_batch("DROP TRIGGER reject_cancelled_delete;")
+            .execute_batch("DROP TRIGGER reject_cancelled_sanitize;")
             .unwrap();
         assert!(discard_cancelled_recording(&ctx, &rec.id));
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while ctx.cancelled_deletion_retries.lock().contains(&rec.id) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!ctx.cancelled_deletion_retries.lock().contains(&rec.id));
         assert!(ctx.history.lock().get(&rec.id).unwrap().is_none());
         assert!(!raw_audio.exists());
         assert!(!raw_audio.with_extension("wav.tmp").exists());
+        let stats = ctx
+            .history
+            .lock()
+            .get_usage_statistics(
+                rec.created_at,
+                rec.created_at + chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!((stats.dictations, stats.api_requests), (0, 0));
     }
 
     #[test]
