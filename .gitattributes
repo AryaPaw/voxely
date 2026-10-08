@@ -3,3 +3,4 @@
 
 # Match rustfmt's newline_style = "Unix" on Windows checkouts too.
 *.rs text eol=lf
+.githooks/* text eol=lf

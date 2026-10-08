@@ -22,6 +22,10 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
+      - name: Install repository Rust toolchain
+        run: rustup toolchain install --no-self-update
+      - name: Verification preflight
+        run: bun run verify:preflight
       - name: Read MSRV
         id: msrv
         working-directory: src-tauri
@@ -38,41 +42,26 @@ jobs:
       - name: MSRV compile
         working-directory: src-tauri
         run: cargo +${{ steps.msrv.outputs.version }} build --locked --all-targets
-      - name: Install repository Rust toolchain
-        run: rustup toolchain install --no-self-update
       - name: Build date from CI
         shell: pwsh
         run: echo "VOXELY_BUILD_DATE=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))" >> $env:GITHUB_ENV
       - name: Install frontend
         run: bun install --frozen-lockfile
       - name: Frontend checks
-        run: bun run typecheck && bun run lint && bun run format:check && bun run coverage
+        run: bun run verify:frontend
       - name: Rust format
-        working-directory: src-tauri
-        run: cargo fmt --all --check
+        run: bun run verify:rust:format
       - name: Rust clippy
-        working-directory: src-tauri
-        run: cargo clippy --locked --all-targets --all-features -- -D warnings
+        run: bun run verify:rust:lint
       - name: Rust tests and critical regressions
-        shell: pwsh
-        run: ./scripts/check-critical-tests.ps1
+        run: bun run verify:rust:tests
       - name: Rust coverage report
         shell: pwsh
         run: |
           cargo install cargo-llvm-cov --locked --version 0.6.16
-          ./scripts/check-rust-coverage.ps1
-      - name: Version SSOT
-        shell: pwsh
-        run: ./scripts/check-version.ps1
-      - name: Diagnostic scripts
-        shell: pwsh
-        run: ./scripts/check-diagnostics.ps1
-      - name: WinGet helpers
-        shell: pwsh
-        run: ./scripts/winget-lib.test.ps1
-      - name: Icon SSOT
-        shell: pwsh
-        run: ./scripts/check-icons.ps1
+          bun run verify:rust:coverage
+      - name: Metadata and helper checks
+        run: bun run verify:metadata
       - name: Tauri compile
         run: cargo build --locked --manifest-path src-tauri/Cargo.toml --release
       - name: Upload coverage

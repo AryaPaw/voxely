@@ -19,8 +19,16 @@
     "rebuild:local-app": "pwsh -File scripts/rebuild-local-app.ps1",
     "winget:inspect": "pwsh -File scripts/winget-prepare.ps1 -Mode inspect",
     "winget:test-lib": "pwsh -File scripts/winget-lib.test.ps1",
-    "verify": "bun run typecheck && bun run lint && bun run format:check && bun run coverage && cargo fmt --all --check --manifest-path src-tauri/Cargo.toml && cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings && pwsh -File scripts/check-critical-tests.ps1 && pwsh -File scripts/check-version.ps1 && pwsh -File scripts/check-diagnostics.ps1 && pwsh -File scripts/check-rust-coverage.ps1",
-    "docs:shots": "vite --config scripts/readme-shots/vite.config.ts"
+    "verify": "bun run verify:preflight && bun run verify:frontend && bun run verify:rust:format && bun run verify:rust:lint && bun run verify:rust:tests && bun run verify:rust:coverage && bun run verify:metadata",
+    "docs:shots": "vite --config scripts/readme-shots/vite.config.ts",
+    "verify:preflight": "bun scripts/check-preflight.ts && bun test ./scripts/check-preflight.bun.ts",
+    "verify:frontend": "bun run typecheck && bun run lint && bun run format:check && bun run coverage",
+    "verify:rust:format": "cargo fmt --all --check --manifest-path src-tauri/Cargo.toml",
+    "verify:rust:lint": "cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
+    "verify:rust:tests": "pwsh -File scripts/check-critical-tests.ps1",
+    "verify:rust:coverage": "pwsh -File scripts/check-rust-coverage.ps1",
+    "verify:metadata": "pwsh -File scripts/check-version.ps1 && pwsh -File scripts/check-diagnostics.ps1 && pwsh -File scripts/winget-lib.test.ps1 && pwsh -File scripts/check-icons.ps1",
+    "hooks:install": "bun scripts/check-preflight.ts --install-hooks"
   },
   "packageManager": "bun@1.4.2",
   "dependencies": {

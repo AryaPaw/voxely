@@ -1,5 +1,5 @@
 # Rust lib coverage diagnostics. Behavioral regressions are enforced separately.
-# Locally missing cargo-llvm-cov is not a failure.
+# The complete gate requires the coverage tool, including local runs.
 
 param(
     [switch]$SelfTest,
@@ -91,12 +91,10 @@ Set-Location "src-tauri"
 
 $llvmCov = Get-Command cargo-llvm-cov -ErrorAction SilentlyContinue
 if (-not $llvmCov) {
-    if ($env:CI -eq "true") {
-        throw "cargo-llvm-cov is required in CI"
-    }
-    Write-Host "cargo-llvm-cov not installed; skip local rust coverage gate"
-    exit 0
+    $localTool = Join-Path (Split-Path -Parent $PSScriptRoot) '.local/tools/bin/cargo-llvm-cov.exe'
+    if (Test-Path -LiteralPath $localTool -PathType Leaf) { $llvmCov = Get-Command $localTool }
 }
+if (-not $llvmCov) { throw 'cargo-llvm-cov is required: cargo install cargo-llvm-cov --locked --version 0.6.16' }
 
 $previousTarget = $env:CARGO_TARGET_DIR
 $previousIncremental = $env:CARGO_INCREMENTAL
@@ -106,7 +104,7 @@ $env:CARGO_TARGET_DIR = $covTarget
 $env:CARGO_INCREMENTAL = "0"
 try {
     New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
-    cargo llvm-cov --locked --lib --json --summary-only --output-path $reportPath --ignore-filename-regex "benches|main.rs"
+    & $llvmCov.Source llvm-cov --locked --lib --json --summary-only --output-path $reportPath --ignore-filename-regex "benches|main.rs"
     Assert-CoverageExit $LASTEXITCODE
     $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
     $lines = Get-LineCoverage $report
