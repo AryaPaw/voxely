@@ -44,6 +44,25 @@ export interface Recording {
   latencyMs: number | null;
 }
 
+export interface UsageStatistics {
+  dictations: number;
+  completed: number;
+  failed: number;
+  interrupted: number;
+  apiRequests: number;
+  reportedCostUsd: number;
+  unpricedAttempts: number;
+  audioDurationMs: number;
+  daily: Array<{ date: string; dictations: number; apiRequests: number; reportedCostUsd: number }>;
+  models: Array<{
+    model: string;
+    dictations: number;
+    apiRequests: number;
+    reportedCostUsd: number;
+    unpricedAttempts: number;
+  }>;
+}
+
 export interface RetrySettings {
   automaticRetries: boolean;
   additionalRetries: number;
@@ -52,6 +71,17 @@ export interface RetrySettings {
   initialRetryDelayMs: number;
   maxRetryDelayMs: number;
   totalOperationTimeoutMs: number;
+}
+
+export interface TextReplacementRule {
+  from: string;
+  to: string;
+  caseSensitive: boolean;
+}
+
+export interface TextReplacementSettings {
+  enabled: boolean;
+  rules: TextReplacementRule[];
 }
 
 export type FilterKind =
@@ -137,6 +167,7 @@ export interface AppSettings {
   storageLimit: string;
   debugLogging: boolean;
   retry: RetrySettings;
+  textReplacements: TextReplacementSettings;
   activePresetId: string;
   presets: DspPreset[];
   firstRunComplete: boolean;
@@ -146,6 +177,22 @@ export interface AppSettings {
   autoUpdateEnabled?: boolean;
   compareModels?: string[];
   writeSeq?: number;
+}
+
+export interface RetentionPreview {
+  entriesToDelete: number;
+  recordingIdsToDelete: string[];
+  filesToDelete: number;
+  bytesToFree: number;
+  protectedEntries: number;
+  protectedBytes: number;
+  totalAudioBytes: number;
+}
+
+export interface RetentionApplyResult {
+  settings: AppSettings;
+  deleted: string[];
+  failed: string[];
 }
 
 export interface MeterSample {
@@ -207,6 +254,15 @@ export const api = {
   settings: () => ipc<AppSettings>("get_settings"),
   runtimeInfo: () => ipc<RuntimeInfo>("get_runtime_info"),
   saveSettings: (settings: AppSettings) => ipc<AppSettings>("save_settings", { settings }),
+  acknowledgeFirstRunDisclosure: () => ipc<AppSettings>("acknowledge_first_run_disclosure"),
+  previewRetentionSettings: (settings: AppSettings) =>
+    ipc<RetentionPreview>("preview_retention_settings", { settings }),
+  applyRetentionSettings: (settings: AppSettings, expectedPreview: RetentionPreview) =>
+    ipc<RetentionApplyResult>("apply_retention_settings", {
+      settings,
+      expectedPreview,
+      confirmed: true,
+    }),
   history: (cursor?: string | null, query?: string, limit?: number) =>
     ipc<HistorySummaryPage>("list_history_summaries", { cursor, query, limit }),
   searchHistory: (query: string, cursor?: string | null, limit?: number) =>
@@ -214,13 +270,17 @@ export const api = {
   recording: (id: string) => ipc<Recording | null>("get_recording", { id }),
   deleteItem: (id: string) => ipc<void>("delete_history_item", { id }),
   deleteAll: () => ipc<{ deleted: string[]; failed: string[] }>("delete_all_history"),
+  usageStatistics: (start: string, end: string) =>
+    ipc<UsageStatistics>("get_usage_statistics", { start, end }),
+  overlayPointerMatches: (clientX: number, clientY: number) =>
+    ipc<boolean>("overlay_pointer_matches", { clientX, clientY }),
   mics: () =>
     ipc<Array<{ id: string; name: string; isDefault: boolean; available?: boolean }>>(
       "list_microphones",
     ),
   meter: () => ipc<MeterSample>("get_meter"),
-  startInputMeter: () => ipc<void>("start_input_meter"),
-  stopInputMeter: () => ipc<void>("stop_input_meter"),
+  startInputMeter: (owner: string) => ipc<boolean>("start_input_meter", { owner }),
+  stopInputMeter: (owner: string) => ipc<void>("stop_input_meter", { owner }),
   previewDsp: () => ipc<DspPreview>("preview_dsp"),
   startFilterSample: () => ipc<void>("start_filter_sample"),
   stopFilterSample: () => ipc<DspPreview>("stop_filter_sample"),
@@ -228,12 +288,13 @@ export const api = {
   installUpdate: () => ipc<UpdateOutcome>("install_update"),
   keyConfigured: () => ipc<boolean>("api_key_configured"),
   storeKey: (key: string) => ipc<boolean>("store_api_key", { key }),
-  testConnection: () => ipc<number>("test_openrouter"),
+  testConnection: () => ipc<string>("test_openrouter"),
   models: () => ipc<Array<{ id: string; name: string }>>("discover_models"),
   toggle: () => ipc<void>("toggle_dictation"),
   cancel: () => ipc<void>("cancel_dictation"),
   setHotkeyCapture: (capturing: boolean) => ipc<void>("set_hotkey_capture", { capturing }),
   retry: (id: string) => ipc<Recording>("retry_recording", { id }),
+  manualReprocess: (recordingId: string) => ipc<Recording>("manual_reprocess", { recordingId }),
   cancelRetry: (id: string) => ipc<void>("cancel_history_retry", { id }),
   openLogs: () => ipc<void>("open_logs"),
   openSettingsDir: () => ipc<void>("open_settings_dir"),

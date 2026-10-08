@@ -1,0 +1,18 @@
+[
+  { "from": "вы", "to": "Вы", "caseSensitive": false },
+  { "from": "вас", "to": "Вас", "caseSensitive": false },
+  { "from": "вам", "to": "Вам", "caseSensitive": false },
+  { "from": "вами", "to": "Вами", "caseSensitive": false },
+  { "from": "ваш", "to": "Ваш", "caseSensitive": false },
+  { "from": "ваша", "to": "Ваша", "caseSensitive": false },
+  { "from": "ваше", "to": "Ваше", "caseSensitive": false },
+  { "from": "ваши", "to": "Ваши", "caseSensitive": false },
+  { "from": "вашего", "to": "Вашего", "caseSensitive": false },
+  { "from": "вашей", "to": "Вашей", "caseSensitive": false },
+  { "from": "вашему", "to": "Вашему", "caseSensitive": false },
+  { "from": "вашим", "to": "Вашим", "caseSensitive": false },
+  { "from": "вашем", "to": "Вашем", "caseSensitive": false },
+  { "from": "вашу", "to": "Вашу", "caseSensitive": false },
+  { "from": "ваших", "to": "Ваших", "caseSensitive": false },
+  { "from": "вашими", "to": "Вашими", "caseSensitive": false }
+]

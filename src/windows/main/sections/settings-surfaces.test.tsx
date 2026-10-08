@@ -54,6 +54,7 @@ function settings(): AppSettings {
       maxRetryDelayMs: 8000,
       totalOperationTimeoutMs: 720000,
     },
+    textReplacements: { enabled: false, rules: [] },
     activePresetId: "stt-optimized",
     presets: [],
     firstRunComplete: true,

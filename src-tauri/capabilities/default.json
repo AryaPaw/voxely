@@ -22,8 +22,13 @@
     "allow-get-session-state",
     "allow-get-settings",
     "allow-save-settings",
+    "allow-acknowledge-first-run-disclosure",
+    "allow-preview-retention-settings",
+    "allow-apply-retention-settings",
+    "allow-manual-reprocess",
     "allow-list-history",
     "allow-list-history-summaries",
+    "allow-get-usage-statistics",
     "allow-get-recording",
     "allow-delete-history-item",
     "allow-delete-all-history",
@@ -69,7 +74,6 @@
     "allow-get-runtime-info",
     "allow-play-cue",
     "allow-preview-error-notification",
-    "notification:default",
-    "process:allow-restart"
+    "notification:default"
   ]
 }

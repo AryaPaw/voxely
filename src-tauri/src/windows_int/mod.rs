@@ -12,3 +12,4 @@ pub mod escape_hook {
 pub mod insert_engine;
 pub mod overlay;
 pub mod text_injector;
+pub mod window_diagnostics;

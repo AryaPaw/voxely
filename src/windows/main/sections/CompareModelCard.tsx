@@ -2,7 +2,7 @@ import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripVertical } from "lucide-react";
 import type { AppSettings, CompareSlot } from "../../../lib/api";
-import type { Messages } from "../../../lib/i18n";
+import { formatInvokeError, messagesForUiLanguage, type Messages } from "../../../lib/i18n";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
 import { formatCompareCost } from "./compare-models";
@@ -41,6 +41,15 @@ export function CompareModelCard({
   } = useSortable({ id });
   const trimmed = model.trim();
   const isDefault = trimmed.length > 0 && trimmed === settings.model;
+  const statusCopy = messagesForUiLanguage(settings.uiLanguage ?? "auto", navigator.language);
+  const status = slot
+    ? ({
+        running: statusCopy.compareRunning,
+        done: statusCopy.compareDone,
+        cancelled: statusCopy.compareCancelled,
+        error: statusCopy.compareSlotError,
+      }[slot.status] ?? slot.status)
+    : "";
 
   return (
     <div
@@ -90,15 +99,18 @@ export function CompareModelCard({
       {slot ? (
         <div className="mt-3 text-sm">
           <div className="text-muted-foreground">
-            {slot.status === "error"
-              ? copy.compareSlotError
-              : copy.compareAttempt.replace("{value}", String(slot.attempt))}
+            {status} / {copy.compareAttempt.replace("{value}", String(slot.attempt))}
             {slot.cost != null
-              ? ` / ${copy.compareCost.replace("{value}", formatCompareCost(slot.cost))}`
+              ? ` / ${copy.compareCost.replace("{value}", formatCompareCost(slot.cost))} USD`
+              : ` / ${statusCopy.compareUnknownCost}`}
+            {slot.latencyMs != null
+              ? ` / ${(slot.latencyMs / 1000).toFixed(2)} ${statusCopy.compareLatencyUnit}`
               : ""}
           </div>
           {slot.text ? <p className="mt-1 whitespace-pre-wrap">{slot.text}</p> : null}
-          {slot.error ? <p className="mt-1 text-destructive">{slot.error}</p> : null}
+          {slot.error ? (
+            <p className="mt-1 text-destructive">{formatInvokeError({ code: slot.error }, copy)}</p>
+          ) : null}
         </div>
       ) : null}
     </div>

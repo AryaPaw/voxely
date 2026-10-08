@@ -1,15 +1,11 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { api, type AppSettings, type OverlaySnapshot, type SessionState } from "../../lib/api";
 import { applyUiLocale, messagesFor, resolveUiLocale } from "../../lib/i18n";
 import { overlayHudLabel, overlayIsBusy, overlayShouldRender } from "../../lib/session-copy";
 import { acceptOverlayRevision, applyOverlaySnapshot } from "../../lib/overlay-snapshot";
-import {
-  overlayCancelArmed,
-  overlayHoverFromElement,
-  overlayHoverFromPoll,
-} from "../../lib/overlay-wave";
+import { overlayCancelArmed } from "../../lib/overlay-wave";
 import { bindEscapeCancel } from "../../lib/escape-cancel";
 import { applyTheme, watchSystemTheme } from "../../lib/theme";
 import { OverlayWave } from "./OverlayWave";
@@ -21,10 +17,11 @@ const HIDDEN: OverlaySnapshot = {
 };
 
 export function OverlayApp() {
-  const pillRef = useRef<HTMLButtonElement>(null);
   const [snapshot, setSnapshot] = useState<OverlaySnapshot>(HIDDEN);
   const [elapsed, setElapsed] = useState(0);
   const [hovered, setCancelHover] = useState(false);
+  const hoverEpoch = useRef(0);
+  const hoverCheckInFlight = useRef(false);
   const [copy, setCopy] = useState(() => messagesFor("ru"));
   const [theme, setTheme] = useState("dark");
   const state: SessionState = snapshot.state;
@@ -93,39 +90,11 @@ export function OverlayApp() {
     });
   }, []);
 
-  useEffect(() => {
-    if (!busy) {
-      setCancelHover(false);
-    }
-  }, [busy]);
-
-  useEffect(() => {
-    if (!busy) {
-      return;
-    }
-    const sync = () => {
-      setCancelHover((previous) =>
-        overlayHoverFromPoll(previous, overlayHoverFromElement(pillRef.current)),
-      );
-    };
-    const disarm = () => setCancelHover(false);
-    sync();
-    let frame = 0;
-    const tick = () => {
-      sync();
-      frame = window.requestAnimationFrame(tick);
-    };
-    if (import.meta.env.MODE !== "test") {
-      frame = window.requestAnimationFrame(tick);
-    }
-    window.addEventListener("pointerleave", disarm);
-    window.addEventListener("blur", disarm);
-    return () => {
-      window.cancelAnimationFrame(frame);
-      window.removeEventListener("pointerleave", disarm);
-      window.removeEventListener("blur", disarm);
-    };
-  }, [busy]);
+  useLayoutEffect(() => {
+    hoverEpoch.current += 1;
+    hoverCheckInFlight.current = false;
+    setCancelHover(false);
+  }, [busy, snapshot.visible]);
 
   useEffect(() => {
     if (recording) {
@@ -143,8 +112,39 @@ export function OverlayApp() {
 
   function onPillClick() {
     if (cancelReady) {
+      hoverEpoch.current += 1;
+      hoverCheckInFlight.current = false;
+      setCancelHover(false);
       void api.cancel().catch(() => undefined);
     }
+  }
+
+  function checkCancelHover(event: PointerEvent<HTMLButtonElement>) {
+    if (!busy || !snapshot.visible || hovered || hoverCheckInFlight.current) {
+      return;
+    }
+
+    const epoch = hoverEpoch.current;
+    hoverCheckInFlight.current = true;
+    void api
+      .overlayPointerMatches(event.clientX, event.clientY)
+      .then((matches) => {
+        if (epoch === hoverEpoch.current && busy && snapshot.visible) {
+          setCancelHover(matches);
+        }
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (epoch === hoverEpoch.current) {
+          hoverCheckInFlight.current = false;
+        }
+      });
+  }
+
+  function disarmCancelHover() {
+    hoverEpoch.current += 1;
+    hoverCheckInFlight.current = false;
+    setCancelHover(false);
   }
 
   const status = overlayHudLabel(snapshot.visible, state, copy, Boolean(snapshot.limitReached));
@@ -159,16 +159,12 @@ export function OverlayApp() {
   return (
     <div className="overlay-shell">
       <button
-        ref={pillRef}
         type="button"
         className={`overlay-pill${cancelReady ? " overlay-pill-cancel" : ""}${busy && !cancelReady ? " overlay-pill-busy" : ""}`}
         onClick={onPillClick}
-        onMouseEnter={() => {
-          if (busy) {
-            setCancelHover(true);
-          }
-        }}
-        onMouseLeave={() => setCancelHover(false)}
+        onPointerEnter={checkCancelHover}
+        onPointerMove={checkCancelHover}
+        onPointerLeave={disarmCancelHover}
         aria-label={cancelHint}
       >
         {cancelReady ? (

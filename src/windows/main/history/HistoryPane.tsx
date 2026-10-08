@@ -8,6 +8,7 @@ import {
   Pause,
   Play,
   RotateCcw,
+  SlidersHorizontal,
   Square,
   Settings as SettingsIcon,
   Trash2,
@@ -43,6 +44,8 @@ export function HistoryPane({
   onClearQuery,
   onLoadMore,
   onRefresh,
+  historyError,
+  isLoadingMore = false,
   onOpenKey,
   onOpenSettings,
   copy,
@@ -57,6 +60,8 @@ export function HistoryPane({
   onClearQuery?: () => void;
   onLoadMore?: () => void;
   onRefresh: () => Promise<void>;
+  historyError?: "refresh" | "page" | null;
+  isLoadingMore?: boolean;
   onOpenKey: () => void;
   onOpenSettings: () => void;
   copy: Messages;
@@ -74,10 +79,27 @@ export function HistoryPane({
         </div>
       ) : null}
       <div className="mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col px-6 py-6">
-        <PageHeader icon={SECTION_ICONS.history} title={sectionLabel(copy, "history")} />
-        <p className="mt-1 text-sm text-muted-foreground">{copy.historyHint}</p>
+        <PageHeader
+          icon={SECTION_ICONS.history}
+          title={sectionLabel(copy, "history")}
+          description={copy.historyHint}
+        />
         {recovered ? (
-          <p className="mt-3 rounded-lg bg-muted px-3 py-2 text-sm">{copy.settingsRecovered}</p>
+          <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-lg bg-muted px-3 py-2 text-sm">
+            <p>{copy.settingsRecovered}</p>
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              onClick={() =>
+                void api.openSettingsDir().catch((error: unknown) => {
+                  reportError(formatInvokeError(error, copy));
+                })
+              }
+            >
+              {copy.settingsRecoveryOpenFolder}
+            </Button>
+          </div>
         ) : null}
         <div className="mt-4 flex items-center gap-2">
           <Input
@@ -107,7 +129,23 @@ export function HistoryPane({
           </Button>
         </div>
         <div className="mt-5 min-h-0 flex-1 space-y-3 overflow-auto pb-8">
-          {items.length === 0 ? (
+          {historyError ? (
+            <div
+              role="alert"
+              className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm"
+            >
+              <span>{copy.historyLoadFailed}</span>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => (historyError === "page" ? onLoadMore?.() : void onRefresh())}
+              >
+                {copy.retryLoad}
+              </Button>
+            </div>
+          ) : null}
+          {items.length === 0 && historyError ? null : items.length === 0 ? (
             <div className="rounded-2xl bg-muted px-5 py-10 text-sm text-muted-foreground">
               {query.trim() ? copy.noSearchResults : copy.emptyHistory.replace("{hotkey}", hotkey)}
             </div>
@@ -126,8 +164,13 @@ export function HistoryPane({
             ))
           )}
           {hasMore ? (
-            <Button type="button" variant="outline" onClick={() => onLoadMore?.()}>
-              {copy.loadMore}
+            <Button
+              type="button"
+              variant="outline"
+              disabled={isLoadingMore}
+              onClick={() => onLoadMore?.()}
+            >
+              {isLoadingMore ? copy.loading : copy.loadMore}
             </Button>
           ) : null}
         </div>
@@ -163,9 +206,19 @@ export function HistoryCard({
   const failed = item.status === "failed" || item.status === "interrupted";
   const processing = item.status === "processing";
   const emptySuccess = item.status === "completed" && !(item.transcript ?? "").trim();
-  const canRetry = Boolean(item.rawAudioPath || item.processedAudioPath);
+  const canRetry = Boolean((item.rawAudioPath || item.processedAudioPath) && item.durationMs > 0);
   const processingLabel = item.processedAudioPath ? copy.processing : copy.processingAudio;
   const busy = processing || retrying;
+  const latestStatus =
+    item.lastErrorCode === "RecordingTooLarge" || item.lastErrorCode === "RecordingTruncated"
+      ? localizedError(item.lastErrorCode, copy, item.lastErrorMessage ?? undefined)
+      : failed
+        ? item.lastErrorCode
+          ? localizedError(item.lastErrorCode, copy, item.lastErrorMessage ?? undefined)
+          : (item.lastErrorMessage ?? copy.transcriptionFailed)
+        : processing && item.transcript
+          ? copy.retryingTranscript
+          : null;
 
   useEffect(() => {
     if (!loadAudio) {
@@ -249,6 +302,25 @@ export function HistoryCard({
     }
   }
 
+  async function reprocessOriginal() {
+    if (retrying || processing || !item.rawAudioPath) {
+      return;
+    }
+    setRetrying(true);
+    try {
+      await api.manualReprocess(item.id);
+    } catch (error) {
+      reportError(formatInvokeError(error, copy));
+    } finally {
+      setRetrying(false);
+      try {
+        await onRefresh();
+      } catch (error) {
+        reportError(formatInvokeError(error, copy));
+      }
+    }
+  }
+
   const errorText = item.lastErrorCode
     ? localizedError(item.lastErrorCode, copy, item.lastErrorMessage ?? undefined)
     : (item.lastErrorMessage ?? "—");
@@ -309,16 +381,30 @@ export function HistoryCard({
               <Square className="h-4 w-4 text-primary" />
             </Button>
           ) : canRetry ? (
-            <Button
-              type="button"
-              size="icon"
-              variant="ghost"
-              aria-label={copy.retry}
-              disabled={busy}
-              onClick={() => void retryTranscription()}
-            >
-              <RotateCcw className={`h-4 w-4 text-primary${busy ? " history-spin" : ""}`} />
-            </Button>
+            <>
+              <Button
+                type="button"
+                size="icon"
+                variant="ghost"
+                aria-label={copy.retry}
+                disabled={busy}
+                onClick={() => void retryTranscription()}
+              >
+                <RotateCcw className={`h-4 w-4 text-primary${busy ? " history-spin" : ""}`} />
+              </Button>
+              {item.rawAudioPath ? (
+                <Button
+                  type="button"
+                  size="icon"
+                  variant="ghost"
+                  aria-label={copy.reprocessOriginal}
+                  disabled={busy}
+                  onClick={() => void reprocessOriginal()}
+                >
+                  <SlidersHorizontal className="h-4 w-4 text-primary" />
+                </Button>
+              ) : null}
+            </>
           ) : null}
           <Button
             type="button"
@@ -364,15 +450,20 @@ export function HistoryCard({
       <p className="mt-2 whitespace-pre-wrap break-words text-sm leading-6">
         {failed && !item.transcript ? (
           <>
-            {copy.transcriptUnavailable}{" "}
-            <button
-              type="button"
-              className="text-primary underline-offset-2 hover:underline"
-              disabled={busy}
-              onClick={() => void retryTranscription()}
-            >
-              {copy.retry}
-            </button>
+            {copy.transcriptUnavailable}
+            {canRetry ? (
+              <>
+                {" "}
+                <button
+                  type="button"
+                  className="text-primary underline-offset-2 hover:underline"
+                  disabled={busy}
+                  onClick={() => void retryTranscription()}
+                >
+                  {copy.retry}
+                </button>
+              </>
+            ) : null}
           </>
         ) : processing && !item.transcript ? (
           <span className="status-live">
@@ -389,6 +480,12 @@ export function HistoryCard({
           (item.transcript ?? copy.processing)
         )}
       </p>
+      {latestStatus ? (
+        <p role="status" className="mt-2 text-xs text-destructive">
+          {latestStatus}
+          {failed && !canRetry ? ` ${copy.retryUnavailable}` : ""}
+        </p>
+      ) : null}
       <div className="mt-3 flex items-center gap-3">
         <button
           type="button"
@@ -433,26 +530,38 @@ export function HistoryCard({
         />
       ) : null}
       {detailsOpen ? (
-        <dl className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
-          <div>
-            <dt className="inline">{copy.modelLabel}: </dt>
-            <dd className="inline">{item.model}</dd>
-          </div>
-          <div>
-            <dt className="inline">{copy.latencyLabel}: </dt>
-            <dd className="inline">
-              {item.latencyMs == null ? "—" : copy.latencyMs.replace("{n}", String(item.latencyMs))}
-            </dd>
-          </div>
-          <div>
-            <dt className="inline">{copy.costLabel}: </dt>
-            <dd className="inline">{item.cost ?? "—"}</dd>
-          </div>
-          <div>
-            <dt className="inline">{copy.errorLabel}: </dt>
-            <dd className="inline">{errorText}</dd>
-          </div>
-        </dl>
+        <>
+          <dl className="mt-3 grid grid-cols-2 gap-2 text-[11px] text-muted-foreground">
+            <div>
+              <dt className="inline">{copy.modelLabel}: </dt>
+              <dd className="inline">{item.model}</dd>
+            </div>
+            <div>
+              <dt className="inline">{copy.latencyLabel}: </dt>
+              <dd className="inline">
+                {item.latencyMs == null
+                  ? "—"
+                  : copy.latencyMs.replace("{n}", String(item.latencyMs))}
+              </dd>
+            </div>
+            <div>
+              <dt className="inline">{copy.costLabel}: </dt>
+              <dd className="inline">{item.cost ?? "—"}</dd>
+            </div>
+            <div>
+              <dt className="inline">{copy.errorLabel}: </dt>
+              <dd className="inline">{errorText}</dd>
+            </div>
+          </dl>
+          {canRetry ? (
+            <div className="mt-2 space-y-1 text-[11px] text-muted-foreground">
+              <p>
+                {item.processedAudioPath ? copy.retryUsesProcessedAudio : copy.retryUsesRawAudio}
+              </p>
+              {item.rawAudioPath ? <p>{copy.reprocessOriginalHint}</p> : null}
+            </div>
+          ) : null}
+        </>
       ) : null}
     </article>
   );

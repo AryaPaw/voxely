@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::{fs::OpenOptions, io::Write};
 
 use crate::dsp::mic_tune::MicTune;
 use crate::dsp::pipeline::DspPreset;
 use crate::error::AppError;
+use crate::text_replacements::TextReplacementSettings;
 use crate::transcription::retry::RetryPolicy;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -22,8 +24,12 @@ pub struct AppSettings {
     pub insertion_mode: String,
     pub retention: String,
     pub storage_limit: String,
+    #[serde(default = "default_retention_policy_confirmed")]
+    pub retention_policy_confirmed: bool,
     pub debug_logging: bool,
     pub retry: RetrySettings,
+    #[serde(default)]
+    pub text_replacements: TextReplacementSettings,
     pub active_preset_id: String,
     pub presets: Vec<DspPreset>,
     pub first_run_complete: bool,
@@ -39,6 +45,10 @@ pub struct AppSettings {
     pub compare_models: Vec<String>,
     #[serde(default)]
     pub write_seq: u64,
+}
+
+fn default_retention_policy_confirmed() -> bool {
+    true
 }
 
 fn default_ui_language() -> String {
@@ -142,13 +152,15 @@ impl Default for AppSettings {
             custom_model: None,
             insertion_mode: "unicode".into(),
             retention: "3d".into(),
-            storage_limit: "1gb".into(),
+            storage_limit: "5gb".into(),
+            retention_policy_confirmed: true,
             debug_logging: false,
             retry: RetrySettings::default(),
+            text_replacements: TextReplacementSettings::default(),
             active_preset_id: "stt-optimized".into(),
             presets: vec![DspPreset::stt_fast(), DspPreset::stt_optimized()],
             first_run_complete: false,
-            config_revision: 6,
+            config_revision: 8,
             mic_tune: MicTune::default(),
             ui_language: default_ui_language(),
             auto_update_enabled: default_auto_update(),
@@ -178,16 +190,18 @@ impl AppSettings {
         let mut loaded: Self = match serde_json::from_str(&text) {
             Ok(value) => value,
             Err(_) => {
-                let backup = path.with_extension("json.corrupt");
-                let _ = std::fs::write(&backup, &text);
-                return Ok((Self::default(), true));
+                backup_settings_text(path, "corrupt", text.as_bytes())?;
+                let mut recovered = Self::default();
+                recovered.retention_policy_confirmed = false;
+                return Ok((recovered, true));
             }
         };
         let original_revision = loaded.config_revision;
         if original_revision < 6 {
             if original_revision < 4 && path.exists() {
-                let backup = path.with_extension("json.bak");
-                let _ = std::fs::copy(path, backup);
+                let original =
+                    std::fs::read(path).map_err(|err| AppError::StorageFailed(err.to_string()))?;
+                backup_settings_text(path, "bak", &original)?;
             }
             if original_revision < 1 {
                 loaded.migrate_factory_defaults();
@@ -208,18 +222,34 @@ impl AppSettings {
                 loaded.migrate_drop_obs_import();
             }
             loaded.config_revision = 6;
+        }
+        if original_revision < 7 {
+            loaded.migrate_default_storage_limit();
+            loaded.config_revision = 7;
+        }
+        if original_revision < 8 {
+            loaded.config_revision = 8;
+        }
+        let timeout_changed = loaded.apply_connect_timeout_floor();
+        if loaded.retry.validate().is_err()
+            || loaded.mic_tune.validate().is_err()
+            || validate_settings_graph(&loaded).is_err()
+        {
+            backup_settings_text(path, "corrupt", text.as_bytes())?;
+            let mut recovered = Self::default();
+            recovered.retention_policy_confirmed = false;
+            return Ok((recovered, true));
+        }
+        if original_revision < 8 || timeout_changed {
             let _ = loaded.save(path);
         }
-        if loaded.apply_connect_timeout_floor() {
-            let _ = loaded.save(path);
-        }
-        Ok((loaded, false))
+        let recovered = !loaded.retention_policy_confirmed;
+        Ok((loaded, recovered))
     }
 
     pub fn migrate_factory_defaults(&mut self) {
-        if self.retention == "30d" {
-            self.retention = "3d".into();
-        }
+        // Keep the saved retention value: older revisions did not distinguish
+        // an untouched factory default from a user's explicit 30-day choice.
     }
 
     pub fn migrate_fast_stt(&mut self) {
@@ -259,6 +289,12 @@ impl AppSettings {
         }
         if self.presets.is_empty() {
             self.presets = vec![DspPreset::stt_fast(), DspPreset::stt_optimized()];
+        }
+    }
+
+    pub fn migrate_default_storage_limit(&mut self) {
+        if self.storage_limit == "1gb" {
+            self.storage_limit = "5gb".into();
         }
     }
 
@@ -315,15 +351,173 @@ impl AppSettings {
     pub fn storage_limit_bytes(&self) -> Option<u64> {
         match self.storage_limit.as_str() {
             "500mb" => Some(500 * 1024 * 1024),
-            "1gb" => Some(1024 * 1024 * 1024),
-            "5gb" => Some(5 * 1024 * 1024 * 1024),
-            _ => None,
+            "unlimited" => None,
+            value => {
+                let gigabytes = value.strip_suffix("gb")?.parse::<u64>().ok()?;
+                if gigabytes == 0 {
+                    return None;
+                }
+                gigabytes.checked_mul(1024 * 1024 * 1024)
+            }
         }
     }
 }
 
+pub(crate) fn validate_settings_graph(settings: &AppSettings) -> Result<(), AppError> {
+    let invalid = |message: &str| AppError::RequestValidationFailed(message.into());
+    if !matches!(settings.theme.as_str(), "light" | "dark" | "system")
+        || !matches!(settings.ui_language.as_str(), "auto" | "ru" | "en")
+    {
+        return Err(invalid("invalid UI language or theme"));
+    }
+    let storage_limit_valid =
+        settings.storage_limit == "unlimited" || settings.storage_limit_bytes().is_some();
+    if !matches!(
+        settings.retention.as_str(),
+        "1d" | "3d" | "7d" | "30d" | "90d" | "forever"
+    ) || !storage_limit_valid
+    {
+        return Err(invalid("invalid retention or storage limit"));
+    }
+    let mut ids = std::collections::HashSet::new();
+    for preset in &settings.presets {
+        if preset.id.trim().is_empty() || !ids.insert(&preset.id) {
+            return Err(invalid("preset IDs must be nonempty and unique"));
+        }
+        let fields = serde_json::to_value(preset).map_err(|err| invalid(&err.to_string()))?;
+        fn finite_numbers(value: &serde_json::Value) -> bool {
+            match value {
+                serde_json::Value::Null => false,
+                serde_json::Value::Array(items) => items.iter().all(finite_numbers),
+                serde_json::Value::Object(items) => items.values().all(finite_numbers),
+                _ => true,
+            }
+        }
+        if !finite_numbers(&fields)
+            || !(20.0..=200.0).contains(&preset.high_pass.cutoff_hz)
+            || !(0.0..=1.0).contains(&preset.rnnoise_mix)
+            || !(-12.0..=18.0).contains(&preset.gain.db)
+            || preset.high_pass.sample_rate != 48_000.0
+            || preset.compressor.sample_rate != 48_000.0
+            || preset.expander.sample_rate != 48_000.0
+            || preset.gate.sample_rate != 48_000.0
+            || preset.limiter.sample_rate != 48_000.0
+            || preset.compressor.validate().is_err()
+            || preset.expander.validate().is_err()
+            || preset.limiter.release_ms <= 0.0
+            || preset.gate.release_ms <= 0.0
+            || preset.gate.hold_ms < 0.0
+            || preset.gate.open_threshold_db < preset.gate.close_threshold_db
+            || !(-120.0..=0.0).contains(&preset.gate.open_threshold_db)
+            || !(-120.0..=0.0).contains(&preset.gate.close_threshold_db)
+            || !(-60.0..=0.0).contains(&preset.limiter.threshold_db)
+            || preset.gate.hold_ms > 60_000.0
+            || preset.gate.release_ms > 60_000.0
+            || preset.limiter.release_ms > 60_000.0
+            || [&preset.compressor, &preset.expander]
+                .iter()
+                .any(|dynamics| {
+                    !(-120.0..=0.0).contains(&dynamics.threshold_db)
+                        || !(1.0..=100.0).contains(&dynamics.ratio)
+                        || !(-60.0..=60.0).contains(&dynamics.makeup_db)
+                        || dynamics.attack_ms > 60_000.0
+                        || dynamics.release_ms > 60_000.0
+                })
+        {
+            return Err(invalid("invalid DSP configuration"));
+        }
+    }
+    if settings.model.trim().is_empty() {
+        return Err(AppError::RequestValidationFailed("model required".into()));
+    }
+    settings
+        .text_replacements
+        .validate()
+        .map_err(|message| AppError::RequestValidationFailed(message.into()))?;
+    if !settings
+        .presets
+        .iter()
+        .any(|preset| preset.id == settings.active_preset_id)
+    {
+        return Err(AppError::RequestValidationFailed(
+            "active preset is missing".into(),
+        ));
+    }
+    for preset in &settings.presets {
+        let mut kinds = std::collections::HashSet::new();
+        let mut slot_ids = std::collections::HashSet::new();
+        for slot in &preset.order {
+            if !kinds.insert(slot.kind) || slot.id.trim().is_empty() || !slot_ids.insert(&slot.id) {
+                return Err(AppError::RequestValidationFailed(
+                    "preset has duplicate filter kinds".into(),
+                ));
+            }
+        }
+    }
+    if !matches!(settings.insertion_mode.as_str(), "unicode" | "clipboard") {
+        return Err(AppError::RequestValidationFailed(
+            "insertion mode must be unicode or clipboard".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn backup_settings_text(path: &Path, kind: &str, contents: &[u8]) -> Result<PathBuf, AppError> {
+    let base_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("settings.json");
+    for _ in 0..3 {
+        let backup = path.with_file_name(format!("{base_name}.{kind}-{}", uuid::Uuid::new_v4()));
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+        {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(AppError::StorageFailed(err.to_string())),
+        };
+        if let Err(err) = file.write_all(contents).and_then(|()| file.sync_all()) {
+            drop(file);
+            let _ = std::fs::remove_file(&backup);
+            return Err(AppError::StorageFailed(err.to_string()));
+        }
+        return Ok(backup);
+    }
+    Err(AppError::StorageFailed(
+        "could not create a unique settings backup".into(),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn semantic_invalid_settings_recover_and_keep_retention_guard_after_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut invalid = AppSettings::default();
+        invalid.retention = "unknown".into();
+        let original = serde_json::to_string(&invalid).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let (mut loaded, recovered) = AppSettings::load_with_recovery(&path).unwrap();
+        assert!(recovered);
+        assert!(!loaded.retention_policy_confirmed);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+        assert!(std::fs::read_dir(dir.path()).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .contains(".corrupt-")
+        }));
+        loaded.theme = "light".into();
+        loaded.save(&path).unwrap();
+        let (reloaded, recovered) = AppSettings::load_with_recovery(&path).unwrap();
+        assert!(recovered);
+        assert!(!reloaded.retention_policy_confirmed);
+    }
+
     use super::*;
     use tempfile::tempdir;
 
@@ -335,7 +529,12 @@ mod tests {
         let (loaded, recovered) = AppSettings::load_with_recovery(&path).unwrap();
         assert!(recovered);
         assert_eq!(loaded.model, AppSettings::default().model);
-        assert!(path.with_extension("json.corrupt").exists());
+        assert!(dir
+            .path()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")));
         let original = std::fs::read_to_string(&path).unwrap();
         assert_eq!(original, "{not json");
     }
@@ -352,14 +551,14 @@ mod tests {
         assert_eq!(loaded.theme, "dark");
         assert_eq!(loaded.retention, "3d");
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 6);
+        assert_eq!(loaded.config_revision, 8);
         assert_eq!(loaded.mic_tune, MicTune::default());
         assert_eq!(loaded.retry.request_timeout_ms, 20_000);
         assert_eq!(loaded.retry.total_operation_timeout_ms, 12 * 60 * 1000);
     }
 
     #[test]
-    fn migrates_factory_theme_and_retention() {
+    fn migration_preserves_explicit_retention_choice() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("s.json");
         let mut factory = AppSettings::default();
@@ -369,9 +568,9 @@ mod tests {
         factory.save(&path).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.theme, "system");
-        assert_eq!(loaded.retention, "3d");
+        assert_eq!(loaded.retention, "30d");
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 6);
+        assert_eq!(loaded.config_revision, 8);
     }
 
     #[test]
@@ -398,7 +597,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 6);
+        assert_eq!(loaded.config_revision, 8);
         let quality = loaded
             .presets
             .iter()
@@ -422,7 +621,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.active_preset_id, "stt-fast");
-        assert_eq!(loaded.config_revision, 6);
+        assert_eq!(loaded.config_revision, 8);
     }
 
     #[test]
@@ -439,7 +638,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 6);
+        assert_eq!(loaded.config_revision, 8);
         assert!(loaded
             .presets
             .iter()
@@ -458,7 +657,7 @@ mod tests {
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.retry.request_timeout_ms, 20_000);
         assert_eq!(loaded.retry.total_operation_timeout_ms, 12 * 60 * 1000);
-        assert_eq!(loaded.config_revision, 6);
+        assert_eq!(loaded.config_revision, 8);
     }
 
     #[test]
@@ -495,7 +694,12 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.insertion_mode, "unicode");
-        assert!(path.with_extension("json.bak").exists());
+        assert!(dir
+            .path()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .any(|entry| entry.file_name().to_string_lossy().contains(".bak-")));
     }
 
     #[test]

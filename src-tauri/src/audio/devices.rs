@@ -86,6 +86,19 @@ pub fn plan_device_resolve(
     }
 }
 
+fn selected_device_identity(listed: &[InputDeviceInfo], selected: &str) -> Option<(String, usize)> {
+    let index = listed
+        .iter()
+        .position(|device| device.id == selected)
+        .or_else(|| listed.iter().position(|device| device.name == selected))?;
+    let name = listed[index].name.clone();
+    let occurrence = listed[..index]
+        .iter()
+        .filter(|device| device.name == name)
+        .count();
+    Some((name, occurrence))
+}
+
 pub fn annotate_missing_selection(devices: &mut Vec<InputDeviceInfo>, selected_id: &str) -> bool {
     if selected_id.is_empty() || selected_id == "default" {
         return false;
@@ -128,19 +141,9 @@ pub fn resolve_device(preferred: Option<&str>) -> Result<(cpal::Device, bool), S
         }
         DeviceResolvePlan::Exact => {
             let name = preferred.unwrap_or("default");
-            let exact = listed.iter().find(|d| d.id == name);
-            let name_matches: Vec<_> = listed.iter().filter(|d| d.name == name).collect();
-            let resolved_id = if let Some(device) = exact {
-                device.id.as_str()
-            } else {
-                name_matches[0].id.as_str()
+            let Some((match_name, occurrence)) = selected_device_identity(&listed, name) else {
+                return Err("Selected microphone is unavailable".into());
             };
-            let match_name = listed
-                .iter()
-                .find(|d| d.id == resolved_id)
-                .map(|d| d.name.clone())
-                .unwrap_or_else(|| name.to_string());
-            let occurrence = listed.iter().position(|d| d.id == resolved_id).unwrap_or(0);
             if let Ok(mut devices) = host.input_devices() {
                 let mut seen = 0usize;
                 if let Some(found) = devices.find(|d| {
@@ -206,5 +209,106 @@ mod tests {
         assert!(annotate_missing_selection(&mut devices, "USB Mic"));
         assert!(!devices[0].available);
         assert_eq!(devices[0].id, "USB Mic");
+    }
+
+    #[test]
+    fn selected_unique_device_uses_occurrence_among_same_names_only() {
+        let listed = ["Internal", "USB", "Virtual"]
+            .into_iter()
+            .map(|name| InputDeviceInfo {
+                id: name.into(),
+                name: name.into(),
+                is_default: false,
+                sample_rate: None,
+                channels: None,
+                available: true,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected_device_identity(&listed, "USB"),
+            Some(("USB".into(), 0))
+        );
+    }
+
+    #[test]
+    fn duplicate_device_occurrence_is_counted_within_its_name() {
+        let listed = ["Internal", "USB", "USB"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, name)| InputDeviceInfo {
+                id: if index == 2 {
+                    "USB #2".into()
+                } else {
+                    name.into()
+                },
+                name: name.into(),
+                is_default: false,
+                sample_rate: None,
+                channels: None,
+                available: true,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected_device_identity(&listed, "USB #2"),
+            Some(("USB".into(), 1))
+        );
+    }
+
+    #[test]
+    fn explicit_id_wins_over_ambiguous_legacy_device_name() {
+        let ids = vec!["USB #1".into(), "USB #2".into()];
+        let names = vec!["USB".into(), "USB".into()];
+        assert_eq!(
+            plan_device_resolve(Some("USB #2"), &ids, &names, false),
+            DeviceResolvePlan::Exact
+        );
+        assert_eq!(
+            plan_device_resolve(Some("USB"), &ids, &names, true),
+            DeviceResolvePlan::Ambiguous
+        );
+        assert_eq!(
+            plan_device_resolve(Some("USB"), &[], &["USB".into()], false),
+            DeviceResolvePlan::Exact
+        );
+    }
+
+    #[test]
+    fn default_selection_does_not_require_any_enumerated_device() {
+        for selected in [None, Some("default")] {
+            assert_eq!(
+                plan_device_resolve(selected, &[], &[], true),
+                DeviceResolvePlan::Default
+            );
+            assert_eq!(
+                plan_device_resolve(selected, &[], &[], false),
+                DeviceResolvePlan::Unavailable
+            );
+        }
+    }
+
+    #[test]
+    fn missing_selection_annotation_is_idempotent_and_preserves_existing_devices() {
+        let mut listed = vec![InputDeviceInfo {
+            id: "USB".into(),
+            name: "USB".into(),
+            is_default: true,
+            sample_rate: Some(48_000),
+            channels: Some(2),
+            available: true,
+        }];
+        let original = listed.clone();
+        for selected in ["", "default", "USB"] {
+            assert!(!annotate_missing_selection(&mut listed, selected));
+            assert_eq!(listed, original);
+        }
+        assert!(annotate_missing_selection(&mut listed, "disconnected"));
+        assert!(!annotate_missing_selection(&mut listed, "disconnected"));
+        assert_eq!(listed.len(), 2);
+        assert_eq!(listed[1], original[0]);
+        assert!(!listed[0].available);
+        assert!(!listed[0].is_default);
+        assert_eq!(listed[0].sample_rate, None);
+        assert_eq!(listed[0].channels, None);
+        assert_eq!(selected_device_identity(&original, "missing"), None);
     }
 }

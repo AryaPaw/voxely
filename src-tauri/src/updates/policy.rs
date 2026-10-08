@@ -18,6 +18,9 @@ pub fn parse_tag(tag: &str) -> Option<(u32, u32, u32)> {
     let major = parts.next()?.parse().ok()?;
     let minor = parts.next()?.parse().ok()?;
     let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
     Some((major, minor, patch))
 }
 
@@ -65,5 +68,32 @@ mod tests {
         assert!(!install_allowed(true));
         assert!(restart_after_install_allowed(false));
         assert!(!restart_after_install_allowed(true));
+    }
+
+    #[test]
+    fn stable_tags_accept_prefixes_and_ignore_build_metadata() {
+        assert_eq!(parse_tag(" V1.2.3+build.42 "), Some((1, 2, 3)));
+        assert_eq!(normalize_version(" v1.2.3+build.42 "), "1.2.3");
+        assert!(!is_newer_stable("1.2.3+old", "1.2.3+new", false));
+        assert!(is_newer_stable("1.2.99", "1.3.0", false));
+        assert!(is_newer_stable("1.99.99", "2.0.0", false));
+    }
+
+    #[test]
+    fn malformed_tags_cannot_offer_or_install_updates() {
+        for value in [
+            "",
+            "v",
+            "1",
+            "1.2",
+            "1.2.3.4",
+            "1.2.x",
+            "4294967296.0.0",
+            "1.2.3-rc.1",
+        ] {
+            assert_eq!(parse_tag(value), None, "{value}");
+            assert!(!is_newer_stable("0.1.0", value, false), "{value}");
+            assert!(!is_newer_stable(value, "99.0.0", false), "{value}");
+        }
     }
 }

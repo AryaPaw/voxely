@@ -52,12 +52,13 @@ pub enum RetryClass {
     Terminal,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClassifiedError {
     pub class: RetryClass,
     pub error: AppError,
     pub http_status: Option<u16>,
     pub retry_after: Option<Duration>,
+    pub cost_usd: Option<f64>,
 }
 
 pub fn classify_http_status(status: u16, retry_after: Option<Duration>) -> ClassifiedError {
@@ -72,12 +73,14 @@ pub fn classify_http_status(status: u16, retry_after: Option<Duration>) -> Class
             },
             http_status: Some(status),
             retry_after,
+            cost_usd: None,
         },
         401 | 403 => ClassifiedError {
             class: RetryClass::Terminal,
             error: AppError::InvalidApiKey,
             http_status: Some(status),
             retry_after: None,
+            cost_usd: None,
         },
         400 | 404 | 413 | 422 => ClassifiedError {
             class: RetryClass::Terminal,
@@ -88,23 +91,27 @@ pub fn classify_http_status(status: u16, retry_after: Option<Duration>) -> Class
             },
             http_status: Some(status),
             retry_after: None,
+            cost_usd: None,
         },
         other if (500..600).contains(&other) => ClassifiedError {
             class: RetryClass::Retryable,
             error: AppError::OpenRouterServerError,
             http_status: Some(other),
             retry_after,
+            cost_usd: None,
         },
         other => ClassifiedError {
             class: RetryClass::Terminal,
             error: AppError::RequestValidationFailed(format!("HTTP {other}")),
             http_status: Some(other),
             retry_after: None,
+            cost_usd: None,
         },
     }
 }
 
 pub fn classify_http(status: u16, retry_after: Option<Duration>, body: &str) -> ClassifiedError {
+    let cost_usd = provider_usage_cost(body);
     let lower = body.to_ascii_lowercase();
     let provider_gap = lower.contains("could not be reached")
         || lower.contains("no available")
@@ -117,6 +124,7 @@ pub fn classify_http(status: u16, retry_after: Option<Duration>, body: &str) -> 
             error: AppError::ProviderUnavailable,
             http_status: Some(status),
             retry_after,
+            cost_usd,
         };
     }
     if (status == 400 || status == 404 || status == 422)
@@ -129,9 +137,21 @@ pub fn classify_http(status: u16, retry_after: Option<Duration>, body: &str) -> 
             error: AppError::InvalidModel("invalid model".into()),
             http_status: Some(status),
             retry_after: None,
+            cost_usd,
         };
     }
-    classify_http_status(status, retry_after)
+    let mut classified = classify_http_status(status, retry_after);
+    classified.cost_usd = cost_usd;
+    classified
+}
+
+fn provider_usage_cost(body: &str) -> Option<f64> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("usage")?
+        .get("cost")?
+        .as_f64()
+        .filter(|cost| cost.is_finite() && *cost >= 0.0)
 }
 
 pub fn truncated_body(body: &str) -> String {
@@ -241,6 +261,7 @@ pub fn classify_reqwest(err: &reqwest::Error) -> ClassifiedError {
                 error: AppError::ConnectionFailed(message),
                 http_status: None,
                 retry_after: None,
+                cost_usd: None,
             };
         }
         return ClassifiedError {
@@ -248,6 +269,7 @@ pub fn classify_reqwest(err: &reqwest::Error) -> ClassifiedError {
             error: AppError::RequestTimeout,
             http_status: None,
             retry_after: None,
+            cost_usd: None,
         };
     }
     classify_io(&message)
@@ -296,6 +318,7 @@ pub fn classify_io(message: &str) -> ClassifiedError {
         },
         http_status: None,
         retry_after: None,
+        cost_usd: None,
     }
 }
 
@@ -526,6 +549,16 @@ mod tests {
         );
         assert_eq!(classified.class, RetryClass::Retryable);
         assert_eq!(classified.error, AppError::ProviderUnavailable);
+    }
+
+    #[test]
+    fn provider_cost_in_error_body_is_preserved_for_attempt_ledger() {
+        let classified = classify_http(
+            503,
+            None,
+            r#"{"error":{"message":"temporarily unavailable"},"usage":{"cost":0.031}}"#,
+        );
+        assert_eq!(classified.cost_usd, Some(0.031));
     }
 
     #[test]

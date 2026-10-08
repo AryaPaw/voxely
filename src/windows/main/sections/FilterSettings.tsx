@@ -17,9 +17,22 @@ import { Label } from "../../../components/ui/label";
 import { Progress } from "../../../components/ui/progress";
 import { SimpleSelect } from "../../../components/ui/simple-select";
 import { Slider } from "../../../components/ui/slider";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../../components/ui/tabs";
 import { SECTION_ICONS, sectionLabel } from "../sectionNav";
+import { TextReplacementSettings } from "./TextReplacementSettings";
 
 const DSP_PREVIEW_DEBOUNCE_MS = 400;
+
+// Keep capture operations ordered when audio tabs are closed and reopened
+let sampleOperation: Promise<unknown> = Promise.resolve();
+function runSampleOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const next = sampleOperation.then(operation, operation);
+  sampleOperation = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
+}
 
 export function FilterSettings({
   settings,
@@ -30,12 +43,55 @@ export function FilterSettings({
   copy: Messages;
   onChange: (patch: Partial<AppSettings>) => void;
 }) {
+  return (
+    <div className="max-w-2xl">
+      <PageHeader icon={SECTION_ICONS.filters} title={sectionLabel(copy, "filters")} />
+      <Tabs defaultValue="text" activationMode="manual">
+        <TabsList aria-label={copy.filtersTitle}>
+          <TabsTrigger value="text">{copy.textReplacementsTitle}</TabsTrigger>
+          <TabsTrigger value="audio">{copy.audioFiltersTitle}</TabsTrigger>
+        </TabsList>
+        <TabsContent value="text">
+          <TextReplacementSettings settings={settings} copy={copy} onChange={onChange} />
+        </TabsContent>
+        <TabsContent value="audio">
+          <AudioFilterSettings settings={settings} copy={copy} onChange={onChange} />
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+}
+
+function AudioFilterSettings({
+  settings,
+  copy,
+  onChange,
+}: {
+  settings: AppSettings;
+  copy: Messages;
+  onChange: (patch: Partial<AppSettings>) => void;
+}) {
   const [preview, setPreview] = useState<DspPreview | null>(null);
   const [previewError, setPreviewError] = useState("");
+  const [sampleError, setSampleError] = useState("");
   const [recording, setRecording] = useState(false);
   const [busy, setBusy] = useState(false);
+  const mountedRef = useRef(true);
+  const ownsSampleRef = useRef(false);
+  const samplePendingRef = useRef(false);
   const preset = activePreset(settings);
   const signature = presetSignature(preset);
+
+  useEffect(() => {
+    let disposed = false;
+    const unlisten = listen<string>("filter://error", (event) => {
+      if (!disposed) setSampleError(formatInvokeError(event.payload, copy));
+    });
+    return () => {
+      disposed = true;
+      void unlisten.then((fn) => fn());
+    };
+  }, [copy]);
 
   useEffect(() => {
     if (recording) {
@@ -66,42 +122,60 @@ export function FilterSettings({
   }, [copy, recording, settings.activePresetId, signature]);
 
   useEffect(() => {
+    mountedRef.current = true;
     let cancelled = false;
     const unlisten = listen<boolean>("filter://sample", (event) => {
       if (!cancelled) {
         setRecording(event.payload);
+        if (!event.payload) ownsSampleRef.current = false;
       }
     });
     return () => {
+      mountedRef.current = false;
       cancelled = true;
       void unlisten.then((fn) => fn());
-      void api.stopFilterSample().catch(() => undefined);
+      if (ownsSampleRef.current && !samplePendingRef.current) {
+        ownsSampleRef.current = false;
+        void runSampleOperation(() => api.stopFilterSample()).catch(() => undefined);
+      }
     };
   }, []);
 
   async function toggleSample() {
-    setPreviewError("");
-    if (recording) {
-      setBusy(true);
-      try {
-        setPreview(await api.stopFilterSample());
-        setRecording(false);
-      } catch (error) {
-        setPreviewError(formatInvokeError(error, copy));
-      } finally {
-        setBusy(false);
-      }
-      return;
-    }
+    setSampleError("");
     setBusy(true);
+    samplePendingRef.current = true;
     try {
-      await api.startFilterSample();
-      setRecording(true);
-      setPreview(null);
+      await runSampleOperation(async () => {
+        if (!mountedRef.current) return;
+        try {
+          if (recording) {
+            const result = await api.stopFilterSample();
+            ownsSampleRef.current = false;
+            if (mountedRef.current) {
+              setPreview(result);
+              setRecording(false);
+            }
+          } else {
+            await api.startFilterSample();
+            ownsSampleRef.current = true;
+            if (mountedRef.current) {
+              setRecording(true);
+              setPreview(null);
+            }
+          }
+        } finally {
+          if (!mountedRef.current && ownsSampleRef.current) {
+            ownsSampleRef.current = false;
+            await api.stopFilterSample().catch(() => undefined);
+          }
+        }
+      });
     } catch (error) {
-      setPreviewError(formatInvokeError(error, copy));
+      if (mountedRef.current) setSampleError(formatInvokeError(error, copy));
     } finally {
-      setBusy(false);
+      samplePendingRef.current = false;
+      if (mountedRef.current) setBusy(false);
     }
   }
 
@@ -112,59 +186,84 @@ export function FilterSettings({
   }
 
   return (
-    <div>
-      <PageHeader icon={SECTION_ICONS.filters} title={sectionLabel(copy, "filters")} />
-      <p className="mb-3 max-w-lg text-sm text-muted-foreground">{copy.filtersIntro}</p>
-      <ol className="mb-4 max-w-lg list-decimal space-y-1 pl-5 text-sm text-muted-foreground">
-        <li>{copy.recordSample}</li>
-        <li>
-          {copy.playOriginal} / {copy.playProcessed}
-        </li>
-      </ol>
-      <label className="mb-4 block max-w-lg">
-        <div className="mb-1 text-sm">{copy.activePreset}</div>
-        <SimpleSelect
-          aria-label={copy.activePreset}
-          value={settings.activePresetId}
-          onValueChange={(activePresetId) => onChange({ activePresetId })}
-          options={settings.presets.map((item) => ({
-            value: item.id,
-            label: factoryPresetLabel(item, copy),
-          }))}
-        />
+    <section className="rounded-xl border border-border bg-card p-4">
+      <label className="mb-5 flex flex-wrap items-center justify-between gap-3">
+        <span className="text-sm font-medium">{copy.activePreset}</span>
+        <div className="w-60 max-w-full">
+          <SimpleSelect
+            aria-label={copy.activePreset}
+            value={settings.activePresetId}
+            onValueChange={(activePresetId) => onChange({ activePresetId })}
+            options={settings.presets.map((item) => ({
+              value: item.id,
+              label: factoryPresetLabel(item, copy),
+            }))}
+          />
+        </div>
       </label>
-      <MicLevelMeter live={recording} copy={copy} />
       {preset ? (
         <>
-          <TuneSlider
-            label={copy.gainDb.replace("{value}", preset.gain.db.toFixed(1))}
-            min={-12}
-            max={18}
-            step={0.5}
-            value={preset.gain.db}
-            onChange={(db) => patchPreset({ ...preset, gain: { ...preset.gain, db } })}
-          />
-          <TuneSlider
-            label={copy.highpass.replace("{value}", String(Math.round(preset.highPass.cutoffHz)))}
-            min={20}
-            max={200}
-            step={5}
-            value={preset.highPass.cutoffHz}
-            onChange={(cutoffHz) =>
-              patchPreset({
-                ...preset,
-                highPass: { ...preset.highPass, cutoffHz },
-                order: setSlot(preset.order, "highPass", true),
-              })
-            }
-          />
-          <SettingsSwitchRow
-            label={copy.filterRnnoise}
-            checked={slotEnabled(preset, "rnnoise")}
-            onCheckedChange={(enabled) =>
-              patchPreset({ ...preset, order: setSlot(preset.order, "rnnoise", enabled) })
-            }
-          />
+          <div className="grid gap-x-6 sm:grid-cols-2">
+            <TuneSlider
+              label={copy.gainDb.replace("{value}", preset.gain.db.toFixed(1))}
+              min={-12}
+              max={18}
+              step={0.5}
+              value={preset.gain.db}
+              onChange={(db) => patchPreset({ ...preset, gain: { ...preset.gain, db } })}
+            />
+            <TuneSlider
+              label={copy.highpass.replace("{value}", String(Math.round(preset.highPass.cutoffHz)))}
+              min={20}
+              max={200}
+              step={5}
+              value={preset.highPass.cutoffHz}
+              onChange={(cutoffHz) =>
+                patchPreset({
+                  ...preset,
+                  highPass: { ...preset.highPass, cutoffHz },
+                  order: setSlot(preset.order, "highPass", true),
+                })
+              }
+            />
+          </div>
+          <div className="grid gap-x-6 sm:grid-cols-2">
+            <SettingsSwitchRow
+              label={copy.filterRnnoise}
+              checked={slotEnabled(preset, "rnnoise")}
+              onCheckedChange={(enabled) =>
+                patchPreset({ ...preset, order: setSlot(preset.order, "rnnoise", enabled) })
+              }
+            />
+            <SettingsSwitchRow
+              label={copy.filterCompressor}
+              checked={slotEnabled(preset, "compressor")}
+              onCheckedChange={(enabled) =>
+                patchPreset({ ...preset, order: setSlot(preset.order, "compressor", enabled) })
+              }
+            />
+            <SettingsSwitchRow
+              label={copy.filterExpander}
+              checked={slotEnabled(preset, "expander")}
+              onCheckedChange={(enabled) =>
+                patchPreset({ ...preset, order: setSlot(preset.order, "expander", enabled) })
+              }
+            />
+            <SettingsSwitchRow
+              label={copy.filterGate}
+              checked={slotEnabled(preset, "gate")}
+              onCheckedChange={(enabled) =>
+                patchPreset({ ...preset, order: setSlot(preset.order, "gate", enabled) })
+              }
+            />
+            <SettingsSwitchRow
+              label={copy.filterLimiter}
+              checked={slotEnabled(preset, "limiter")}
+              onCheckedChange={(enabled) =>
+                patchPreset({ ...preset, order: setSlot(preset.order, "limiter", enabled) })
+              }
+            />
+          </div>
           <TuneSlider
             label={copy.filterRnnoiseMix.replace(
               "{value}",
@@ -176,51 +275,26 @@ export function FilterSettings({
             value={preset.rnnoiseMix ?? 1}
             onChange={(rnnoiseMix) => patchPreset({ ...preset, rnnoiseMix })}
           />
-          <SettingsSwitchRow
-            label={copy.filterCompressor}
-            checked={slotEnabled(preset, "compressor")}
-            onCheckedChange={(enabled) =>
-              patchPreset({ ...preset, order: setSlot(preset.order, "compressor", enabled) })
-            }
-          />
-          <SettingsSwitchRow
-            label={copy.filterExpander}
-            checked={slotEnabled(preset, "expander")}
-            onCheckedChange={(enabled) =>
-              patchPreset({ ...preset, order: setSlot(preset.order, "expander", enabled) })
-            }
-          />
-          <SettingsSwitchRow
-            label={copy.filterGate}
-            checked={slotEnabled(preset, "gate")}
-            onCheckedChange={(enabled) =>
-              patchPreset({ ...preset, order: setSlot(preset.order, "gate", enabled) })
-            }
-          />
-          <SettingsSwitchRow
-            label={copy.filterLimiter}
-            checked={slotEnabled(preset, "limiter")}
-            onCheckedChange={(enabled) =>
-              patchPreset({ ...preset, order: setSlot(preset.order, "limiter", enabled) })
-            }
-          />
         </>
       ) : null}
-      <div className="mb-4 flex flex-wrap gap-2">
+      <div className="mt-1 flex flex-wrap items-center gap-3 border-t border-border pt-4">
         <Button disabled={busy} onClick={() => void toggleSample()}>
           {recording ? copy.stopSample : copy.recordSample}
         </Button>
       </div>
-      {recording ? (
-        <p className="mb-3 text-sm text-muted-foreground">{copy.recordingSample}</p>
-      ) : null}
+      {recording ? <MicLevelMeter live={recording} copy={copy} /> : null}
       {previewError ? (
-        <p className="mb-3 text-sm text-destructive">
+        <p className="mb-3 text-sm text-destructive" role="alert">
           {previewError.includes("no filter sample") ? copy.noFilterSample : previewError}
         </p>
       ) : null}
+      {sampleError ? (
+        <p className="mb-3 text-sm text-destructive" role="alert">
+          {sampleError.includes("no filter sample") ? copy.noFilterSample : sampleError}
+        </p>
+      ) : null}
       {preview ? <FilterPreviewPlayer preview={preview} copy={copy} /> : null}
-    </div>
+    </section>
   );
 }
 
@@ -360,7 +434,7 @@ const FilterPreviewPlayer = memo(function FilterPreviewPlayer({
       </p>
       {warning ? <p className="mb-2 text-xs text-destructive">{warning}</p> : null}
       {playbackError ? <p className="mb-2 text-xs text-destructive">{playbackError}</p> : null}
-      <div className="mb-3 flex items-center gap-2">
+      <div className="mb-1 flex flex-wrap items-center gap-2">
         <Button variant="outline" onClick={() => playSide("original")}>
           {copy.playOriginal}
           {activeSide === "original" ? " *" : ""}
@@ -415,7 +489,7 @@ function TuneSlider({
   onChange: (value: number) => void;
 }) {
   return (
-    <div className="mb-4 max-w-lg">
+    <div className="mb-5">
       <Label className="mb-1 text-sm">{label}</Label>
       <Slider
         min={min}

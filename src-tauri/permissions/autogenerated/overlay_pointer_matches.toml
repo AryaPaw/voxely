@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-overlay-pointer-matches"
+description = "Enables the overlay_pointer_matches command without any pre-configured scope."
+commands.allow = ["overlay_pointer_matches"]
+
+[[permission]]
+identifier = "deny-overlay-pointer-matches"
+description = "Denies the overlay_pointer_matches command without any pre-configured scope."
+commands.deny = ["overlay_pointer_matches"]

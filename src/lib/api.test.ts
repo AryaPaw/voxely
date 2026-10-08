@@ -66,7 +66,7 @@ describe("overlayHudVisible", () => {
     expect(overlayHudLabel(false, { kind: "recording" })).toBe("");
     expect(overlayHudLabel(true, { kind: "recording" })).toBe("Запись");
     expect(overlayHudLabel(true, { kind: "recording" }, messagesFor("ru"), true)).toBe(
-      "Лимит записи",
+      "Достигнут лимит записи",
     );
     expect(overlayHudLabel(true, { kind: "saving" })).toBe("Сохранение");
     expect(overlayHudLabel(true, { kind: "transcribing", attempt: 1 })).toBe("Расшифровка");

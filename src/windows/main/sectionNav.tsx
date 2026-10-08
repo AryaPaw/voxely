@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Bug,
   Columns2,
+  ChartNoAxesCombined,
   HardDrive,
   History,
   Info,
@@ -17,6 +18,7 @@ import { appDisplayName, type Messages } from "../../lib/i18n";
 
 export type Section =
   | "history"
+  | "statistics"
   | "compare"
   | "general"
   | "audio"
@@ -30,6 +32,7 @@ export type Section =
 
 export const SECTION_ICONS: Record<Section, LucideIcon> = {
   history: History,
+  statistics: ChartNoAxesCombined,
   compare: Columns2,
   general: Keyboard,
   audio: Mic,
@@ -46,6 +49,8 @@ export function sectionLabel(copy: Messages, id: Section): string {
   switch (id) {
     case "history":
       return copy.navHistory;
+    case "statistics":
+      return copy.navStatistics;
     case "compare":
       return copy.navCompare;
     case "general":
@@ -112,6 +117,7 @@ export function SectionNav({
       </div>
       <div className="min-h-0 flex-1 overflow-y-auto">
         <SectionButton id="history" current={current} copy={copy} onSelect={onSelect} />
+        <SectionButton id="statistics" current={current} copy={copy} onSelect={onSelect} />
         <SectionButton id="compare" current={current} copy={copy} onSelect={onSelect} />
         <div className="mt-4 mb-1 hidden px-2 text-[11px] uppercase tracking-wide text-muted-foreground sm:block">
           {copy.settings}

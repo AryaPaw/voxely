@@ -9,10 +9,14 @@ The daily driver is `src-tauri/target/release/voxely.exe` (optimized Rust/Vite, 
 
 After a wave that changes Rust, frontend, or anything the running app should show:
 
-1. Stop running `voxely.exe` if it locks the binary (`Access is denied` on overwrite means it is still running).
+1. Stop running `voxely.exe` if it locks the binary (`Access is denied` on overwrite means it is still running). Use `scripts/stop-local-app.ps1` for a PID-bound, idle-only graceful exit, or Quit in the tray for older builds. `rebuild-local-app.ps1 -StopRunning` combines that exit with rebuilding. Never force-stop active work and never temporarily change persisted `closeToTray` to close the app for a rebuild.
 2. Rebuild with `bun run rebuild:local-app` (or `$env:VOXELY_LOCAL_BUILD='1'; bunx tauri build --no-bundle`).
-3. Start `src-tauri/target/release/voxely.exe` again if the script did not.
+3. If the script did not launch the app, use `pwsh -NoProfile -File scripts/start-local-app.ps1`. This launches the exact release executable outside the invoking terminal's Windows Job and verifies the result. Do not use plain `Start-Process` from an automation terminal: its job may terminate child processes when the automation host exits.
 4. Prove the user is on that build before claiming the wave is done: the running process path is that release exe, `CreationDate`/`StartTime` is at or after the exe `LastWriteTime`, and the expected HWND exists (main and/or overlay, matching the change). Title is `Voxely (local)` / `Voxely (локальная версия)`.
+
+For an automation launch, also verify `IsProcessInJob(process, NULL)` is false. Job membership and a nearby automation-host restart indicate a launch-lifetime risk, but do not by themselves prove the cause of a historical unexpected exit.
+
+The canonical launcher also attaches a separate, independent exit observer. Check its attachment evidence and the runtime journal's `ready` record for diagnostics changes. Never silently enable WER crash dumps from startup: they require explicit user consent and an elevated, per-app setup. See `docs/DIAGNOSTICS.md` for bounds, collection and disabling WER. Missing completion records alone do not prove a crash.
 
 Do not leave the user on a stale exe. Do this on every such wave without waiting to be asked.
 

@@ -1,4 +1,16 @@
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        // Tauri generates resource.lib with the Common Controls v6 manifest. Make
+        // that resource available to the library's unit-test harness as well.
+        // App binaries already link it through tauri-build, so generic linker
+        // manifest flags here would add a duplicate RT_MANIFEST resource.
+        let out_dir = std::env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR for build scripts");
+        println!(
+            "cargo:rustc-link-search=native={}",
+            std::path::Path::new(&out_dir).display()
+        );
+    }
+
     println!("cargo:rerun-if-env-changed=VOXELY_BUILD_DATE");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
     println!("cargo:rerun-if-env-changed=VOXELY_LOCAL_BUILD");
@@ -31,10 +43,16 @@ fn main() {
         tauri_build::AppManifest::new().commands(&[
             "get_session_state",
             "get_overlay_snapshot",
+            "overlay_pointer_matches",
             "get_settings",
             "save_settings",
+            "acknowledge_first_run_disclosure",
+            "preview_retention_settings",
+            "apply_retention_settings",
+            "manual_reprocess",
             "list_history",
             "list_history_summaries",
+            "get_usage_statistics",
             "get_recording",
             "search_history",
             "delete_history_item",

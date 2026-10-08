@@ -9,4 +9,4 @@ A wave that changes overlay HWND, DPI, tray/taskbar icons, native cues, or text 
 
 Vite/Playwright/jsdom does not prove WebView2 clipping, PE icons, or Unicode insertion.
 
-Coverage that excludes the changed surface is not a pass. Do not lower coverage thresholds to go green.
+Coverage reports must retain the changed surface. Follow `voxely-testing.mdc`: the global Rust percentage is diagnostic, while the full suite and named critical regressions are mandatory. Do not weaken tests or frontend thresholds to hide failures. A policy revision needs explicit user authorization and independent review.

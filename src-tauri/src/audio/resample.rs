@@ -30,6 +30,94 @@ pub fn resample_to_48k(input: &[f32], input_rate: u32) -> Result<Vec<f32>, AppEr
     Ok(resample_linear(input, input_rate, SAMPLE_RATE))
 }
 
+pub struct LinearStreamResampler {
+    input_rate: u64,
+    output_rate: u64,
+    input_frames: u64,
+    output_frames: u64,
+    buffer_start: u64,
+    samples: Vec<f32>,
+}
+
+impl LinearStreamResampler {
+    pub fn new(input_rate: u32, output_rate: u32) -> Self {
+        Self {
+            input_rate: u64::from(input_rate),
+            output_rate: u64::from(output_rate),
+            input_frames: 0,
+            output_frames: 0,
+            buffer_start: 0,
+            samples: Vec::new(),
+        }
+    }
+
+    pub fn push(&mut self, input: &[f32]) -> Vec<f32> {
+        if input.is_empty() {
+            return Vec::new();
+        }
+        if self.input_rate == 0 || self.output_rate == 0 || self.input_rate == self.output_rate {
+            self.input_frames = self.input_frames.saturating_add(input.len() as u64);
+            return input.to_vec();
+        }
+        self.samples.extend_from_slice(input);
+        self.input_frames = self.input_frames.saturating_add(input.len() as u64);
+        self.produce(false)
+    }
+
+    pub fn finish(&mut self) -> Vec<f32> {
+        if self.input_frames == 0
+            || self.input_rate == 0
+            || self.output_rate == 0
+            || self.input_rate == self.output_rate
+        {
+            return Vec::new();
+        }
+        self.produce(true)
+    }
+
+    fn produce(&mut self, flush: bool) -> Vec<f32> {
+        let target_frames = if flush {
+            ((self.input_frames as f64 * self.output_rate as f64) / self.input_rate as f64)
+                .round()
+                .max(1.0) as u64
+        } else {
+            u64::MAX
+        };
+        let mut output = Vec::new();
+        while self.output_frames < target_frames {
+            let position_numerator = self.output_frames.saturating_mul(self.input_rate);
+            let source_index = position_numerator / self.output_rate;
+            if source_index >= self.input_frames {
+                break;
+            }
+            let next_index = source_index.saturating_add(1);
+            if !flush && next_index >= self.input_frames {
+                break;
+            }
+            let first = self.sample_at(source_index);
+            let second = self.sample_at(next_index.min(self.input_frames - 1));
+            let remainder = position_numerator % self.output_rate;
+            let fraction = remainder as f32 / self.output_rate as f32;
+            output.push(first * (1.0 - fraction) + second * fraction);
+            self.output_frames = self.output_frames.saturating_add(1);
+        }
+        if !flush {
+            let next_source_index =
+                self.output_frames.saturating_mul(self.input_rate) / self.output_rate;
+            let discard = next_source_index.saturating_sub(self.buffer_start) as usize;
+            if discard > 0 {
+                self.samples.drain(..discard.min(self.samples.len()));
+                self.buffer_start = self.buffer_start.saturating_add(discard as u64);
+            }
+        }
+        output
+    }
+
+    fn sample_at(&self, absolute_index: u64) -> f32 {
+        self.samples[(absolute_index - self.buffer_start) as usize]
+    }
+}
+
 pub fn resample_sinc(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
     if input.is_empty() {
         return Vec::new();
@@ -161,6 +249,39 @@ mod tests {
     fn identity_resample() {
         let samples = vec![0.1, 0.2, 0.3];
         assert_eq!(resample_to_48k(&samples, 48_000).unwrap(), samples);
+    }
+
+    #[test]
+    fn streaming_resample_is_independent_of_chunk_boundaries() {
+        for input_rate in [44_100, 96_000] {
+            let input = tone(input_rate as usize, 440.0, input_rate);
+            let expected = resample_linear(&input, input_rate, SAMPLE_RATE);
+            let mut resampler = LinearStreamResampler::new(input_rate, SAMPLE_RATE);
+            let mut actual = Vec::new();
+            for chunk in input.chunks(512) {
+                actual.extend(resampler.push(chunk));
+            }
+            actual.extend(resampler.finish());
+            assert_eq!(actual.len(), expected.len());
+            assert!(actual
+                .iter()
+                .zip(expected)
+                .all(|(actual, expected)| (actual - expected).abs() < 1e-6));
+        }
+    }
+
+    #[test]
+    fn streaming_resample_matches_one_shot_for_short_inputs() {
+        for input_rate in [96_000, 192_000] {
+            for len in 1..8 {
+                let input = vec![0.25; len];
+                let expected = resample_linear(&input, input_rate, SAMPLE_RATE);
+                let mut resampler = LinearStreamResampler::new(input_rate, SAMPLE_RATE);
+                let mut actual = resampler.push(&input);
+                actual.extend(resampler.finish());
+                assert_eq!(actual, expected, "rate={input_rate}, frames={len}");
+            }
+        }
     }
 
     fn goertzel_power(samples: &[f32], rate: u32, freq: f32) -> f32 {

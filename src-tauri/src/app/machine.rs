@@ -114,6 +114,9 @@ pub fn apply_event(
         }
         (SessionState::Completed, SessionEvent::StartRequested) => SessionState::StartingRecording,
         (SessionState::Idle, SessionEvent::Dismiss) => SessionState::Idle,
+        (SessionState::Idle, SessionEvent::Cancelled) => SessionState::Idle,
+        (SessionState::Failed { .. }, SessionEvent::Cancelled) => SessionState::Idle,
+        (SessionState::Completed, SessionEvent::Cancelled) => SessionState::Idle,
         (SessionState::Idle, SessionEvent::Shutdown) => SessionState::Idle,
         (SessionState::Failed { .. }, SessionEvent::Shutdown) => SessionState::Idle,
         (SessionState::Completed, SessionEvent::Shutdown) => SessionState::Idle,
@@ -158,7 +161,6 @@ pub fn is_recording_active(state: &SessionState) -> bool {
 pub enum ToggleHotkeyAction {
     Start,
     Stop,
-    Cancel,
     Ignore,
 }
 
@@ -167,12 +169,15 @@ pub fn toggle_hotkey_action(state: &SessionState) -> ToggleHotkeyAction {
         SessionState::Idle | SessionState::Failed { .. } | SessionState::Completed => {
             ToggleHotkeyAction::Start
         }
-        SessionState::StartingRecording | SessionState::Recording => ToggleHotkeyAction::Stop,
-        SessionState::StoppingRecording
+        SessionState::Recording => ToggleHotkeyAction::Stop,
+        // Repeated start/stop presses must never discard the current dictation.
+        // Escape and the HUD expose cancellation as a separate explicit action.
+        SessionState::StartingRecording
+        | SessionState::StoppingRecording
         | SessionState::Saving
         | SessionState::ProcessingAudio
         | SessionState::Transcribing { .. }
-        | SessionState::RetryWaiting { .. } => ToggleHotkeyAction::Cancel,
+        | SessionState::RetryWaiting { .. } => ToggleHotkeyAction::Ignore,
     }
 }
 
@@ -295,6 +300,25 @@ mod tests {
     }
 
     #[test]
+    fn cancel_from_idle_or_failed_stays_idle() {
+        assert_eq!(
+            apply_event(SessionState::Idle, SessionEvent::Cancelled).unwrap(),
+            SessionState::Idle
+        );
+        assert_eq!(
+            apply_event(
+                SessionState::Failed {
+                    message: "Cancelled".into(),
+                    code: "Cancelled".into(),
+                },
+                SessionEvent::Cancelled
+            )
+            .unwrap(),
+            SessionState::Idle
+        );
+    }
+
+    #[test]
     fn cancel_from_transcribing_returns_idle() {
         let state = walk(&[
             SessionEvent::StartRequested,
@@ -323,19 +347,65 @@ mod tests {
     }
 
     #[test]
-    fn transcribing_hotkey_cancels() {
-        assert_eq!(
-            toggle_hotkey_action(&SessionState::Transcribing { attempt: 1 }),
-            ToggleHotkeyAction::Cancel
-        );
-        assert_eq!(
-            toggle_hotkey_action(&SessionState::Idle),
-            ToggleHotkeyAction::Start
-        );
+    fn recording_hotkey_only_starts_or_stops_capture() {
+        for state in [
+            SessionState::Idle,
+            SessionState::Completed,
+            failed(&AppError::Cancelled),
+        ] {
+            assert_eq!(toggle_hotkey_action(&state), ToggleHotkeyAction::Start);
+        }
         assert_eq!(
             toggle_hotkey_action(&SessionState::Recording),
             ToggleHotkeyAction::Stop
         );
+        for state in [
+            SessionState::StartingRecording,
+            SessionState::StoppingRecording,
+            SessionState::Saving,
+            SessionState::ProcessingAudio,
+            SessionState::Transcribing { attempt: 1 },
+            SessionState::RetryWaiting {
+                attempt: 2,
+                delay_ms: 500,
+            },
+        ] {
+            assert_eq!(
+                toggle_hotkey_action(&state),
+                ToggleHotkeyAction::Ignore,
+                "{state:?}"
+            );
+            // Explicit Escape/HUD cancellation is still available.
+            assert!(is_cancellable(&state));
+            assert_eq!(
+                apply_event(state, SessionEvent::Cancelled).unwrap(),
+                SessionState::Idle
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_stop_hotkeys_allow_pipeline_to_complete() {
+        let mut state = walk(&[SessionEvent::StartRequested, SessionEvent::CaptureReady]);
+        assert_eq!(toggle_hotkey_action(&state), ToggleHotkeyAction::Stop);
+        state = apply_event(state, SessionEvent::StopRequested).unwrap();
+        for event in [
+            SessionEvent::Saved,
+            SessionEvent::Saved,
+            SessionEvent::Processed,
+            SessionEvent::RetryScheduled {
+                attempt: 2,
+                delay: Duration::from_millis(500),
+            },
+            SessionEvent::TranscriptAttemptStarted { attempt: 2 },
+            SessionEvent::Succeeded,
+        ] {
+            for _ in 0..3 {
+                assert_eq!(toggle_hotkey_action(&state), ToggleHotkeyAction::Ignore);
+            }
+            state = apply_event(state, event).unwrap();
+        }
+        assert_eq!(state, SessionState::Completed);
     }
 
     #[test]

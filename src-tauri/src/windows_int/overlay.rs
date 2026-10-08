@@ -39,6 +39,81 @@ pub fn work_area_for_cursor() -> Option<WorkArea> {
 }
 
 #[cfg(windows)]
+pub fn pointer_event_matches_overlay(
+    raw: isize,
+    event_client_x: f64,
+    event_client_y: f64,
+    scale_factor: f64,
+) -> bool {
+    if raw == 0 || !scale_factor.is_finite() || scale_factor <= 0.0 {
+        return false;
+    }
+
+    unsafe {
+        use windows::Win32::Foundation::{HWND, POINT, RECT};
+        use windows::Win32::Graphics::Gdi::ScreenToClient;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetClientRect, GetCursorPos, IsWindowVisible,
+        };
+
+        let hwnd = HWND(raw as *mut core::ffi::c_void);
+        if !IsWindowVisible(hwnd).as_bool() {
+            return false;
+        }
+
+        let mut cursor = POINT::default();
+        let mut rect = RECT::default();
+        if GetCursorPos(&mut cursor).is_err()
+            || !ScreenToClient(hwnd, &mut cursor).as_bool()
+            || GetClientRect(hwnd, &mut rect).is_err()
+        {
+            return false;
+        }
+
+        pointer_matches_rect(
+            cursor.x,
+            cursor.y,
+            event_client_x,
+            event_client_y,
+            scale_factor,
+            0,
+            0,
+            rect.right,
+            rect.bottom,
+        )
+    }
+}
+
+fn pointer_matches_rect(
+    cursor_x: i32,
+    cursor_y: i32,
+    event_client_x: f64,
+    event_client_y: f64,
+    scale_factor: f64,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+) -> bool {
+    if !scale_factor.is_finite()
+        || scale_factor <= 0.0
+        || !event_client_x.is_finite()
+        || !event_client_y.is_finite()
+    {
+        return false;
+    }
+
+    let event_x = event_client_x * scale_factor;
+    let event_y = event_client_y * scale_factor;
+    let cursor_x_f = f64::from(cursor_x);
+    let cursor_y_f = f64::from(cursor_y);
+    let in_window = cursor_x >= left && cursor_x < right && cursor_y >= top && cursor_y < bottom;
+    let same_pointer = (cursor_x_f - event_x).abs() <= 8.0 && (cursor_y_f - event_y).abs() <= 8.0;
+
+    in_window && same_pointer
+}
+
+#[cfg(windows)]
 pub fn work_area_for_hwnd(raw: isize) -> Option<WorkArea> {
     if raw == 0 {
         return None;
@@ -175,6 +250,16 @@ pub fn work_area_for_cursor() -> Option<WorkArea> {
 }
 
 #[cfg(not(windows))]
+pub fn pointer_event_matches_overlay(
+    _raw: isize,
+    _event_client_x: f64,
+    _event_client_y: f64,
+    _scale_factor: f64,
+) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
 pub fn work_area_for_hwnd(_raw: isize) -> Option<WorkArea> {
     None
 }
@@ -187,4 +272,48 @@ pub fn dpi_scale_for_hwnd(_raw: isize) -> Option<f64> {
 #[cfg(not(windows))]
 pub fn work_area_for_foreground(_skip_roots: &[usize]) -> Option<WorkArea> {
     None
+}
+
+#[cfg(test)]
+mod pointer_tests {
+    use super::pointer_matches_rect;
+
+    #[test]
+    fn accepts_current_pointer_inside_window_at_scaled_coordinates() {
+        assert!(pointer_matches_rect(
+            100, 100, 50.0, 50.0, 2.0, 0, 0, 200, 200
+        ));
+    }
+
+    #[test]
+    fn rejects_stale_webview_coordinates_after_window_show() {
+        assert!(!pointer_matches_rect(
+            100, 100, 450.0, 250.0, 2.0, 0, 0, 200, 200
+        ));
+    }
+
+    #[test]
+    fn rejects_cursor_outside_overlay_window() {
+        assert!(!pointer_matches_rect(
+            201, 100, 100.5, 50.0, 2.0, 0, 0, 200, 200
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_scale_or_non_finite_coordinates() {
+        assert!(!pointer_matches_rect(
+            100, 100, 50.0, 50.0, 0.0, 0, 0, 200, 200
+        ));
+        assert!(!pointer_matches_rect(
+            100,
+            100,
+            f64::NAN,
+            50.0,
+            2.0,
+            0,
+            0,
+            200,
+            200
+        ));
+    }
 }

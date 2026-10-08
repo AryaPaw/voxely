@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -26,6 +26,7 @@ import {
 } from "../../lib/window-section";
 import { Toaster } from "../../components/ui/sonner";
 import { Button } from "../../components/ui/button";
+import { FirstRunDisclosure } from "./FirstRunDisclosure";
 import { HistoryPane } from "./history/HistoryPane";
 import { SectionNav, type Section } from "./sectionNav";
 import { AboutSettings } from "./sections/AboutSettings";
@@ -39,6 +40,10 @@ import { TranscriptionSettings } from "./sections/TranscriptionSettings";
 import { ComparePane } from "./sections/ComparePane";
 import { DebugSettings } from "./sections/DebugSettings";
 
+const StatisticsPane = lazy(() =>
+  import("./StatisticsPane").then(({ StatisticsPane: Pane }) => ({ default: Pane })),
+);
+
 export function MainApp() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [loadError, setLoadError] = useState("");
@@ -49,10 +54,18 @@ export function MainApp() {
   const [localBuild, setLocalBuild] = useState(false);
   const [version, setVersion] = useState("");
   const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyError, setHistoryError] = useState<"refresh" | "page" | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [settingsRecovered, setSettingsRecovered] = useState(false);
   const historyCursorRef = useRef<string | null>(null);
+  const historyLoadedPageCountRef = useRef(0);
+  const historyLoadedQueryRef = useRef<string | undefined>(undefined);
+  const historyRequestIdRef = useRef(0);
+  const historyPagesInFlightRef = useRef(new Set<string>());
   const queryRef = useRef(query);
   queryRef.current = query;
+  const historyQueryRef = useRef(historySearchQuery(query));
+  historyQueryRef.current = historySearchQuery(query);
   const settingsRef = useRef<AppSettings | null>(null);
   settingsRef.current = settings;
 
@@ -62,19 +75,117 @@ export function MainApp() {
     );
   }
 
-  async function refreshHistory(reset = true, search = query) {
-    const cursor = reset ? null : historyCursorRef.current;
-    const [page, configured] = await Promise.all([
-      api.history(cursor, historySearchQuery(search)),
-      api.keyConfigured(),
-    ]);
-    setHistory((current) => (reset ? page.items : [...current, ...page.items]));
-    historyCursorRef.current = page.nextCursor;
-    setHistoryHasMore(page.hasMore);
-    setKeyConfigured(configured);
-  }
+  const refreshHistory = useCallback(
+    async (reset = true, search = queryRef.current, preserveLoadedPages = false) => {
+      const normalizedQuery = historySearchQuery(search);
+      if (reset) {
+        const requestId = ++historyRequestIdRef.current;
+        const canPreservePages =
+          preserveLoadedPages && historyLoadedQueryRef.current === normalizedQuery;
+        const pagesToLoad = canPreservePages ? Math.max(1, historyLoadedPageCountRef.current) : 1;
+        if (!canPreservePages) {
+          historyLoadedPageCountRef.current = 0;
+        }
+        historyLoadedQueryRef.current = normalizedQuery;
+        setHistoryError(null);
+        setLoadingMore(canPreservePages);
+        let cursor: string | null = null;
+        let nextCursor: string | null = null;
+        let hasMore = false;
+        let pagesLoaded = 0;
+        const items: Recording[] = [];
+        try {
+          for (let pageIndex = 0; pageIndex < pagesToLoad; pageIndex += 1) {
+            const page = await api.history(cursor, normalizedQuery);
+            if (
+              requestId !== historyRequestIdRef.current ||
+              normalizedQuery !== historyQueryRef.current
+            ) {
+              return;
+            }
+            items.push(...page.items);
+            pagesLoaded += 1;
+            nextCursor = page.nextCursor ?? null;
+            hasMore = page.hasMore && nextCursor !== null && nextCursor !== cursor;
+            if (!hasMore || !nextCursor) {
+              break;
+            }
+            cursor = nextCursor;
+          }
 
-  async function loadSettings() {
+          if (
+            requestId !== historyRequestIdRef.current ||
+            normalizedQuery !== historyQueryRef.current
+          ) {
+            return;
+          }
+          setHistory(uniqueHistoryItems(items));
+          historyCursorRef.current = nextCursor;
+          setHistoryHasMore(hasMore && nextCursor !== null);
+          historyLoadedPageCountRef.current = pagesLoaded;
+        } catch {
+          if (
+            requestId === historyRequestIdRef.current &&
+            normalizedQuery === historyQueryRef.current
+          ) {
+            setHistoryError("refresh");
+          }
+        } finally {
+          if (requestId === historyRequestIdRef.current) {
+            setLoadingMore(false);
+          }
+        }
+        return;
+      }
+
+      const cursor = historyCursorRef.current;
+      const requestId = historyRequestIdRef.current;
+      if (!cursor || normalizedQuery !== historyQueryRef.current) {
+        return;
+      }
+      const requestKey = `${requestId}:${cursor}`;
+      if (historyPagesInFlightRef.current.has(requestKey)) {
+        return;
+      }
+      historyPagesInFlightRef.current.add(requestKey);
+      setLoadingMore(true);
+      setHistoryError(null);
+      try {
+        const page = await api.history(cursor, normalizedQuery);
+        if (
+          requestId !== historyRequestIdRef.current ||
+          normalizedQuery !== historyQueryRef.current ||
+          cursor !== historyCursorRef.current
+        ) {
+          return;
+        }
+        setHistory((current) => appendUniqueHistoryItems(current, page.items));
+        const nextCursor = page.nextCursor ?? null;
+        historyCursorRef.current = nextCursor;
+        setHistoryHasMore(page.hasMore && nextCursor !== cursor && nextCursor !== null);
+        historyLoadedPageCountRef.current += 1;
+        historyLoadedQueryRef.current = normalizedQuery;
+      } catch {
+        if (
+          requestId === historyRequestIdRef.current &&
+          normalizedQuery === historyQueryRef.current &&
+          cursor === historyCursorRef.current
+        ) {
+          setHistoryError("page");
+        }
+      } finally {
+        historyPagesInFlightRef.current.delete(requestKey);
+        if (requestId === historyRequestIdRef.current) {
+          setLoadingMore(
+            [...historyPagesInFlightRef.current].some((key) => key.startsWith(`${requestId}:`)),
+          );
+        }
+      }
+    },
+    [],
+  );
+
+  const loadSettings = useCallback(async () => {
     try {
       const nextSettings = await api.settings();
       setSettings(nextSettings);
@@ -99,16 +210,15 @@ export function MainApp() {
         setSection((current) => (current === "debug" ? "history" : current));
       }
     } catch (error) {
-      setLoadError(formatInvokeError(error, copyForUi()));
+      const locale = resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto", navigator.language);
+      setLoadError(formatInvokeError(error, messagesFor(locale)));
     }
-  }
+  }, []);
 
   useEffect(() => {
     void loadSettings();
     const unlistenHistory = listen(HISTORY_CHANGED, () => {
-      void refreshHistory(true, queryRef.current).catch((error: unknown) => {
-        reportError(formatInvokeError(error, copyForUi()));
-      });
+      void refreshHistory(true, queryRef.current, true);
     });
     const unlistenInsert = listen<string>("session://insert", (event) => {
       const locale = resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto", navigator.language);
@@ -121,6 +231,18 @@ export function MainApp() {
         toast.error(localizedError(event.payload, nextCopy));
       }
     });
+    const unlistenInsertCancelled = listen<{
+      recordingId: string;
+      status: "cancelled_before_delivery";
+    }>("session://insert-cancelled", (event) => {
+      if (event.payload.status === "cancelled_before_delivery") {
+        const locale = resolveUiLocale(
+          settingsRef.current?.uiLanguage ?? "auto",
+          navigator.language,
+        );
+        toast.warning(messagesFor(locale).insertCancelled);
+      }
+    });
     const unlistenSettings = listen<AppSettings>("settings://changed", (event) => {
       setSettings((prev) => acceptSavedSettings(prev, event.payload));
     });
@@ -131,19 +253,47 @@ export function MainApp() {
       unbindEscape();
       void unlistenHistory.then((fn) => fn());
       void unlistenInsert.then((fn) => fn());
+      void unlistenInsertCancelled.then((fn) => fn());
       void unlistenSettings.then((fn) => fn());
     };
-    // listeners capture latest refreshHistory via query-driven reloads
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadSettings, refreshHistory]);
+
+  useEffect(() => {
+    let active = true;
+    void api
+      .keyConfigured()
+      .then((configured) => {
+        if (active) {
+          setKeyConfigured(configured);
+        }
+      })
+      .catch((error: unknown) => {
+        if (active) {
+          const locale = resolveUiLocale(
+            settingsRef.current?.uiLanguage ?? "auto",
+            navigator.language,
+          );
+          reportError(formatInvokeError(error, messagesFor(locale)));
+        }
+      });
+    return () => {
+      active = false;
+    };
   }, []);
 
   useEffect(() => {
-    void refreshHistory(true).catch((error: unknown) => {
-      reportError(formatInvokeError(error, copyForUi()));
-    });
-    // reload on search only; refreshHistory closes over the latest query
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [query]);
+    historyRequestIdRef.current += 1;
+    historyCursorRef.current = null;
+    setHistoryHasMore(false);
+    setLoadingMore(false);
+    setHistoryError(null);
+    setHistory([]);
+    const timer = window.setTimeout(() => {
+      void refreshHistory(true, query);
+    }, 220);
+    return () => window.clearTimeout(timer);
+    // Search is debounced; refreshHistory reads the query passed by this effect.
+  }, [query, refreshHistory]);
 
   useEffect(() => {
     const unlistenNavigate = listen<string>(APP_NAVIGATE, (event) => {
@@ -193,14 +343,28 @@ export function MainApp() {
     try {
       const saved = await api.saveSettings(outgoing);
       setSettings((prev) => acceptSavedSettings(prev, saved));
-      applyTheme(saved.theme);
-      setSettingsRecovered(false);
     } catch (error) {
-      setSettings((prev) =>
-        shouldKeepOptimistic(prev, seq) ? (prev as AppSettings) : currentSettings,
-      );
-      applyTheme(currentSettings.theme);
+      try {
+        const persisted = await api.settings();
+        setSettings((prev) =>
+          prev && (prev.writeSeq ?? 0) > seq ? prev : acceptSavedSettings(prev, persisted),
+        );
+      } catch {
+        setSettings((prev) =>
+          shouldKeepOptimistic(prev, seq) ? (prev as AppSettings) : currentSettings,
+        );
+      }
       reportError(formatInvokeError(error, copy));
+    }
+  }
+
+  async function acknowledgeFirstRunDisclosure() {
+    try {
+      const acknowledged = await api.acknowledgeFirstRunDisclosure();
+      setSettings((prev) => acceptSavedSettings(prev, acknowledged));
+    } catch (error) {
+      reportError(formatInvokeError(error, copy));
+      throw error;
     }
   }
 
@@ -215,22 +379,46 @@ export function MainApp() {
           onSelect={setSection}
         />
         <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+          {!settings.firstRunComplete ? (
+            <FirstRunDisclosure
+              copy={copy}
+              onAcknowledge={acknowledgeFirstRunDisclosure}
+              onOpenStorage={() => setSection("historySettings")}
+            />
+          ) : null}
           {section === "history" ? (
             <HistoryPane
               items={filtered}
               query={query}
               hasMore={historyHasMore}
+              historyError={historyError}
+              isLoadingMore={loadingMore}
               recovered={settingsRecovered}
               keyConfigured={keyConfigured}
               hotkey={settings.hotkey}
               onQuery={setQuery}
               onClearQuery={() => setQuery("")}
-              onLoadMore={() => void refreshHistory(false)}
-              onRefresh={() => refreshHistory(true)}
+              onLoadMore={() => void refreshHistory(false, queryRef.current)}
+              onRefresh={() => refreshHistory(true, queryRef.current, true)}
               onOpenKey={() => setSection("transcription")}
               onOpenSettings={() => setSection("general")}
               copy={copy}
             />
+          ) : section === "statistics" ? (
+            <div className="min-h-0 flex-1 overflow-auto p-6">
+              <Suspense
+                fallback={
+                  <div
+                    className="mx-auto max-w-6xl py-6 text-sm text-muted-foreground"
+                    aria-live="polite"
+                  >
+                    {copy.statisticsLoading}
+                  </div>
+                }
+              >
+                <StatisticsPane copy={copy} />
+              </Suspense>
+            </div>
           ) : section === "compare" && settings ? (
             <div className="min-h-0 flex-1 overflow-auto p-6">
               <ComparePane
@@ -270,9 +458,7 @@ export function MainApp() {
                   copy={copy}
                   keyConfigured={keyConfigured}
                   onConfigured={setKeyConfigured}
-                  onChange={(patch) =>
-                    void persist({ ...settings, ...patch, firstRunComplete: true })
-                  }
+                  onChange={(patch) => void persist({ ...settings, ...patch })}
                 />
               ) : null}
               {section === "historySettings" ? (
@@ -282,10 +468,52 @@ export function MainApp() {
                   onChange={(patch) => void persist({ ...settings, ...patch })}
                   onDeleteAll={async () => {
                     try {
-                      await api.deleteAll();
-                      await refreshHistory();
+                      const result = await api.deleteAll();
+                      await refreshHistory(true, queryRef.current, true);
+                      if (result.failed.length > 0) {
+                        toast.warning(
+                          copy.historyDeletePartial
+                            .replace("{deleted}", String(result.deleted.length))
+                            .replace("{failed}", String(result.failed.length)),
+                        );
+                      } else {
+                        toast.success(
+                          copy.historyDeleteComplete.replace(
+                            "{count}",
+                            String(result.deleted.length),
+                          ),
+                        );
+                      }
                     } catch (error) {
                       reportError(formatInvokeError(error, copy));
+                    }
+                  }}
+                  onPreviewRetention={(nextSettings) => api.previewRetentionSettings(nextSettings)}
+                  onApplyRetention={async (nextSettings, expectedPreview) => {
+                    try {
+                      const outgoing = {
+                        ...nextSettings,
+                        writeSeq: nextWriteSeq(currentSettings.writeSeq ?? 0),
+                      };
+                      const result = await api.applyRetentionSettings(outgoing, expectedPreview);
+                      setSettings((prev) => acceptSavedSettings(prev, result.settings));
+                      setSettingsRecovered(false);
+                      await refreshHistory(true, queryRef.current, true);
+                      if (result.failed.length > 0) {
+                        toast.warning(
+                          copy.retentionApplyPartial
+                            .replace("{deleted}", String(result.deleted.length))
+                            .replace("{failed}", String(result.failed.length)),
+                        );
+                      } else {
+                        toast.success(
+                          copy.retentionApplied.replace("{count}", String(result.deleted.length)),
+                        );
+                      }
+                      return result;
+                    } catch (error) {
+                      reportError(formatInvokeError(error, copy));
+                      throw error;
                     }
                   }}
                 />
@@ -320,4 +548,27 @@ export function MainApp() {
       <Toaster theme={resolvedTheme(settings.theme)} />
     </>
   );
+}
+
+function uniqueHistoryItems(items: Recording[]): Recording[] {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    if (seen.has(item.id)) {
+      return false;
+    }
+    seen.add(item.id);
+    return true;
+  });
+}
+
+function appendUniqueHistoryItems(current: Recording[], next: Recording[]): Recording[] {
+  const seen = new Set(current.map((item) => item.id));
+  const additions = next.filter((item) => {
+    if (seen.has(item.id)) {
+      return false;
+    }
+    seen.add(item.id);
+    return true;
+  });
+  return [...current, ...additions];
 }

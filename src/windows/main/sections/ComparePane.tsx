@@ -17,7 +17,7 @@ import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { api, type AppSettings, type CompareState } from "../../../lib/api";
-import { formatInvokeError, type Messages } from "../../../lib/i18n";
+import { formatInvokeError, messagesForUiLanguage, type Messages } from "../../../lib/i18n";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
 import { SECTION_ICONS, sectionLabel } from "../sectionNav";
@@ -54,7 +54,14 @@ export function ComparePane({
 }) {
   const [state, setState] = useState<CompareState>(emptyState);
   const [error, setError] = useState("");
+  const statusCopy = messagesForUiLanguage(settings.uiLanguage ?? "auto", navigator.language);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const stateEventRevisionRef = useRef(0);
+  const recordingRef = useRef(false);
+  const startingRef = useRef(false);
+  const mountedRef = useRef(true);
+  const stopAfterStartRef = useRef(false);
+  recordingRef.current = state.recording;
   const models = useMemo(() => settings.compareModels ?? [], [settings.compareModels]);
   const slotIds = useMemo(() => compareSlotIds(models.length), [models.length]);
   const unique = useMemo(() => new Set(models.map((item) => item.trim())), [models]);
@@ -74,31 +81,53 @@ export function ComparePane({
 
   useEffect(() => {
     let cancelled = false;
-    const unlisten = listen<CompareState>("compare://state", (event) => {
-      setState(event.payload);
-    });
-    void api
-      .getModelCompare()
-      .then((next) => {
-        if (!cancelled) {
+    let stopState: (() => void) | undefined;
+    let stopError: (() => void) | undefined;
+    void (async () => {
+      try {
+        const [unlistenState, unlistenError] = await Promise.all([
+          listen<CompareState>("compare://state", (event) => {
+            stateEventRevisionRef.current += 1;
+            if (!cancelled) setState(event.payload);
+          }),
+          listen<string>("compare://error", (event) => {
+            if (!cancelled) setError(formatInvokeError(event.payload, copy));
+          }),
+        ]);
+        if (cancelled) {
+          unlistenState();
+          unlistenError();
+          return;
+        }
+        stopState = unlistenState;
+        stopError = unlistenError;
+
+        const snapshotRevision = stateEventRevisionRef.current;
+        const next = await api.getModelCompare();
+        if (!cancelled && stateEventRevisionRef.current === snapshotRevision) {
           setState(next);
         }
-      })
-      .catch((err: unknown) => {
-        if (!cancelled) {
-          setError(formatInvokeError(err, copy));
-        }
-      });
+      } catch (err) {
+        if (!cancelled) setError(formatInvokeError(err, copy));
+      }
+    })();
     return () => {
       cancelled = true;
-      void unlisten.then((fn) => fn());
+      stopState?.();
+      stopError?.();
     };
   }, [copy]);
 
   useEffect(() => {
+    mountedRef.current = true;
     const node = audioRef.current;
     return () => {
+      mountedRef.current = false;
       node?.pause();
+      if (recordingRef.current || startingRef.current) {
+        stopAfterStartRef.current = true;
+        void api.stopModelCompare().catch(() => undefined);
+      }
     };
   }, []);
 
@@ -118,31 +147,64 @@ export function ComparePane({
 
   async function toggleRecord() {
     setError("");
+    const eventRevision = stateEventRevisionRef.current;
     try {
       if (state.recording) {
-        setState(await api.stopModelCompare());
+        const next = await api.stopModelCompare();
+        if (stateEventRevisionRef.current === eventRevision) setState(next);
         return;
       }
+      startingRef.current = true;
+      stopAfterStartRef.current = false;
       await api.startModelCompare();
-      setState((current) => ({ ...current, recording: true }));
+      if (!mountedRef.current) {
+        if (!stopAfterStartRef.current) {
+          stopAfterStartRef.current = true;
+          await api.stopModelCompare();
+        }
+        return;
+      }
+      const next = await api.getModelCompare();
+      if (stateEventRevisionRef.current === eventRevision) setState(next);
     } catch (err) {
-      setError(formatInvokeError(err, copy));
+      if (mountedRef.current) setError(formatInvokeError(err, copy));
+    } finally {
+      startingRef.current = false;
     }
   }
 
   async function run() {
     setError("");
+    const eventRevision = stateEventRevisionRef.current;
     try {
-      setState(await api.runModelCompare());
+      const next = await api.runModelCompare();
+      if (stateEventRevisionRef.current === eventRevision) setState(next);
     } catch (err) {
       setError(formatInvokeError(err, copy));
     }
   }
 
+  function cancelRun() {
+    const eventRevision = stateEventRevisionRef.current;
+    void api
+      .cancelModelCompare()
+      .then((next) => {
+        if (stateEventRevisionRef.current === eventRevision) setState(next);
+      })
+      .catch((err: unknown) => setError(formatInvokeError(err, copy)));
+  }
+
   return (
     <div>
-      <PageHeader icon={SECTION_ICONS.compare} title={sectionLabel(copy, "compare")} />
-      <p className="mb-4 max-w-lg text-sm text-muted-foreground">{copy.compareIntro}</p>
+      <PageHeader
+        icon={SECTION_ICONS.compare}
+        title={sectionLabel(copy, "compare")}
+        description={copy.compareIntro}
+      />
+      <p className="mb-3 text-sm text-muted-foreground">
+        {copy.compareRun} –{" "}
+        {statusCopy.compareRequestCount.replace("{count}", String(models.length))}
+      </p>
       <div className="mb-4 flex flex-wrap gap-2">
         <Button type="button" variant="outline" onClick={() => void api.openOpenrouterModels()}>
           {copy.openRouterCatalog}
@@ -154,16 +216,7 @@ export function ComparePane({
           {copy.compareRun}
         </Button>
         {state.running ? (
-          <Button
-            type="button"
-            variant="outline"
-            onClick={() =>
-              void api
-                .cancelModelCompare()
-                .then(setState)
-                .catch((err: unknown) => setError(formatInvokeError(err, copy)))
-            }
-          >
+          <Button type="button" variant="outline" onClick={cancelRun}>
             {copy.cancel}
           </Button>
         ) : null}
@@ -181,7 +234,11 @@ export function ComparePane({
           </button>
         </p>
       ) : null}
-      {error ? <p className="mb-3 text-sm text-destructive">{error}</p> : null}
+      {error ? (
+        <p className="mb-3 text-sm text-destructive" role="alert">
+          {error}
+        </p>
+      ) : null}
       {state.listenPath ? (
         <audio
           ref={audioRef}
@@ -228,9 +285,12 @@ export function ComparePane({
 function compareSlotForModel(state: CompareState, model: string) {
   const trimmed = model.trim();
   const runId = state.runId ?? null;
-  return (
-    state.slots.find((slot) => slot.model === trimmed && (slot.runId ?? null) === runId) ??
-    state.slots.find((slot) => slot.slotId && slot.model === trimmed)
+  return state.slots.find(
+    (slot) =>
+      slot.slotId &&
+      slot.model === trimmed &&
+      slot.runId === runId &&
+      slot.clipNonce === state.nonce,
   );
 }
 

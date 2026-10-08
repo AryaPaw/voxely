@@ -19,8 +19,6 @@ pub const GITHUB_REPO_URL: &str = "https://github.com/AryaPaw/voxely";
 pub const GITHUB_ISSUES_URL: &str = "https://github.com/AryaPaw/voxely/issues";
 pub const OPENROUTER_TRANSCRIPTION_MODELS_URL: &str =
     "https://openrouter.ai/models?output_modalities=transcription";
-pub const MAIN_WINDOW_WIDTH: f64 = 960.0;
-pub const MAIN_WINDOW_HEIGHT: f64 = 680.0;
 
 pub fn github_page_url(page: Option<&str>) -> &'static str {
     match page {
@@ -125,8 +123,10 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main(app, "history"),
             "quit" => {
-                crate::app::session::shutdown_session(app);
-                app.exit(0);
+                crate::runtime_diagnostics::record(crate::runtime_diagnostics::Event::ExitIntent {
+                    reason: crate::runtime_diagnostics::ExitReason::TrayQuit,
+                });
+                crate::app::shutdown::request(app, crate::app::shutdown::Action::Exit(0));
             }
             _ => {}
         })
@@ -164,8 +164,14 @@ pub fn should_hide_on_launch(args: impl IntoIterator<Item = impl AsRef<str>>) ->
 
 pub fn hide_main_to_tray(app: &AppHandle) {
     if let Some(window) = app.get_webview_window("main") {
-        let _ = window.hide();
-        let _ = window.set_skip_taskbar(true);
+        let hidden = window.hide().is_ok();
+        let taskbar_hidden = window.set_skip_taskbar(true).is_ok();
+        crate::runtime_diagnostics::record(
+            crate::runtime_diagnostics::Event::MainWindowHideResult {
+                hidden,
+                taskbar_hidden,
+            },
+        );
     }
 }
 
@@ -190,8 +196,11 @@ pub fn show_main(app: &AppHandle, route: &str) {
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.set_skip_taskbar(false);
         let _ = window.unminimize();
-        let _ = window.show();
+        let shown = window.show().is_ok();
         let _ = window.set_focus();
+        crate::runtime_diagnostics::record(crate::runtime_diagnostics::Event::MainWindowShown {
+            shown,
+        });
     }
     let section = main_section_from_route(route);
     let _ = app.emit("app://navigate", section);
@@ -298,18 +307,35 @@ pub fn center_main_window(app: &AppHandle) {
 }
 
 pub fn reset_main_window(app: &AppHandle) -> Result<(), AppError> {
+    let default_size = main_window_default_size(&app.config().app.windows)?;
     let window = app
         .get_webview_window("main")
         .ok_or_else(|| AppError::StorageFailed("main window missing".into()))?;
     let _ = window.unmaximize();
     window
-        .set_size(Size::Logical(LogicalSize::new(
-            MAIN_WINDOW_WIDTH,
-            MAIN_WINDOW_HEIGHT,
-        )))
+        .set_size(Size::Logical(default_size))
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
     center_main_window(app);
     Ok(())
+}
+
+fn main_window_default_size(
+    windows: &[tauri::utils::config::WindowConfig],
+) -> Result<LogicalSize<f64>, AppError> {
+    let main = windows
+        .iter()
+        .find(|window| window.label == "main")
+        .ok_or_else(|| AppError::StorageFailed("main window configuration missing".into()))?;
+    if !main.width.is_finite()
+        || !main.height.is_finite()
+        || main.width <= 0.0
+        || main.height <= 0.0
+    {
+        return Err(AppError::StorageFailed(
+            "main window configuration has invalid dimensions".into(),
+        ));
+    }
+    Ok(LogicalSize::new(main.width, main.height))
 }
 
 pub fn reregister_hotkey(app: &AppHandle, _spec: &str) -> Result<(), AppError> {
@@ -423,8 +449,56 @@ mod tests {
             OPENROUTER_TRANSCRIPTION_MODELS_URL,
             "https://openrouter.ai/models?output_modalities=transcription"
         );
-        assert_eq!(MAIN_WINDOW_WIDTH, 960.0);
-        assert_eq!(MAIN_WINDOW_HEIGHT, 680.0);
+    }
+
+    #[test]
+    fn reset_size_uses_main_window_configuration() {
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../../tauri.conf.json")).unwrap();
+        let mut windows: Vec<tauri::utils::config::WindowConfig> =
+            serde_json::from_value(config["app"]["windows"].clone()).unwrap();
+        let main = windows
+            .iter()
+            .find(|window| window.label == "main")
+            .unwrap();
+        let expected = LogicalSize::new(main.width, main.height);
+        assert_eq!(main_window_default_size(&windows).unwrap(), expected);
+
+        let mut overlay = windows[0].clone();
+        overlay.label = "overlay".into();
+        overlay.width = 1.0;
+        overlay.height = 2.0;
+        windows.insert(0, overlay);
+        let main = windows
+            .iter_mut()
+            .find(|window| window.label == "main")
+            .unwrap();
+        main.width = 1040.0;
+        main.height = 730.0;
+        assert_eq!(
+            main_window_default_size(&windows).unwrap(),
+            LogicalSize::new(1040.0, 730.0)
+        );
+        windows.retain(|window| window.label != "main");
+        assert!(main_window_default_size(&windows).is_err());
+    }
+
+    #[test]
+    fn reset_size_rejects_invalid_dimensions() {
+        for (width, height) in [
+            (0.0, 1.0),
+            (1.0, -1.0),
+            (f64::NAN, 1.0),
+            (1.0, f64::INFINITY),
+        ] {
+            let main = tauri::utils::config::WindowConfig {
+                label: "main".into(),
+                width,
+                height,
+                ..Default::default()
+            };
+            assert!(main_window_default_size(&[main]).is_err());
+        }
     }
 
     #[test]

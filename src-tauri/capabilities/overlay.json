@@ -13,6 +13,7 @@
     "core:window:allow-set-size",
     "allow-get-session-state",
     "allow-get-overlay-snapshot",
+    "allow-overlay-pointer-matches",
     "allow-get-settings",
     "allow-get-meter",
     "allow-cancel-dictation",

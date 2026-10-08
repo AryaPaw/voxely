@@ -5,13 +5,14 @@ import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
 const host = process.env.TAURI_DEV_HOST;
+const projectDir = import.meta.dirname;
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   base: "./",
   resolve: {
     alias: {
-      "@": path.resolve(__dirname, "./src"),
+      "@": path.resolve(projectDir, "./src"),
     },
   },
   clearScreen: false,
@@ -25,8 +26,8 @@ export default defineConfig({
   build: {
     rollupOptions: {
       input: {
-        main: path.resolve(__dirname, "index.html"),
-        overlay: path.resolve(__dirname, "overlay.html"),
+        main: path.resolve(projectDir, "index.html"),
+        overlay: path.resolve(projectDir, "overlay.html"),
       },
     },
   },
@@ -37,38 +38,21 @@ export default defineConfig({
       provider: "v8",
       reporter: ["text", "lcov"],
       thresholds: {
-        lines: 85,
+        statements: 80,
         branches: 85,
+        functions: 80,
+        lines: 85,
+        "src/windows/overlay/OverlayApp.tsx": {
+          lines: 85,
+          branches: 85,
+        },
+        "src/windows/main/StatisticsPane.tsx": {
+          lines: 85,
+          branches: 85,
+        },
       },
-      include: [
-        "src/lib/session-copy.ts",
-        "src/lib/i18n.ts",
-        "src/lib/utils.ts",
-        "src/lib/theme.ts",
-        "src/lib/history-sync.ts",
-        "src/lib/settings-persist.ts",
-        "src/lib/overlay-wave.ts",
-        "src/lib/dsp-level.ts",
-        "src/components/settings/SettingsField.tsx",
-        "src/components/settings/SettingsSwitchRow.tsx",
-        "src/components/ui/button.tsx",
-        "src/components/ui/input.tsx",
-        "src/components/ui/label.tsx",
-        "src/components/ui/switch.tsx",
-        "src/components/ui/simple-select.tsx",
-        "src/components/ui/select.tsx",
-        "src/windows/main/sections/AppearanceSettings.tsx",
-        "src/windows/main/sections/AboutSettings.tsx",
-        "src/windows/main/sections/AdvancedSettings.tsx",
-        "src/windows/overlay/OverlayApp.tsx",
-        "src/windows/main/MainApp.tsx",
-        "src/windows/main/history/HistoryPane.tsx",
-        "src/windows/main/sections/ComparePane.tsx",
-        "src/windows/main/sections/FilterSettings.tsx",
-        "src/windows/main/sections/TranscriptionSettings.tsx",
-        "src/components/settings/HotkeyCapture.tsx",
-      ],
-      exclude: ["**/*.test.*"],
+      include: ["src/**/*.{ts,tsx}"],
+      exclude: ["**/*.test.*", "src/main.tsx", "src/overlay.tsx"],
     },
   },
 });

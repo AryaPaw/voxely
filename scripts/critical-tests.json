@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "groups": [
+    {
+      "id": "capture-cancel",
+      "purpose": "Preserve recording ownership through cancellation, duplicate stop, delayed native cleanup and the upload duration boundary.",
+      "tests": [
+        "audio::capture::tests::startup_timeout_releases_owner_only_after_native_worker_cleanup",
+        "audio::capture::tests::stop_timeout_does_not_kill_worker_and_cancel_cleans_late_wav_after_join",
+        "audio::capture::tests::duration_cap_matches_across_input_rates",
+        "audio::capture::tests::pcm_flush_preserves_short_chunk_and_stops_at_exact_frame_limit",
+        "app::session::tests::duplicate_stop_preserves_recording_audio_and_usage",
+        "app::session::tests::cancel_discards_audio_history_and_usage",
+        "app::session::tests::cancel_during_stopping_hides_history_until_audio_cleanup_finishes",
+        "app::session::tests::cancelled_pipeline_delete_failure_is_retried_until_history_and_usage_are_removed"
+      ]
+    },
+    {
+      "id": "persistence-recovery",
+      "purpose": "Keep recoverable audio when persistence fails and recover unfinished WAV data after restart.",
+      "tests": [
+        "app::session::tests::finalized_capture_survives_lookup_failure_and_restart_recovery",
+        "app::session::tests::finalized_capture_write_failure_preserves_audio_and_actual_storage_error",
+        "app::session::tests::processed_reference_commit_failures_keep_retry_audio_after_restart",
+        "app::session::tests::raw_cleanup_failure_keeps_both_references",
+        "app::session::tests::startup_repairs_partial_wav_and_restores_capture_duration",
+        "app::session::tests::failed_wav_read_preserves_source_when_history_lookup_fails"
+      ]
+    },
+    {
+      "id": "generation-insertion",
+      "purpose": "Reject stale pipeline ownership and release lifecycle locks before waiting for the UI thread.",
+      "tests": [
+        "app::session::tests::delayed_pipeline_cannot_adopt_shutdown_or_new_session_generation",
+        "app::session::tests::live_pipeline_requires_the_original_owner_and_cancel_sender",
+        "app::session::tests::late_live_metadata_cannot_revive_cancelled_or_interrupted_recordings",
+        "app::session::tests::completed_insertion_releases_lifecycle_before_waiting_for_ui_cancel"
+      ]
+    },
+    {
+      "id": "retry",
+      "purpose": "Preserve the original dictation and audio when a history retry is cancelled, including storage failures.",
+      "tests": [
+        "app::session::tests::retry_cancellation_restores_original_status_and_keeps_started_attempt",
+        "app::session::tests::cancelled_retry_storage_failure_keeps_staged_audio_until_restore_is_durable",
+        "app::session::tests::retry_attempt_is_attributed_to_the_model_used_for_the_request"
+      ]
+    },
+    {
+      "id": "usage-history",
+      "purpose": "Commit history and usage atomically, count retry costs truthfully and retain independent statistics across restart.",
+      "tests": [
+        "history::repository::tests::failed_usage_insert_rolls_back_recording_row",
+        "history::repository::tests::failed_usage_update_rolls_back_recording_changes",
+        "history::repository::tests::usage_counts_retries_partial_cost_and_manual_delete_separately",
+        "history::repository::tests::manual_delete_removes_history_and_usage_in_one_transaction",
+        "history::repository::tests::usage_expiry_and_full_clear_survive_restart"
+      ]
+    },
+    {
+      "id": "retention",
+      "purpose": "Restore staged audio on transactional deletion failure and protect audio owned by an active retry.",
+      "tests": [
+        "history::retention::tests::retention_sqlite_failure_restores_audio_and_keeps_record",
+        "history::retention::tests::deleting_record_and_usage_restores_audio_when_sqlite_delete_fails",
+        "app::session::tests::configured_retention_waits_for_retry_reservation_before_snapshotting_protection"
+      ]
+    },
+    {
+      "id": "shutdown",
+      "purpose": "Persist late capture results during shutdown and admit exit only after the owned cleanup completes.",
+      "tests": [
+        "app::session::tests::shutdown_during_normal_capture_stop_preserves_late_result_as_interrupted",
+        "app::session::tests::shutdown_timeout_persists_metadata_when_native_capture_finishes_late",
+        "app::session::tests::shutdown_exit_reservation_refuses_contention_and_requires_completed_cleanup"
+      ]
+    },
+    {
+      "id": "insertion-delivery",
+      "purpose": "Avoid replaying partially inserted text, honour cancellation and preserve Unicode surrogate pairs. Real foreground delivery requires separate native acceptance.",
+      "tests": [
+        "windows_int::insert_engine::tests::even_partial_does_not_replay",
+        "windows_int::insert_engine::tests::cancel_before_delivery_does_not_copy",
+        "windows_int::insert_engine::tests::cancel_after_possible_delivery_is_partial_copied",
+        "windows_int::text_injector::tests::unicode_chunks_keep_emoji_intact"
+      ]
+    },
+    {
+      "id": "compare",
+      "purpose": "Commit comparison audio atomically and keep stale, cancelled or delayed workers from replacing a new take.",
+      "tests": [
+        "app::compare::tests::compare_second_output_failure_rolls_back_only_new_files_and_keeps_previous_clip",
+        "app::compare::tests::stale_compare_processing_cannot_write_or_release_a_new_take",
+        "app::compare::tests::compare_timeout_keeps_busy_until_late_native_capture_and_discards_its_audio",
+        "app::compare::tests::cancelled_run_keeps_lease_until_old_worker_finishes",
+        "app::compare::tests::compare_commit_rejects_shutdown_and_released_recording_before_any_write"
+      ]
+    },
+    {
+      "id": "network",
+      "purpose": "Retry transient provider failures and cancel an in-flight HTTP request using the real request pipeline and a local server.",
+      "tests": [
+        "transcription::openrouter::tests::retries_503_then_success",
+        "transcription::openrouter::tests::cancel_aborts_in_flight_http"
+      ]
+    }
+  ]
+}

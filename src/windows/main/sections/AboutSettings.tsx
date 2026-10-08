@@ -85,11 +85,7 @@ export function AboutSettings({ copy }: { copy: Messages }) {
     <div>
       <PageHeader icon={SECTION_ICONS.about} title={sectionLabel(copy, "about")} />
       <div className="mb-8 flex items-center gap-4">
-        <img
-          src="/favicon.png"
-          alt=""
-          className="h-16 w-16 rounded-2xl outline outline-1 -outline-offset-1 outline-black/10 dark:outline-white/10"
-        />
+        <img src="/favicon.png" alt="" className="size-20 shrink-0 object-contain drop-shadow-md" />
         <div className="min-w-0">
           <p className="text-lg font-semibold text-balance">{appDisplayName(copy)}</p>
           <p className="text-sm text-pretty text-muted-foreground">{copy.aboutTagline}</p>

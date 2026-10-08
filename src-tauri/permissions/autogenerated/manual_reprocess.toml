@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-manual-reprocess"
+description = "Enables the manual_reprocess command without any pre-configured scope."
+commands.allow = ["manual_reprocess"]
+
+[[permission]]
+identifier = "deny-manual-reprocess"
+description = "Denies the manual_reprocess command without any pre-configured scope."
+commands.deny = ["manual_reprocess"]

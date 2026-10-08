@@ -4,6 +4,7 @@ export const APP_NAVIGATE = "app://navigate";
 
 const SECTIONS: Section[] = [
   "history",
+  "statistics",
   "compare",
   "general",
   "audio",

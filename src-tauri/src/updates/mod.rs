@@ -8,6 +8,7 @@ use tauri_plugin_updater::UpdaterExt;
 
 use crate::app::lifecycle::is_local_build;
 use crate::app::session::AppContext;
+use crate::runtime_diagnostics::{record, Event as DiagnosticEvent, ExitReason, UpdateOutcome};
 
 use policy::{install_allowed, is_newer_stable, restart_after_install_allowed};
 
@@ -71,7 +72,10 @@ pub async fn check_updates(app: &AppHandle, force: bool) -> UpdateCode {
 pub async fn install_available_update(app: &AppHandle) -> UpdateCode {
     let outcome = run_update(app, true, true).await;
     if outcome == UpdateCode::Installed {
-        app.restart();
+        record(DiagnosticEvent::ExitIntent {
+            reason: ExitReason::UpdateRestart,
+        });
+        crate::app::shutdown::request(app, crate::app::shutdown::Action::Restart);
     }
     outcome
 }
@@ -83,7 +87,10 @@ pub async fn check_and_maybe_install(app: &AppHandle, force: bool) -> UpdateCode
 async fn install_available_update_if_enabled(app: &AppHandle, force: bool) -> UpdateCode {
     let outcome = run_update(app, force, true).await;
     if outcome == UpdateCode::Installed {
-        app.restart();
+        record(DiagnosticEvent::ExitIntent {
+            reason: ExitReason::UpdateRestart,
+        });
+        crate::app::shutdown::request(app, crate::app::shutdown::Action::Restart);
     }
     outcome
 }
@@ -96,7 +103,18 @@ async fn run_update(app: &AppHandle, force: bool, install: bool) -> UpdateCode {
     }
     *gate = true;
     drop(gate);
+    record(DiagnosticEvent::UpdateCheckStarted);
     let outcome = run_check(app, force, install).await;
+    record(DiagnosticEvent::UpdateCheckFinished {
+        outcome: match outcome {
+            UpdateCode::None => UpdateOutcome::None,
+            UpdateCode::Available => UpdateOutcome::Available,
+            UpdateCode::Installed => UpdateOutcome::Installed,
+            UpdateCode::Busy => UpdateOutcome::Busy,
+            UpdateCode::Deferred => UpdateOutcome::Deferred,
+            UpdateCode::Failed => UpdateOutcome::Failed,
+        },
+    });
     *ctx.update_gate.lock().await = false;
     outcome
 }
@@ -151,12 +169,20 @@ async fn try_check(app: &AppHandle, install: bool) -> Result<UpdateCode, String>
                 return Ok(UpdateCode::Available);
             }
             let ctx = app.state::<Arc<AppContext>>();
-            if crate::app::operations::system_busy(&ctx) {
+            record(DiagnosticEvent::UpdateDownloadStarted);
+            let bytes = update
+                .download(|_, _| {}, || {})
+                .await
+                .map_err(|err| err.to_string())?;
+            record(DiagnosticEvent::UpdateDownloadCompleted);
+            if !reserve_update_install(&ctx) {
                 return Ok(UpdateCode::Deferred);
             }
-            ctx.update_installing
-                .store(true, std::sync::atomic::Ordering::SeqCst);
-            let result = update.download_and_install(|_, _| {}, || {}).await;
+            record(DiagnosticEvent::UpdateInstallStarted);
+            let result = update.install(bytes);
+            record(DiagnosticEvent::UpdateInstallReturned {
+                succeeded: result.is_ok(),
+            });
             ctx.update_installing
                 .store(false, std::sync::atomic::Ordering::SeqCst);
             match result {
@@ -177,6 +203,16 @@ async fn try_check(app: &AppHandle, install: bool) -> Result<UpdateCode, String>
     }
 }
 
+fn reserve_update_install(ctx: &AppContext) -> bool {
+    let _admission = crate::app::operations::lock_admission(ctx);
+    if crate::app::operations::system_busy(ctx) {
+        return false;
+    }
+    ctx.update_installing
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    true
+}
+
 fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, String> {
     let ua = format!(
         "Voxely/{} (+https://github.com/AryaPaw/voxely)",
@@ -184,6 +220,13 @@ fn build_updater(app: &AppHandle) -> Result<tauri_plugin_updater::Updater, Strin
     );
     app.updater_builder()
         .timeout(Duration::from_secs(20))
+        .on_before_exit(|| {
+            // The Windows installer exits inside the plugin without the Tauri event loop.
+            // This hook precedes installer launch, so it is intent, not exit completion.
+            record(DiagnosticEvent::ExitIntent {
+                reason: ExitReason::UpdateInstaller,
+            });
+        })
         .header("User-Agent", ua)
         .map_err(|err| err.to_string())?
         .build()
@@ -227,6 +270,23 @@ pub fn spawn_background_loop(app: AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_reservation_refuses_active_audio_and_blocks_new_reservations() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        ctx.filter_recording
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(!reserve_update_install(&ctx));
+        assert!(!ctx
+            .update_installing
+            .load(std::sync::atomic::Ordering::SeqCst));
+        ctx.filter_recording
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(reserve_update_install(&ctx));
+        assert!(crate::app::operations::system_busy(&ctx));
+        assert!(!reserve_update_install(&ctx));
+    }
 
     #[test]
     fn local_debug_does_not_poll_updates() {

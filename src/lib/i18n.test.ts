@@ -4,6 +4,7 @@ import {
   localizedError,
   factoryPresetLabel,
   messagesFor,
+  messagesForUiLanguage,
   resolveUiLocale,
   statusToast,
   updateToast,
@@ -32,6 +33,12 @@ describe("messagesFor", () => {
     expect(messagesFor("en").navAbout).toBe(messagesFor("en").aboutTitle);
     expect(messagesFor("ru").historyTitle).toBe(messagesFor("ru").navHistory);
     expect(messagesFor("en").historyTitle).toBe(messagesFor("en").navHistory);
+  });
+
+  it("formats incomplete API cost without Russian count inflection", () => {
+    expect(messagesFor("ru").statisticsIncomplete.replace("{count}", "1")).toBe(
+      "API-попытки без подтвержденной стоимости: 1. Итоговая сумма неполная.",
+    );
   });
 
   it("keeps insert copy free of SendInput", () => {
@@ -87,6 +94,7 @@ describe("messagesFor", () => {
       "OpenRouterServerError",
       "ResponseMalformed",
       "RecordingTooLarge",
+      "RecordingTruncated",
       "RetryDeadlineExceeded",
       "TextInsertionFailed",
       "Cancelled",
@@ -100,6 +108,22 @@ describe("messagesFor", () => {
       expect(localizedError(code, messagesFor("en")).length).toBeGreaterThan(0);
       expect(localizedError(code, messagesFor("ru")).length).toBeGreaterThan(0);
     }
+    expect(localizedError("RecordingTooLarge", messagesFor("en"))).toBe(
+      "The audio file exceeds the upload size limit.",
+    );
+    expect(localizedError("RecordingTooLarge", messagesFor("en"), "Recording truncated")).toBe(
+      "Recording was truncated after reaching the audio size or buffer limit.",
+    );
+    expect(
+      localizedError(
+        "RecordingTooLarge",
+        messagesFor("en"),
+        "Recovered capture reached the maximum recording size",
+      ),
+    ).toBe("Recording was truncated after reaching the audio size or buffer limit.");
+    expect(localizedError("RecordingTruncated", messagesFor("ru"))).toBe(
+      "Запись обрезана: достигнут лимит размера аудио или буфера.",
+    );
     expect(updateToast("none", messagesFor("en"))).toBe("No updates");
     expect(updateToast("available", messagesFor("en"))).toBe("An update is available");
     expect(updateToast("available", messagesFor("ru"))).toBe("Доступно обновление");
@@ -124,5 +148,16 @@ describe("messagesFor", () => {
     expect(statusToast("success", messagesFor("ru"), messagesFor("ru").resetDone)).toBe(
       "Успех: Настройки сброшены",
     );
+  });
+});
+
+describe("messagesForUiLanguage", () => {
+  it("uses the effective system locale for automatic language and includes compare copy", () => {
+    const ru = messagesForUiLanguage("auto", "ru-RU");
+    const en = messagesForUiLanguage("auto", "en-US");
+    expect(ru.compareRunning).toBe("Выполняется");
+    expect(ru.compareRequestCount).toContain("{count}");
+    expect(en.compareRunning).toBe("Running");
+    expect(en.compareUnknownCost).toBe("Cost unknown");
   });
 });

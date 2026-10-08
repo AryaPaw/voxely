@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-acknowledge-first-run-disclosure"
+description = "Enables the acknowledge_first_run_disclosure command without any pre-configured scope."
+commands.allow = ["acknowledge_first_run_disclosure"]
+
+[[permission]]
+identifier = "deny-acknowledge-first-run-disclosure"
+description = "Denies the acknowledge_first_run_disclosure command without any pre-configured scope."
+commands.deny = ["acknowledge_first_run_disclosure"]

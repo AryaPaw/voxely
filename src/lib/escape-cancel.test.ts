@@ -14,6 +14,22 @@ function key(partial: Partial<KeyboardEvent>): KeyboardEvent {
 }
 
 describe("escape-cancel", () => {
+  it("ignores repeated, handled and unrelated keys and detaches on cleanup", () => {
+    const cancel = vi.fn();
+    const stop = bindEscapeCancel(cancel);
+    try {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter" }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", repeat: true }));
+      const handled = new KeyboardEvent("keydown", { key: "Escape", cancelable: true });
+      handled.preventDefault();
+      window.dispatchEvent(handled);
+      expect(cancel).not.toHaveBeenCalled();
+    } finally {
+      stop();
+    }
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    expect(cancel).not.toHaveBeenCalled();
+  });
   it("accepts a fresh Escape", () => {
     expect(isEscapeCancelKey(key({}))).toBe(true);
     expect(isEscapeCancelKey(key({ key: "Enter" }))).toBe(false);

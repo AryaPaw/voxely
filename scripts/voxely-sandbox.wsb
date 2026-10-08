@@ -1,4 +1,5 @@
 <Configuration>
+  <ClipboardRedirection>Disable</ClipboardRedirection>
   <MappedFolders>
     <MappedFolder>
       <HostFolder>__HOST_BUNDLE__</HostFolder>

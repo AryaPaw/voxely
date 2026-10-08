@@ -3,6 +3,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::error::AppError;
+use crate::transcription::limits::MAX_MULTIPART_AUDIO_FILE_BYTES;
 use crate::transcription::retry::{
     classify_http, classify_io, classify_reqwest, error_category, error_chain, parse_retry_after,
     AttemptDecision, ClassifiedError, RetryClass, RetryPolicy, RetryScheduler,
@@ -167,7 +168,7 @@ pub struct SttModel {
     pub name: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SttProgress {
     Attempt(u32),
     Waiting {
@@ -180,7 +181,28 @@ pub enum SttProgress {
         http_status: Option<u16>,
         latency_ms: u128,
         category: Option<String>,
+        cost_usd: Option<f64>,
     },
+}
+
+fn successful_http_attempt_progress(
+    attempt: u32,
+    latency_ms: u128,
+    cost_usd: Option<f64>,
+    cancelled_after_response: bool,
+) -> SttProgress {
+    SttProgress::Finished {
+        attempt,
+        outcome: if cancelled_after_response {
+            "cancelled"
+        } else {
+            "success"
+        },
+        http_status: Some(200),
+        latency_ms,
+        category: cancelled_after_response.then(|| "cancelled".into()),
+        cost_usd,
+    }
 }
 
 pub async fn transcribe_file(
@@ -225,7 +247,7 @@ pub async fn transcribe_file_with_progress(
         return Err(AppError::StorageFailed("processed audio missing".into()));
     }
     let meta = std::fs::metadata(path).map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    if meta.len() > 25 * 1024 * 1024 {
+    if meta.len() > MAX_MULTIPART_AUDIO_FILE_BYTES {
         return Err(AppError::RecordingTooLarge);
     }
     let mut scheduler = RetryScheduler::new(policy.clone(), Instant::now());
@@ -272,30 +294,25 @@ pub async fn transcribe_file_with_progress(
                             http_status: None,
                             latency_ms: started.elapsed().as_millis(),
                             category: Some("cancelled".into()),
+                            cost_usd: None,
                         });
                         return Err(AppError::Cancelled);
                     }
                     Some(Ok(mut success)) => {
-                        if *cancel.borrow() {
-                            on_progress(SttProgress::Finished {
-                                attempt,
-                                outcome: "cancelled",
-                                http_status: None,
-                                latency_ms: started.elapsed().as_millis(),
-                                category: Some("cancelled".into()),
-                            });
+                        let cancelled_after_response = *cancel.borrow();
+                        let latency_ms = started.elapsed().as_millis();
+                        success.attempt = attempt;
+                        success.latency_ms = latency_ms;
+                        success.model = model.to_string();
+                        on_progress(successful_http_attempt_progress(
+                            attempt,
+                            latency_ms,
+                            success.cost,
+                            cancelled_after_response,
+                        ));
+                        if cancelled_after_response {
                             return Err(AppError::Cancelled);
                         }
-                        success.attempt = attempt;
-                        success.latency_ms = started.elapsed().as_millis();
-                        success.model = model.to_string();
-                        on_progress(SttProgress::Finished {
-                            attempt,
-                            outcome: "success",
-                            http_status: Some(200),
-                            latency_ms: success.latency_ms,
-                            category: None,
-                        });
                         return Ok(success);
                     }
                     Some(Err(classified)) => {
@@ -316,6 +333,7 @@ pub async fn transcribe_file_with_progress(
                                     http_status: classified.http_status,
                                     latency_ms: started.elapsed().as_millis(),
                                     category: Some(error_category(&classified.error).into()),
+                                    cost_usd: classified.cost_usd,
                                 });
                                 return Err(err);
                             }
@@ -329,6 +347,7 @@ pub async fn transcribe_file_with_progress(
                                     http_status: classified.http_status,
                                     latency_ms: started.elapsed().as_millis(),
                                     category: Some(error_category(&classified.error).into()),
+                                    cost_usd: classified.cost_usd,
                                 });
                                 tracing::warn!(
                                     attempt,
@@ -449,6 +468,7 @@ async fn one_attempt(
         error: AppError::ResponseMalformed,
         http_status: Some(status),
         retry_after: None,
+        cost_usd: None,
     })?;
     let text = parsed
         .get("text")
@@ -458,13 +478,15 @@ async fn one_attempt(
             error: AppError::ResponseMalformed,
             http_status: Some(status),
             retry_after: None,
+            cost_usd: None,
         })?
         .to_string();
     let usage = parsed.get("usage").cloned();
     let cost = usage
         .as_ref()
         .and_then(|u| u.get("cost"))
-        .and_then(|v| v.as_f64());
+        .and_then(|v| v.as_f64())
+        .filter(|cost| cost.is_finite() && *cost >= 0.0);
     Ok(TranscriptionSuccess {
         text,
         usage_json: usage.map(|u| u.to_string()),
@@ -516,6 +538,17 @@ pub async fn list_transcription_models(
     Ok(models)
 }
 
+pub fn ensure_transcription_model_available(
+    selected_model: &str,
+    models: &[SttModel],
+) -> Result<(), AppError> {
+    if models.iter().any(|model| model.id == selected_model) {
+        Ok(())
+    } else {
+        Err(AppError::InvalidModel(selected_model.to_string()))
+    }
+}
+
 pub fn default_base_url() -> &'static str {
     DEFAULT_BASE
 }
@@ -530,6 +563,34 @@ mod tests {
         let path = dir.join("a.wav");
         crate::audio::capture::write_pcm16_wav(&path, 48_000, &[0.1; 4800]).unwrap();
         path
+    }
+
+    #[test]
+    fn selected_model_must_be_in_transcription_catalog() {
+        let models = vec![SttModel {
+            id: "openai/gpt-transcribe".into(),
+            name: "GPT Transcribe".into(),
+        }];
+        assert!(ensure_transcription_model_available("openai/gpt-transcribe", &models).is_ok());
+        assert!(matches!(
+            ensure_transcription_model_available("custom/unavailable", &models),
+            Err(AppError::InvalidModel(model)) if model == "custom/unavailable"
+        ));
+    }
+
+    #[test]
+    fn cancelled_success_response_keeps_provider_cost_and_http_status() {
+        assert_eq!(
+            successful_http_attempt_progress(2, 125, Some(0.031), true),
+            SttProgress::Finished {
+                attempt: 2,
+                outcome: "cancelled",
+                http_status: Some(200),
+                latency_ms: 125,
+                category: Some("cancelled".into()),
+                cost_usd: Some(0.031),
+            }
+        );
     }
 
     #[tokio::test]

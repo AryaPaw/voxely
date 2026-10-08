@@ -16,13 +16,13 @@ function draftNumber(value: number): string {
   return String(value);
 }
 
-function parseDraft(raw: string, fallback: number): number | null {
+function parseDraft(raw: string): number | null {
   const trimmed = raw.trim();
   if (trimmed === "") {
     return null;
   }
   const next = Number(trimmed);
-  return Number.isFinite(next) ? next : fallback;
+  return Number.isSafeInteger(next) ? next : null;
 }
 
 type RetryNumberField =
@@ -38,12 +38,30 @@ function commitRetry(
   raw: string,
   settings: AppSettings,
   onChange: (patch: Partial<AppSettings>) => void,
-) {
-  const parsed = parseDraft(raw, settings.retry[field]);
-  if (parsed == null) {
-    return;
+): boolean {
+  const parsed = parseDraft(raw);
+  if (parsed == null || !isValidRetryValue(field, parsed, settings)) {
+    return false;
   }
-  onChange({ retry: { ...settings.retry, [field]: parsed } });
+  if (parsed !== settings.retry[field]) {
+    onChange({ retry: { ...settings.retry, [field]: parsed } });
+  }
+  return true;
+}
+
+function isValidRetryValue(field: RetryNumberField, value: number, settings: AppSettings): boolean {
+  switch (field) {
+    case "additionalRetries":
+      return value >= 0 && value <= 5;
+    case "connectTimeoutMs":
+      return value >= 8_000;
+    case "requestTimeoutMs":
+      return value >= 5_000 && value <= settings.retry.totalOperationTimeoutMs;
+    case "totalOperationTimeoutMs":
+      return value >= 60_000 && value >= settings.retry.requestTimeoutMs;
+    default:
+      return value >= 0;
+  }
 }
 
 export function TranscriptionSettings({
@@ -62,6 +80,7 @@ export function TranscriptionSettings({
   const [keyDraft, setKeyDraft] = useState("");
   const [catalog, setCatalog] = useState<Array<{ id: string; name: string }>>([]);
   const [catalogError, setCatalogError] = useState(false);
+  const [catalogRevision, setCatalogRevision] = useState(0);
   const [modelDraft, setModelDraft] = useState(settings.model);
   const [extraDraft, setExtraDraft] = useState(draftNumber(settings.retry.additionalRetries));
   const [connectDraft, setConnectDraft] = useState(draftNumber(settings.retry.connectTimeoutMs));
@@ -77,7 +96,33 @@ export function TranscriptionSettings({
   }, [settings.model]);
 
   useEffect(() => {
+    setExtraDraft(draftNumber(settings.retry.additionalRetries));
+  }, [settings.retry.additionalRetries]);
+
+  useEffect(() => {
+    setConnectDraft(draftNumber(settings.retry.connectTimeoutMs));
+  }, [settings.retry.connectTimeoutMs]);
+
+  useEffect(() => {
+    setRequestDraft(draftNumber(settings.retry.requestTimeoutMs));
+  }, [settings.retry.requestTimeoutMs]);
+
+  useEffect(() => {
+    setInitialDraft(draftNumber(settings.retry.initialRetryDelayMs));
+  }, [settings.retry.initialRetryDelayMs]);
+
+  useEffect(() => {
+    setMaxDraft(draftNumber(settings.retry.maxRetryDelayMs));
+  }, [settings.retry.maxRetryDelayMs]);
+
+  useEffect(() => {
+    setTotalDraft(draftNumber(settings.retry.totalOperationTimeoutMs));
+  }, [settings.retry.totalOperationTimeoutMs]);
+
+  useEffect(() => {
     let cancelled = false;
+    setCatalog([]);
+    setCatalogError(false);
     void api
       .models()
       .then((items) => {
@@ -94,7 +139,7 @@ export function TranscriptionSettings({
     return () => {
       cancelled = true;
     };
-  }, [keyConfigured]);
+  }, [keyConfigured, catalogRevision]);
 
   return (
     <div>
@@ -117,6 +162,7 @@ export function TranscriptionSettings({
             try {
               await api.storeKey(keyDraft);
               onConfigured(true);
+              setCatalogRevision((revision) => revision + 1);
               setKeyDraft("");
               toast.success(copy.keySavedToast);
             } catch (error) {
@@ -130,8 +176,8 @@ export function TranscriptionSettings({
           variant="outline"
           onClick={async () => {
             try {
-              const count = await api.testConnection();
-              toast.success(copy.modelsFound.replace("{n}", String(count)));
+              const model = await api.testConnection();
+              toast.success(copy.modelAvailable.replace("{model}", model));
             } catch (error) {
               reportError(formatInvokeError(error, copy));
             }
@@ -205,70 +251,93 @@ export function TranscriptionSettings({
       />
       <SettingsField label={copy.extraAttempts}>
         <Input
+          type="number"
           inputMode="numeric"
+          min={0}
+          max={5}
+          step={1}
           value={extraDraft}
           onChange={(event) => setExtraDraft(event.target.value)}
-          onBlur={() => commitRetry("additionalRetries", extraDraft, settings, onChange)}
+          onBlur={() => {
+            if (!commitRetry("additionalRetries", extraDraft, settings, onChange)) {
+              setExtraDraft(draftNumber(settings.retry.additionalRetries));
+            }
+          }}
         />
       </SettingsField>
       <SettingsField label={copy.connectTimeout}>
         <Input
+          type="number"
           inputMode="numeric"
+          min={8_000}
+          step={1}
           value={connectDraft}
           onChange={(event) => setConnectDraft(event.target.value)}
           onBlur={() => {
-            const parsed = parseDraft(connectDraft, settings.retry.connectTimeoutMs);
-            if (parsed == null) {
+            if (!commitRetry("connectTimeoutMs", connectDraft, settings, onChange)) {
               setConnectDraft(draftNumber(settings.retry.connectTimeoutMs));
-              return;
             }
-            commitRetry("connectTimeoutMs", connectDraft, settings, onChange);
           }}
         />
       </SettingsField>
       <SettingsField label={copy.requestTimeout}>
         <Input
+          type="number"
           inputMode="numeric"
+          min={5_000}
+          max={settings.retry.totalOperationTimeoutMs}
+          step={1}
           value={requestDraft}
           onChange={(event) => setRequestDraft(event.target.value)}
           onBlur={() => {
-            const parsed = parseDraft(requestDraft, settings.retry.requestTimeoutMs);
-            if (parsed == null) {
+            if (!commitRetry("requestTimeoutMs", requestDraft, settings, onChange)) {
               setRequestDraft(draftNumber(settings.retry.requestTimeoutMs));
-              return;
             }
-            commitRetry("requestTimeoutMs", requestDraft, settings, onChange);
           }}
         />
       </SettingsField>
       <SettingsField label={copy.initialDelay}>
         <Input
+          type="number"
           inputMode="numeric"
+          min={0}
+          step={1}
           value={initialDraft}
           onChange={(event) => setInitialDraft(event.target.value)}
-          onBlur={() => commitRetry("initialRetryDelayMs", initialDraft, settings, onChange)}
+          onBlur={() => {
+            if (!commitRetry("initialRetryDelayMs", initialDraft, settings, onChange)) {
+              setInitialDraft(draftNumber(settings.retry.initialRetryDelayMs));
+            }
+          }}
         />
       </SettingsField>
       <SettingsField label={copy.maxDelay}>
         <Input
+          type="number"
           inputMode="numeric"
+          min={0}
+          step={1}
           value={maxDraft}
           onChange={(event) => setMaxDraft(event.target.value)}
-          onBlur={() => commitRetry("maxRetryDelayMs", maxDraft, settings, onChange)}
+          onBlur={() => {
+            if (!commitRetry("maxRetryDelayMs", maxDraft, settings, onChange)) {
+              setMaxDraft(draftNumber(settings.retry.maxRetryDelayMs));
+            }
+          }}
         />
       </SettingsField>
       <SettingsField label={copy.totalLimit}>
         <Input
+          type="number"
           inputMode="numeric"
+          min={Math.max(60_000, settings.retry.requestTimeoutMs)}
+          step={1}
           value={totalDraft}
           onChange={(event) => setTotalDraft(event.target.value)}
           onBlur={() => {
-            const parsed = parseDraft(totalDraft, settings.retry.totalOperationTimeoutMs);
-            if (parsed == null) {
+            if (!commitRetry("totalOperationTimeoutMs", totalDraft, settings, onChange)) {
               setTotalDraft(draftNumber(settings.retry.totalOperationTimeoutMs));
-              return;
             }
-            commitRetry("totalOperationTimeoutMs", totalDraft, settings, onChange);
           }}
         />
       </SettingsField>

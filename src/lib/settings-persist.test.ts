@@ -2,6 +2,16 @@ import { describe, expect, it } from "vitest";
 import { acceptSavedSettings, nextWriteSeq, shouldKeepOptimistic } from "./settings-persist";
 
 describe("settings persist protocol", () => {
+  it("accepts legacy snapshots without sequence metadata and preserves newer drafts", () => {
+    const legacy: { writeSeq?: number; model: string } = { model: "legacy" };
+    expect(acceptSavedSettings(null, legacy)).toBe(legacy);
+    expect(acceptSavedSettings(legacy, { model: "saved" })).toEqual({ model: "saved" });
+    expect(acceptSavedSettings({ writeSeq: 2, model: "new" }, legacy)).toEqual({
+      writeSeq: 2,
+      model: "new",
+    });
+    expect(shouldKeepOptimistic(legacy, 0)).toBe(false);
+  });
   it("ignores an older saved snapshot after a newer optimistic write", () => {
     const first = { writeSeq: 1, model: "a" };
     const second = { writeSeq: 2, model: "b" };

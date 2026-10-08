@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-apply-retention-settings"
+description = "Enables the apply_retention_settings command without any pre-configured scope."
+commands.allow = ["apply_retention_settings"]
+
+[[permission]]
+identifier = "deny-apply-retention-settings"
+description = "Denies the apply_retention_settings command without any pre-configured scope."
+commands.deny = ["apply_retention_settings"]

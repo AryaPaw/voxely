@@ -1,0 +1,15 @@
+---
+description: "Voxely testing acceptance: critical regressions, full suites and honest native evidence"
+alwaysApply: true
+---
+
+# voxely-testing
+
+This project policy takes precedence over generic Rust/common percentage targets. The user explicitly approved replacing the global Rust 80% gate on 2026-10-08.
+
+- Run the complete Rust suite. `scripts/check-critical-tests.ps1` also requires every regression named in `scripts/critical-tests.json` to execute exactly once and pass. Missing, ignored, duplicate or failed critical tests and Cargo errors block CI.
+- Keep the critical registry aligned with the behavior it protects. Removing or replacing a case requires a concrete explanation and independent review. A registry entry is not proof that the test still exercises its stated scenario.
+- Keep measuring all Rust library files with `scripts/check-rust-coverage.ps1`. The global percentage is diagnostic, not a publication threshold. Compiler, instrumented-test, tool and report failures remain failures. Don't exclude production surfaces or manufacture tests to improve the number.
+- Inspect coverage trends and uncovered changed branches during review. Prioritize data loss, capture/cancel/retry races, persistence, retention, provider failures, shutdown and partial delivery.
+- Frontend global 85% lines/branches and existing per-file thresholds remain mandatory.
+- Automated checks do not prove complete native microphone, hotkey, HUD or insertion acceptance. Follow `voxely-runtime-acceptance.mdc` and report the actual evidence and limitations.
