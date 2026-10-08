@@ -4,6 +4,8 @@
 
 Frontend coverage includes all product `src` modules, including StatisticsPane, OverlayApp and shadcn primitives. Global lines/branches floors are 85%; StatisticsPane and OverlayApp also have per-file floors.
 
+`rust-toolchain.toml` is the canonical compiler/tooling version for local commands, verification CI and release packaging. Install it with `rustup toolchain install --no-self-update`; don't change the global default. Upgrade this pin deliberately and run the complete gate before publication. The independent MSRV check still reads `Cargo.toml` and uses an explicit `cargo +<MSRV>` so the repository pin cannot replace the minimum-version test.
+
 ## Acceptance policy
 
 The user approved replacing the global Rust 80% floor on 2026-10-08. A global percentage mixes portable logic, native orchestration and test code; it doesn't establish that cancellation or audio recovery works.
