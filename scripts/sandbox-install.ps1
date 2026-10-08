@@ -6,6 +6,7 @@ Set-StrictMode -Version Latest
 function Assert-Request($Request) {
   if ($Request.schema -ne 1 -or $Request.runId -notmatch '^[0-9a-f]{32}$' -or $Request.version -notmatch '^\d+\.\d+\.\d+$' -or $Request.sha256 -notmatch '^[0-9A-Fa-f]{64}$') { throw 'Invalid acceptance request identity' }
   if ([IO.Path]::GetFileName($Request.installer) -cne $Request.installer -or $Request.installer -notmatch '^[^/\\:]+\.exe$') { throw 'Installer must be an exact executable filename' }
+  if ($Request.PSObject.Properties['prepareRuntime'] -and $Request.prepareRuntime -isnot [bool]) { throw 'prepareRuntime must be a boolean' }
 }
 
 function Assert-FileVersion([string]$Actual, [string]$Expected) {
@@ -34,7 +35,10 @@ if ($SelfTest) {
     try { Assert-Request $bad } catch { $rejected++ }
   }
   try { Assert-FileVersion '0.2.14.0' '0.3.0' } catch { $rejected++ }
-  if ($rejected -ne 5) { throw 'Negative fixture accepted' }
+  $bad = $fixture | ConvertTo-Json | ConvertFrom-Json
+  $bad | Add-Member prepareRuntime 'true'
+  try { Assert-Request $bad } catch { $rejected++ }
+  if ($rejected -ne 6) { throw 'Negative fixture accepted' }
   Write-Output 'PASS: request/version helper fixtures only; Windows Sandbox acceptance NOT RUN'
   return
 }
@@ -44,7 +48,7 @@ if ($env:USERNAME -cne 'WDAGUtilityAccount' -or [Security.Principal.WindowsIdent
 $bundle = 'C:\Users\WDAGUtilityAccount\Desktop\VoxelyBundle'
 $resultPath = Join-Path $bundle 'result.json'
 $log = Join-Path $bundle 'sandbox-run.log'
-$result = [ordered]@{ schema = 1; runId = $null; version = $null; installer = $null; sha256 = $null; status = 'FAIL'; stage = 'request'; error = $null; installedPath = $null; processId = $null; visibleHwnd = $null; runtimeRunId = $null; windowTitle = $null; startedAt = (Get-Date).ToUniversalTime().ToString('o'); finishedAt = $null }
+$result = [ordered]@{ schema = 1; runId = $null; version = $null; installer = $null; sha256 = $null; status = 'FAIL'; stage = 'request'; error = $null; installedPath = $null; processId = $null; visibleHwnd = $null; runtimeRunId = $null; windowTitle = $null; runtimePreparation = $null; startedAt = (Get-Date).ToUniversalTime().ToString('o'); finishedAt = $null }
 try {
   $request = Get-Content -LiteralPath (Join-Path $bundle 'request.json') -Raw | ConvertFrom-Json
   Assert-Request $request
@@ -52,6 +56,10 @@ try {
   $setup = Join-Path $bundle $request.installer
   if (-not (Test-Path -LiteralPath $setup -PathType Leaf)) { throw 'Requested installer is missing' }
   if ((Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash -cne $request.sha256.ToUpperInvariant()) { throw 'Installer SHA256 mismatch' }
+  if ($request.PSObject.Properties['prepareRuntime'] -and $request.prepareRuntime) {
+    $result.stage = 'runtime-prerequisite'
+    $result.runtimePreparation = & (Join-Path $PSScriptRoot 'sandbox-prepare-webview.ps1')
+  }
   $result.stage = 'install'
   Invoke-BoundedProcess $setup 120
   $candidates = @((Join-Path $env:LOCALAPPDATA 'Voxely\voxely.exe'), (Join-Path $env:LOCALAPPDATA 'Programs\Voxely\voxely.exe'))

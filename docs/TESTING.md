@@ -40,6 +40,16 @@ Layers:
 
 Rust critical guard self-tests: `pwsh -File scripts/check-critical-tests.ps1 -SelfTest`. These exercise the runner's failure handling; they do not replace the real Rust suite.
 
+### Sandbox WebView2 prerequisite
+
+Some Sandbox images contain signed WebView2 files but stale EdgeUpdate registration. The observed image had runtime `154.0.4258.62`, while `ClientState\EBWebView` pointed at the missing `154.0.4258.53` directory. Updating only `Clients\pv` didn't fix detection. Native `GetAvailableCoreWebView2BrowserVersionString` changed from `80070002` to success after repairing the actual registered path.
+
+For this environment, explicitly request prerequisite preparation: `pwsh -NoProfile -File scripts/run-windows-sandbox.ps1 -InstallerPath <NSIS.exe> -PrepareRuntime`.
+
+`sandbox-prepare-webview.ps1` runs only as the Sandbox account. It requires one installed runtime, matching file versions and valid Microsoft signatures on the executable and x64 WebView DLL. It updates only that runtime's `Clients\pv`, `ClientState\pv` and `ClientState\EBWebView`; it refuses ambiguous versions, foreign paths and replacement of an existing runtime directory. The guest result records the previous and resulting registration in `runtimePreparation`.
+
+The default runner doesn't repair the environment. A prepared-runtime PASS proves installation, the real main window, process-bound `ready`, and uninstall under that recorded prerequisite. It doesn't prove bootstrapper recovery on an image with missing or broken WebView2. Host installation and host registry changes aren't part of either mode.
+
 Rust coverage: `pwsh -File scripts/check-rust-coverage.ps1` (CI installs pinned `cargo-llvm-cov` 0.6.16). The script uses a unique `src-tauri/target/llvm-cov-*` directory and deletes it after saving the report, so instrumented objects do not land in `target/debug`. A missing tool fails locally too; the script also accepts the repository-local `.local/tools/bin/cargo-llvm-cov.exe` installation. `dsp::timing::tests::dictation_timing` stays ignored; `dictation_timing_helpers_run` is the cheap gate. `pwsh -File scripts/check-rust-coverage.ps1 -SelfTest` checks failure propagation and acceptance of valid diagnostic percentages.
 
 `src-tauri/target` is a cache, not the app. A debug profile with full symbols plus incremental plus mixed rustc versions grew past 70 GB here. Dev now uses `debug = "line-tables-only"` and `incremental = false`. To wipe caches: `pwsh -File scripts/clean-rust-artifacts.ps1` (or `-Full` for `cargo clean`). MSRV checks must use a separate `CARGO_TARGET_DIR` (for example `src-tauri/target/msrv-1.90`, matching `Cargo.toml`), never the daily-driver `debug` tree.

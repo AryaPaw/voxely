@@ -1,10 +1,13 @@
-param([string]$InstallerPath, [ValidateRange(1, 600)][int]$TimeoutSeconds = 300, [switch]$SelfTest)
+param([string]$InstallerPath, [ValidateRange(1, 600)][int]$TimeoutSeconds = 300, [switch]$PrepareRuntime, [switch]$SelfTest)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 function Assert-AcceptanceResult($Result, $Request) {
   if ($Result.schema -ne 1 -or $Result.runId -cne $Request.runId -or $Result.version -cne $Request.version -or $Result.installer -cne $Request.installer -or $Result.sha256 -cne $Request.sha256) { throw 'Sandbox result belongs to a different candidate or run' }
   if ($Result.status -cne 'PASS' -or $Result.stage -cne 'complete' -or $Result.error -or -not $Result.installedPath -or $Result.processId -le 0 -or $Result.visibleHwnd -le 0 -or $Result.windowTitle -cne 'Voxely' -or $Result.runtimeRunId -notmatch '^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$') { throw "Sandbox acceptance failed at $($Result.stage): $($Result.error)" }
+  $requestedPreparation = $Request.PSObject.Properties['prepareRuntime'] -and $Request.prepareRuntime
+  $hasPreparation = $Result.PSObject.Properties['runtimePreparation'] -and $null -ne $Result.runtimePreparation
+  if ([bool]$requestedPreparation -ne [bool]$hasPreparation) { throw 'Sandbox runtime prerequisite differs from the requested environment' }
 }
 
 if ($SelfTest) {
@@ -19,6 +22,12 @@ if ($SelfTest) {
     try { Assert-AcceptanceResult $bad $request } catch { $rejected++ }
   }
   if ($rejected -ne 11) { throw 'Negative result fixture accepted' }
+  $prepared = $fixture | ConvertTo-Json | ConvertFrom-Json
+  $prepared | Add-Member runtimePreparation ([pscustomobject]@{changed=$true})
+  try { Assert-AcceptanceResult $prepared $request; throw 'Unrequested runtime preparation accepted' } catch { if ($_.Exception.Message -cne 'Sandbox runtime prerequisite differs from the requested environment') { throw } }
+  $request | Add-Member prepareRuntime $true
+  try { Assert-AcceptanceResult $fixture $request; throw 'Missing runtime preparation accepted' } catch { if ($_.Exception.Message -cne 'Sandbox runtime prerequisite differs from the requested environment') { throw } }
+  Assert-AcceptanceResult $prepared $request
   Write-Output 'PASS: result helper fixtures only; Windows Sandbox acceptance NOT RUN'
   return
 }
@@ -38,7 +47,8 @@ New-Item -ItemType Directory -Path $mapped | Out-Null
 Copy-Item -LiteralPath $source.FullName -Destination (Join-Path $mapped $source.Name)
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'sandbox-install.ps1') -Destination (Join-Path $mapped 'sandbox-install.ps1')
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'installed-runtime.ps1') -Destination (Join-Path $mapped 'installed-runtime.ps1')
-$request = [ordered]@{ schema = 1; runId = $runId; version = $version; installer = $source.Name; sha256 = (Get-FileHash -LiteralPath (Join-Path $mapped $source.Name) -Algorithm SHA256).Hash }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'sandbox-prepare-webview.ps1') -Destination (Join-Path $mapped 'sandbox-prepare-webview.ps1')
+$request = [pscustomobject][ordered]@{ schema = 1; runId = $runId; version = $version; installer = $source.Name; sha256 = (Get-FileHash -LiteralPath (Join-Path $mapped $source.Name) -Algorithm SHA256).Hash; prepareRuntime = [bool]$PrepareRuntime }
 $request | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $mapped 'request.json') -Encoding UTF8
 $template = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'voxely-sandbox.wsb') -Raw
 $generated = Join-Path $run 'voxely-sandbox.wsb'
@@ -54,7 +64,7 @@ try {
       $result = Get-Content -LiteralPath $resultPath -Raw | ConvertFrom-Json
       Assert-AcceptanceResult $result $request
       $verdict.status = 'PASS'
-      Write-Output "PASS: Windows Sandbox install, exact version, visible window and uninstall; evidence: $resultPath"
+      Write-Output "PASS: Windows Sandbox install, exact version, visible window and uninstall; prepared runtime: $([bool]$PrepareRuntime); evidence: $resultPath"
       return
     }
     Start-Sleep -Milliseconds 500

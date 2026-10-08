@@ -1,6 +1,6 @@
 # Isolated diagnostics checks only: no Voxely launch, WER writes or user-data changes.
 $ErrorActionPreference = 'Stop'
-$scripts = @('windows-independent-process.ps1','start-local-app.ps1','stop-local-app.ps1','rebuild-local-app.ps1','start-exit-monitor.ps1','watch-local-app.ps1','configure-crash-dumps.ps1','collect-crash-diagnostics.ps1','installed-runtime.ps1','sandbox-install.ps1','run-windows-sandbox.ps1','ci-installer-smoke.ps1','check-diagnostics.ps1')
+$scripts = @('windows-independent-process.ps1','start-local-app.ps1','stop-local-app.ps1','rebuild-local-app.ps1','start-exit-monitor.ps1','watch-local-app.ps1','configure-crash-dumps.ps1','collect-crash-diagnostics.ps1','installed-runtime.ps1','sandbox-prepare-webview.ps1','sandbox-install.ps1','run-windows-sandbox.ps1','ci-installer-smoke.ps1','check-diagnostics.ps1')
 foreach ($name in $scripts) {
     $tokens = $null
     $parseErrors = $null
@@ -9,7 +9,7 @@ foreach ($name in $scripts) {
 }
 $shells = @([Diagnostics.Process]::GetCurrentProcess().MainModule.FileName, (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')) | Select-Object -Unique
 foreach ($runtimeShell in $shells) {
-    foreach ($installerScript in @('run-windows-sandbox.ps1', 'ci-installer-smoke.ps1')) {
+    foreach ($installerScript in @('run-windows-sandbox.ps1', 'ci-installer-smoke.ps1', 'sandbox-prepare-webview.ps1')) {
         & $runtimeShell -NoProfile -NonInteractive -File (Join-Path $PSScriptRoot $installerScript) -SelfTest
         if ($LASTEXITCODE -ne 0) { throw 'Installer acceptance helper selftest failed.' }
     }
