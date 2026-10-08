@@ -5,11 +5,13 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot 'installed-runtime.ps1')
 function Assert-InstalledRuntime($ActualVersion, $ExpectedVersion, $WindowHandle) {
   if ($ActualVersion -ne $ExpectedVersion) { throw "Installed version mismatch: $ActualVersion != $ExpectedVersion" }
   if ($WindowHandle -eq 0) { throw "Installed runtime did not show a window" }
 }
 if ($SelfTest) {
+  Test-VoxelyInstalledRuntimeHelpers
   Assert-InstalledRuntime '0.2.14' '0.2.14' 123
   foreach ($case in @(@('0.2.13', '0.2.14', 123), @('0.2.14', '0.2.14', 0))) {
     $rejected = $false
@@ -38,16 +40,12 @@ $installDir = Join-Path $env:LOCALAPPDATA "Voxely"
 $exe = Get-ChildItem $installDir -Recurse -Filter "voxely.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
 if (-not $exe) { throw "voxely.exe missing after install in $installDir" }
 $actualVersion = ([System.Diagnostics.FileVersionInfo]::GetVersionInfo($exe.FullName).ProductVersion -split '\+')[0]
-$runtime = Start-Process -FilePath $exe.FullName -PassThru -WindowStyle Hidden
+# The application window is the acceptance target on this disposable runner.
+$runtime = Start-Process -FilePath $exe.FullName -PassThru -WindowStyle Normal
 try {
-  $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-  do {
-    Start-Sleep -Milliseconds 200
-    $runtime.Refresh()
-    if ($runtime.HasExited) { throw "Installed app exited before UI: $($runtime.ExitCode)" }
-  } while ($runtime.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $deadline)
-  Assert-InstalledRuntime $actualVersion $Version $runtime.MainWindowHandle
-  Write-Host "PASS: installed $Version, PID $($runtime.Id), HWND $($runtime.MainWindowHandle)"
+  $ready = Wait-VoxelyInstalledRuntime $runtime $exe.FullName $Version (Join-Path $env:APPDATA 'Voxely') $TimeoutSeconds
+  Assert-InstalledRuntime $actualVersion $Version $ready.Handle
+  Write-Host "PASS: installed $Version, PID $($runtime.Id), main HWND $($ready.Handle), ready run $($ready.RunId)"
 } finally {
   if (-not $runtime.HasExited) {
     $null = $runtime.CloseMainWindow()

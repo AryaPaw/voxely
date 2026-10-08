@@ -1,6 +1,7 @@
 param([switch]$SelfTest)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot 'installed-runtime.ps1')
 
 function Assert-Request($Request) {
   if ($Request.schema -ne 1 -or $Request.runId -notmatch '^[0-9a-f]{32}$' -or $Request.version -notmatch '^\d+\.\d+\.\d+$' -or $Request.sha256 -notmatch '^[0-9A-Fa-f]{64}$') { throw 'Invalid acceptance request identity' }
@@ -23,6 +24,7 @@ function Invoke-BoundedProcess([string]$Path, [int]$TimeoutSeconds) {
 
 if ($SelfTest) {
   $fixture = [pscustomobject]@{ schema = 1; runId = ('a' * 32); version = '0.3.0'; sha256 = ('b' * 64); installer = 'Voxely_0.3.0_x64-setup.exe' }
+  Test-VoxelyInstalledRuntimeHelpers
   Assert-Request $fixture
   Assert-FileVersion '0.3.0.0' '0.3.0'
   $rejected = 0
@@ -42,7 +44,7 @@ if ($env:USERNAME -cne 'WDAGUtilityAccount' -or [Security.Principal.WindowsIdent
 $bundle = 'C:\Users\WDAGUtilityAccount\Desktop\VoxelyBundle'
 $resultPath = Join-Path $bundle 'result.json'
 $log = Join-Path $bundle 'sandbox-run.log'
-$result = [ordered]@{ schema = 1; runId = $null; version = $null; installer = $null; sha256 = $null; status = 'FAIL'; stage = 'request'; error = $null; installedPath = $null; processId = $null; visibleHwnd = $null; startedAt = (Get-Date).ToUniversalTime().ToString('o'); finishedAt = $null }
+$result = [ordered]@{ schema = 1; runId = $null; version = $null; installer = $null; sha256 = $null; status = 'FAIL'; stage = 'request'; error = $null; installedPath = $null; processId = $null; visibleHwnd = $null; runtimeRunId = $null; windowTitle = $null; startedAt = (Get-Date).ToUniversalTime().ToString('o'); finishedAt = $null }
 try {
   $request = Get-Content -LiteralPath (Join-Path $bundle 'request.json') -Raw | ConvertFrom-Json
   Assert-Request $request
@@ -59,20 +61,13 @@ try {
   $result.installedPath = $exe
   Assert-FileVersion ([Diagnostics.FileVersionInfo]::GetVersionInfo($exe).FileVersion) $request.version
   $result.stage = 'visible-window'
-  Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; public static class VoxelySandboxWindow { [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hwnd); }'
-  $app = Start-Process -FilePath $exe -PassThru -WindowStyle Hidden
+  # The application window is the acceptance target inside this disposable VM.
+  $app = Start-Process -FilePath $exe -PassThru -WindowStyle Normal
   $result.processId = $app.Id
-  $visible = $false
-  $deadline = [DateTime]::UtcNow.AddSeconds(40)
-  while ([DateTime]::UtcNow -lt $deadline) {
-    $app.Refresh()
-    if ($app.HasExited) { throw 'Installed Voxely exited before visible-window acceptance' }
-    if ($app.Path -ine $exe) { throw 'Launched process path differs from installed executable' }
-    $hwnd = $app.MainWindowHandle
-    if ($hwnd -ne [IntPtr]::Zero -and [VoxelySandboxWindow]::IsWindowVisible($hwnd)) { $visible = $true; $result.visibleHwnd = $hwnd.ToInt64(); break }
-    Start-Sleep -Milliseconds 200
-  }
-  if (-not $visible) { throw 'No visible Voxely window appeared before timeout' }
+  $runtime = Wait-VoxelyInstalledRuntime $app $exe $request.version (Join-Path $env:APPDATA 'Voxely')
+  $result.visibleHwnd = $runtime.Handle
+  $result.runtimeRunId = $runtime.RunId
+  $result.windowTitle = $runtime.Title
   $result.stage = 'uninstall'
   $uninstaller = Join-Path (Split-Path -Parent $exe) 'uninstall.exe'
   if (-not (Test-Path -LiteralPath $uninstaller -PathType Leaf)) { throw 'Uninstaller is missing' }
