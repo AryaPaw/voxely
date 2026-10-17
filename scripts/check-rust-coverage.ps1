@@ -100,6 +100,9 @@ $previousTarget = $env:CARGO_TARGET_DIR
 $previousIncremental = $env:CARGO_INCREMENTAL
 $targetRoot = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) 'target'))
 $covTarget = Join-Path $targetRoot ("llvm-cov-" + [guid]::NewGuid().ToString('N'))
+. (Join-Path $PSScriptRoot 'rust-build-cache.ps1')
+Invoke-VoxelyBuildCache -Action {
+param($coverageCache)
 $env:CARGO_TARGET_DIR = $covTarget
 $env:CARGO_INCREMENTAL = "0"
 try {
@@ -132,8 +135,6 @@ try {
 } finally {
     $env:CARGO_TARGET_DIR = $previousTarget
     $env:CARGO_INCREMENTAL = $previousIncremental
-    if (-not ([System.IO.Path]::GetFullPath($covTarget).StartsWith($targetRoot + [System.IO.Path]::DirectorySeparatorChar))) { throw 'Coverage cleanup escaped target directory' }
-    if (Test-Path -LiteralPath $covTarget) {
-        Remove-Item -LiteralPath $covTarget -Recurse -Force
-    }
+    Remove-VoxelyCacheDirectory -Cache $coverageCache -Path $covTarget
+}
 }

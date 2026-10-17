@@ -160,7 +160,9 @@ function main() {
       throw new Error(`${name} overrides the canonical compiler; unset it before verification`);
   }
   checkVersion("Rust", run("rustc", ["--version"]).trim().split(/\s+/)[1], expectedRust);
-  const required = pkg.scripts.verify.split(" && ").map((command: string) => {
+  if (pkg.scripts.verify !== "pwsh -NoProfile -File scripts/verify.ps1")
+    throw new Error("verify must use the managed cache lifecycle");
+  const required = pkg.scripts["verify:checks"].split(" && ").map((command: string) => {
     if (!/^bun run verify:[\w:-]+$/.test(command))
       throw new Error(`verify must use shared commands: ${command}`);
     const name = command.slice("bun run ".length);

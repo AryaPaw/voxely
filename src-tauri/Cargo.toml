@@ -86,6 +86,9 @@ strip = true
 debug = "line-tables-only"
 incremental = false
 
+[profile.dev.package."*"]
+debug = false
+
 [profile.dev.package.nnnoiseless]
 opt-level = 3
 

@@ -40,8 +40,8 @@ jobs:
         with:
           toolchain: ${{ steps.msrv.outputs.version }}
       - name: MSRV compile
-        working-directory: src-tauri
-        run: cargo +${{ steps.msrv.outputs.version }} build --locked --all-targets
+        shell: pwsh
+        run: ./scripts/check-msrv.ps1
       - name: Build date from CI
         shell: pwsh
         run: echo "VOXELY_BUILD_DATE=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))" >> $env:GITHUB_ENV
@@ -64,6 +64,10 @@ jobs:
         run: bun run verify:metadata
       - name: Tauri compile
         run: cargo build --locked --manifest-path src-tauri/Cargo.toml --release
+      - name: Maintain Cargo cache
+        if: always()
+        shell: pwsh
+        run: ./scripts/clean-rust-artifacts.ps1
       - name: Upload coverage
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

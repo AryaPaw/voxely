@@ -76,7 +76,16 @@ describe("verification preflight", () => {
     mkdirSync(fixture);
     const command = (args: string[], cwd = fixture, inherited: NodeJS.ProcessEnv = {}) => {
       const isolatedEnv = Object.fromEntries(
-        Object.entries(process.env).filter(([key]) => !key.toUpperCase().startsWith("GIT_")),
+        Object.entries(process.env).filter(
+          ([key]) =>
+            !key.toUpperCase().startsWith("GIT_") &&
+            ![
+              "CARGO_TARGET_DIR",
+              "CARGO_BUILD_TARGET_DIR",
+              "CARGO_BUILD_BUILD_DIR",
+              "VOXELY_BUILD_CACHE_SESSION",
+            ].includes(key.toUpperCase()),
+        ),
       );
       const result = spawnSync(args[0], args.slice(1), {
         cwd,
@@ -114,11 +123,14 @@ describe("verification preflight", () => {
       for (const path of [
         "scripts/check-preflight.ts",
         "scripts/check-rust-coverage.ps1",
+        "scripts/rust-build-cache.ps1",
+        "scripts/verify.ps1",
         ".githooks/pre-push",
         ".github/workflows/verify.yml",
         ".github/workflows/release.yml",
         "rust-toolchain.toml",
         ".gitattributes",
+        ".gitignore",
       ]) {
         mkdirSync(dirname(join(fixture, path)), { recursive: true });
         cpSync(join(source, path), join(fixture, path));
@@ -196,7 +208,7 @@ describe("verification preflight", () => {
       expect(pushed.output).toContain('script "verify:frontend" exited with code 23');
       expect(command(["git", "--git-dir", join(temporary, "remote.git"), "show-ref"]).code).toBe(1);
       // A successful verify that changes its inputs must still block publication.
-      pkg.scripts.verify = "bun run verify:preflight";
+      pkg.scripts["verify:checks"] = "bun run verify:preflight";
       pkg.scripts["verify:preflight"] =
         `bun -e "require('fs').appendFileSync('fixture.rs', '// changed')"`;
       writeFileSync(join(fixture, "package.json"), JSON.stringify(pkg));
@@ -206,7 +218,7 @@ describe("verification preflight", () => {
         command(["git", "push", join(temporary, "remote.git"), "HEAD:refs/heads/main"]).code,
       ).not.toBe(0);
       expect(command(["git", "--git-dir", join(temporary, "remote.git"), "show-ref"]).code).toBe(1);
-      mkdirSync(join(fixture, "src-tauri"));
+      mkdirSync(join(fixture, "src-tauri"), { recursive: true });
       const missingTool = spawnSync(
         Bun.which("pwsh")!,
         ["-NoProfile", "-File", join(fixture, "scripts/check-rust-coverage.ps1")],

@@ -2,7 +2,7 @@
 
 Machine: AryaPaw-PC, Windows 11 Pro, AMD Ryzen 9 3900 12-core, ~128 GB RAM.
 
-Daily driver is the local production binary (`VOXELY_LOCAL_BUILD=1` + `bunx tauri build --no-bundle` → `src-tauri/target/release/voxely.exe`). Criterion benches are a separate upper bound. Dev objects use line tables only and no incremental cache; `target/` is disposable (`scripts/clean-rust-artifacts.ps1`).
+Daily driver is the local production binary (`VOXELY_LOCAL_BUILD=1` + `bun run rebuild:local-app` → `src-tauri/target/release/voxely.exe`). Criterion benches are a separate upper bound. Dev objects use line tables only, dependencies omit debug symbols, and incremental compilation is disabled. Compilation caches are disposable; release runtime files are protected. The shared lifecycle in `scripts/rust-build-cache.ps1` enforces a 15 GiB retained-cache budget and a 10 GiB free-space reserve before managed builds. See [TESTING.md](TESTING.md#automatic-cargo-cache-maintenance).
 
 Dev DSP crates (`nnnoiseless`, `rubato`, `rustfft`, `realfft`, `easyfft`) use `opt-level = 3` in `[profile.dev.package.*]`.
 

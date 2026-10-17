@@ -1,6 +1,6 @@
 # Testing
 
-`bun run verify` runs frontend typecheck, lint, format, coverage and Rust fmt/clippy/tests with `--locked` when the MSVC linker is available.
+`bun run verify` runs frontend typecheck, lint, format, coverage and Rust fmt/clippy/tests with `--locked` when the MSVC linker is available. `scripts/verify.ps1` owns the build-cache lifecycle; the shared stage list remains in `package.json` as `verify:checks`, and CI runs those same `verify:*` stages. Failures remain fatal and cleanup runs in `finally`.
 
 Frontend coverage includes all product `src` modules, including StatisticsPane, OverlayApp and shadcn primitives. Test discovery is scoped to `src` and `scripts`, so temporary checkouts under `.local` cannot duplicate the suite. Global lines/branches floors are 85%; StatisticsPane and OverlayApp also have per-file floors.
 
@@ -52,4 +52,24 @@ The default runner doesn't repair the environment. A prepared-runtime PASS prove
 
 Rust coverage: `pwsh -File scripts/check-rust-coverage.ps1` (CI installs pinned `cargo-llvm-cov` 0.6.16). The script uses a unique `src-tauri/target/llvm-cov-*` directory and deletes it after saving the report, so instrumented objects do not land in `target/debug`. A missing tool fails locally too; the script also accepts the repository-local `.local/tools/bin/cargo-llvm-cov.exe` installation. `dsp::timing::tests::dictation_timing` stays ignored; `dictation_timing_helpers_run` is the cheap gate. `pwsh -File scripts/check-rust-coverage.ps1 -SelfTest` checks failure propagation and acceptance of valid diagnostic percentages.
 
-`src-tauri/target` is a cache, not the app. A debug profile with full symbols plus incremental plus mixed rustc versions grew past 70 GB here. Dev now uses `debug = "line-tables-only"` and `incremental = false`. To wipe caches: `pwsh -File scripts/clean-rust-artifacts.ps1` (or `-Full` for `cargo clean`). MSRV checks must use a separate `CARGO_TARGET_DIR` (for example `src-tauri/target/msrv-1.90`, matching `Cargo.toml`), never the daily-driver `debug` tree.
+### Automatic Cargo cache maintenance
+
+`src-tauri/target` contains both disposable compilation caches and the protected daily driver `release/voxely.exe`. Never delete the whole directory as routine maintenance.
+
+`scripts/rust-build-cache.ps1` is the policy owner used by full verification, standalone coverage, MSRV checks, local app rebuilding and explicit cleanup:
+
+- Hold one repository-specific file lease for the complete managed command. Nested coverage inherits a session bound to that lease, PID and process start time. A concurrent managed command is refused; a stale lock file alone doesn't block the next run.
+- Before and after the command, remove owned temporary targets: `llvm-cov`, `llvm-cov-<GUID>`, versioned `msrv-*`, and the retired `local-fix-verification` directory. Normal exits and failures run cleanup; the next managed run picks up leftovers after a terminated host.
+- Retain up to **15 GiB of file lengths** after cleanup. Hardlinks are counted conservatively more than once, so this isn't an exact NTFS allocation measurement. If needed, evict the whole `debug` profile first, then release intermediates (`deps`, `build`, `.fingerprint`, `incremental`, `examples`). Never select individual hashed library files.
+- Preserve all release root files, installer bundles, Sandbox results and unknown directories. `-Full` also preserves those files; it no longer invokes `cargo clean`. If protected/unknown data alone exceeds the budget, fail for manual inspection rather than deleting it.
+- Require **10 GiB free** before starting a managed command, after safe eviction. This is a reserve check, not a filesystem quota or a guarantee about peak usage during compilation.
+- Refuse deletion while a compiler/linker is active, when a target executable other than the protected daily driver is running, or when process ownership is unavailable. Never stop those processes. Reject reparse points in the cache tree and ancestors, and validate every deletion against the owned-directory allowlist.
+- Scope `CARGO_TARGET_DIR` to the canonical target during the command and restore the previous environment afterward. Conflicting external Cargo output-directory overrides are refused.
+
+Dev keeps `debug = "line-tables-only"` and `incremental = false`; dependencies use `debug = false` to reduce artifacts without removing workspace source locations from panic backtraces. Debugging dependency internals requires an explicit diagnostic build with symbols.
+
+Explicit maintenance: `pwsh -NoProfile -File scripts/clean-rust-artifacts.ps1`. Add `-Full` to discard all owned compilation caches while retaining runtime files. Neither form deletes source files or application history/settings. The safety fixtures run with `pwsh -NoProfile -File scripts/rust-build-cache.test.ps1` and through `verify:metadata`.
+
+MSRV CI uses `scripts/check-msrv.ps1`: read the minimum version from Cargo.toml, build in `target/msrv-<version>-<GUID>`, remove it in `finally`. Coverage keeps its own isolated GUID target and preserves the generated coverage reports outside target. Both commands use the same lifecycle owner.
+
+Raw `cargo` / `bunx tauri` commands don't acquire the managed lease. Don't start them concurrently with managed builds or cleanup. The idle-process check is conservative but isn't a synchronization protocol for arbitrary external commands. Prefer `bun run verify`, `bun run rebuild:local-app` and the repository helpers.

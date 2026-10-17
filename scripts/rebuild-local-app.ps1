@@ -33,9 +33,10 @@ if ($runningLocal.Count -gt 0) {
 
 $env:VOXELY_LOCAL_BUILD = "1"
 Set-Location $root
-bunx tauri build --no-bundle
-if ($LASTEXITCODE -ne 0) {
-    throw "local Tauri build failed with exit code $LASTEXITCODE"
+. (Join-Path $PSScriptRoot 'rust-build-cache.ps1')
+Invoke-VoxelyBuildCache -Action {
+    bunx tauri build --no-bundle
+    if ($LASTEXITCODE -ne 0) { throw "local Tauri build failed with exit code $LASTEXITCODE" }
 }
 if (-not (Test-Path $exe)) {
     throw "local app exe missing: $exe"
