@@ -988,6 +988,94 @@ fn existing_recording_audio<'a>(rec: &'a Recording, root: &Path) -> Option<&'a s
 }
 
 #[tauri::command]
+pub async fn recording_api_audio(
+    ctx: State<'_, Arc<AppContext>>,
+    id: String,
+) -> Result<tauri::ipc::Response, AppError> {
+    // Bound memory and CPU even if several history cards request previews together.
+    static PREVIEW_PERMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+    let permit = PREVIEW_PERMIT.try_acquire().map_err(|_| {
+        AppError::AudioProcessingFailed("another audio preview is being prepared".into())
+    })?;
+    let path = recording_audio_url(ctx.clone(), id)?
+        .ok_or_else(|| AppError::StorageFailed("audio missing".into()))?;
+    let silence = ctx.settings.lock().silence_compression.clone();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        history_api_audio(Path::new(&path), &silence).map(tauri::ipc::Response::new)
+    })
+    .await
+    .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))?
+}
+
+// A disposable in-memory preview of the retry upload. Never rewrite retained audio.
+fn history_api_audio(
+    path: &Path,
+    silence: &crate::dsp::silence::SilenceCompressionSettings,
+) -> Result<Vec<u8>, AppError> {
+    let storage_error = |error: hound::Error| AppError::StorageFailed(error.to_string());
+    let file = std::fs::File::open(path).map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    let file_bytes = file
+        .metadata()
+        .map_err(|e| AppError::StorageFailed(e.to_string()))?
+        .len();
+    if file_bytes > crate::audio::capture::MAX_WAV_BYTES {
+        return Err(AppError::RecordingTooLarge);
+    }
+    let mut reader = hound::WavReader::new(std::io::BufReader::new(file)).map_err(storage_error)?;
+    let spec = reader.spec();
+    if spec.channels != 1
+        || spec.bits_per_sample != 16
+        || spec.sample_format != hound::SampleFormat::Int
+        || ![
+            crate::dsp::metrics::SAMPLE_RATE,
+            crate::dsp::metrics::STT_SAMPLE_RATE,
+        ]
+        .contains(&spec.sample_rate)
+    {
+        return Err(AppError::AudioProcessingFailed(
+            "expected mono PCM16 audio at 48kHz or 16kHz".into(),
+        ));
+    }
+    // Validate header claims before allocating or resampling damaged recordings.
+    let frames = u64::from(reader.duration());
+    if frames == 0 || frames * 2 > file_bytes {
+        return Err(AppError::AudioProcessingFailed(
+            "invalid WAV duration".into(),
+        ));
+    }
+    if frames * u64::from(crate::dsp::metrics::SAMPLE_RATE)
+        > crate::audio::capture::MAX_PCM16_FRAMES * u64::from(spec.sample_rate)
+    {
+        return Err(AppError::RecordingTooLarge);
+    }
+    let samples = reader
+        .samples::<i16>()
+        .map(|sample| sample.map(|value| value as f32 / 32768.0))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_error)?;
+    let samples = crate::dsp::pipeline::prepare_stt_audio(&samples, spec.sample_rate, silence)?;
+    let mut bytes = std::io::Cursor::new(Vec::new());
+    {
+        let mut writer = hound::WavWriter::new(
+            &mut bytes,
+            hound::WavSpec {
+                channels: 1,
+                sample_rate: crate::dsp::metrics::STT_SAMPLE_RATE,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            },
+        )
+        .map_err(storage_error)?;
+        for sample in crate::audio::resample::f32_to_i16(&samples) {
+            writer.write_sample(sample).map_err(storage_error)?;
+        }
+        writer.finalize().map_err(storage_error)?;
+    }
+    Ok(bytes.into_inner())
+}
+
+#[tauri::command]
 pub fn start_model_compare(app: AppHandle) -> Result<(), AppError> {
     crate::app::compare::start_model_compare(&app)
 }
@@ -1667,6 +1755,98 @@ mod tests {
                 .is_none());
         }
         assert!(recording_audio_url(fixture.state(), "missing".into()).is_err());
+    }
+
+    #[tokio::test]
+    async fn history_api_preview_shortens_only_copy_and_preserves_recording() {
+        let fixture = CommandFixture::new();
+        let root = crate::history::repository::audio_dir(&fixture.state().data_dir);
+        let mut rec = crate::history::repository::new_recording("fixture".into());
+        rec.processed_audio_path = Some("preview.wav".into());
+        rec.duration_ms = 12000;
+        rec.transcript = Some("Retained transcript".into());
+        fixture.state().history.lock().insert(&rec).unwrap();
+        let path = root.join("preview.wav");
+        let mut samples = vec![0.1; 48000];
+        samples.extend(vec![0.0; 480000]);
+        samples.extend(vec![-0.1; 48000]);
+        write_pcm16_wav(&path, 48000, &samples).unwrap();
+        let original = std::fs::read(&path).unwrap();
+        let silence = crate::dsp::silence::SilenceCompressionSettings {
+            enabled: true,
+            max_pause_ms: 500,
+        };
+        let compact = history_api_audio(&path, &silence).unwrap();
+        let mut wav = hound::WavReader::new(std::io::Cursor::new(compact)).unwrap();
+        assert_eq!(wav.spec().sample_rate, 16000);
+        // Resampling retains a 10ms transition frame at each speech boundary.
+        assert_eq!(wav.duration(), 40320);
+        let actual = wav.samples::<i16>().collect::<Result<Vec<_>, _>>().unwrap();
+        let (saved, rate) = crate::audio::capture::read_pcm16_wav_with_rate(&path).unwrap();
+        let expected = crate::dsp::pipeline::prepare_stt_audio(&saved, rate, &silence).unwrap();
+        assert_eq!(actual, crate::audio::resample::f32_to_i16(&expected));
+        let off = crate::dsp::silence::SilenceCompressionSettings {
+            enabled: false,
+            ..silence.clone()
+        };
+        let full = history_api_audio(&path, &off).unwrap();
+        assert_eq!(
+            hound::WavReader::new(std::io::Cursor::new(full))
+                .unwrap()
+                .duration(),
+            192000
+        );
+        assert!(recording_api_audio(fixture.state(), rec.id.clone())
+            .await
+            .is_ok());
+        assert!(recording_api_audio(fixture.state(), "missing".into())
+            .await
+            .is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+        let retained = fixture
+            .state()
+            .history
+            .lock()
+            .get(&rec.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.duration_ms, 12000);
+        assert_eq!(retained.transcript, rec.transcript);
+        assert_eq!(std::fs::read_dir(root).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn history_api_preview_rejects_missing_corrupt_and_oversized_audio() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.wav");
+        let silence = crate::dsp::silence::SilenceCompressionSettings::default();
+        assert!(history_api_audio(&path, &silence).is_err());
+        std::fs::write(&path, b"not wav").unwrap();
+        assert!(history_api_audio(&path, &silence).is_err());
+        for rate in [0, 1, 8000, u32::MAX] {
+            write_pcm16_wav(&path, 48000, &[0.1; 480]).unwrap();
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[24..28].copy_from_slice(&rate.to_le_bytes());
+            bytes[28..32].copy_from_slice(&rate.saturating_mul(2).to_le_bytes());
+            std::fs::write(&path, bytes).unwrap();
+            assert!(
+                history_api_audio(&path, &silence).is_err(),
+                "unsupported rate {rate}"
+            );
+        }
+        write_pcm16_wav(&path, 48000, &[0.0; 480]).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        bytes[40..44].copy_from_slice(&1_000_000u32.to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        assert!(history_api_audio(&path, &silence).is_err());
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(crate::audio::capture::MAX_WAV_BYTES + 1)
+            .unwrap();
+        assert!(matches!(
+            history_api_audio(&path, &silence),
+            Err(AppError::RecordingTooLarge)
+        ));
     }
 
     #[test]

@@ -49,6 +49,122 @@ function recording(patch: Partial<Recording> = {}): Recording {
 }
 
 describe("HistoryPane", () => {
+  it("switches between retained audio and disposable API preview and releases its URL", async () => {
+    const create = vi.fn(() => "blob:api-preview");
+    const revoke = vi.fn();
+    vi.stubGlobal(
+      "URL",
+      class extends URL {
+        static createObjectURL = create;
+        static revokeObjectURL = revoke;
+      },
+    );
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "recording_api_audio") return new ArrayBuffer(44);
+      if (cmd === "recording_audio_url") return "retained.wav";
+      return undefined;
+    });
+    const { container, unmount } = render(
+      <HistoryCard
+        item={recording()}
+        copy={messagesFor("en")}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    expect(invoke).not.toHaveBeenCalled();
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "For API" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    await waitFor(() =>
+      expect(container.querySelector("audio")).toHaveAttribute("src", "blob:api-preview"),
+    );
+    expect(invoke).toHaveBeenCalledWith("recording_api_audio", { id: "1" });
+    const audio = container.querySelector("audio")!;
+    Object.defineProperty(audio, "duration", { value: 12.5 });
+    fireEvent.loadedMetadata(audio);
+    expect(screen.getByText("0 sec. / 13 sec.")).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Full" }), { button: 0, ctrlKey: false });
+    await waitFor(() =>
+      expect(container.querySelector("audio")).toHaveAttribute("src", "retained.wav"),
+    );
+    expect(revoke).toHaveBeenCalledWith("blob:api-preview");
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "For API" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    await waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+    unmount();
+    expect(revoke).toHaveBeenCalledTimes(2);
+    vi.unstubAllGlobals();
+  });
+
+  it("ignores a preview that finishes after unmount", async () => {
+    let resolve!: (value: ArrayBuffer) => void;
+    const create = vi.fn();
+    vi.stubGlobal(
+      "URL",
+      class extends URL {
+        static createObjectURL = create;
+      },
+    );
+    vi.mocked(invoke).mockImplementation((cmd: string) =>
+      cmd === "recording_api_audio"
+        ? new Promise<ArrayBuffer>((done) => {
+            resolve = done;
+          })
+        : Promise.resolve(null),
+    );
+    const { unmount } = render(
+      <HistoryCard
+        item={recording()}
+        copy={messagesFor("en")}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "For API" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    await waitFor(() => expect(resolve).toBeDefined());
+    expect(screen.getByRole("button", { name: "Listen" })).toBeDisabled();
+    unmount();
+    resolve(new ArrayBuffer(44));
+    await Promise.resolve();
+    expect(create).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("reports preview failure and can return to full audio", async () => {
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "recording_api_audio") throw { code: "AudioProcessingFailed" };
+      return "retained.wav";
+    });
+    const { container } = render(
+      <HistoryCard
+        item={recording()}
+        copy={messagesFor("en")}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "For API" }), {
+      button: 0,
+      ctrlKey: false,
+    });
+    await waitFor(() => expect(reportError).toHaveBeenCalled());
+    fireEvent.mouseDown(screen.getByRole("tab", { name: "Full" }), { button: 0, ctrlKey: false });
+    await waitFor(() =>
+      expect(container.querySelector("audio")).toHaveAttribute("src", "retained.wav"),
+    );
+    expect(screen.getByRole("button", { name: "Listen" })).not.toBeDisabled();
+  });
+
   it.each([
     ["Retry transcription", "retry_recording"],
     ["Reprocess original", "manual_reprocess"],

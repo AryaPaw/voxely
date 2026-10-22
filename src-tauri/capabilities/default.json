@@ -59,6 +59,7 @@
     "allow-install-update",
     "allow-show-system-notification",
     "allow-recording-audio-url",
+    "allow-recording-api-audio",
     "allow-cancel-dictation",
     "allow-set-hotkey-capture",
     "allow-open-github",

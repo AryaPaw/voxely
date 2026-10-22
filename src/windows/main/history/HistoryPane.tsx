@@ -20,6 +20,7 @@ import { formatDuration, formatTime } from "../../../lib/utils";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
 import { Input } from "../../../components/ui/input";
+import { Tabs, TabsList, TabsTrigger } from "../../../components/ui/tabs";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -193,6 +194,9 @@ export function HistoryCard({
   onRefresh: () => Promise<void>;
 }) {
   const [audioSrc, setAudioSrc] = useState<string | null>(null);
+  const [audioVariant, setAudioVariant] = useState<"full" | "api">("full");
+  const [audioLoading, setAudioLoading] = useState(false);
+  const [audioDuration, setAudioDuration] = useState(item.durationMs);
   const [loadAudio, setLoadAudio] = useState(false);
   const [audioMissing, setAudioMissing] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -225,38 +229,74 @@ export function HistoryCard({
       return;
     }
     let cancelled = false;
-    void api
-      .audioPath(item.id)
+    let objectUrl: string | null = null;
+    setAudioLoading(true);
+    setAudioSrc(null);
+    setPlaying(false);
+    setCurrent(0);
+    setProgress(0);
+    setAudioDuration(audioVariant === "full" ? item.durationMs : 0);
+    const source =
+      audioVariant === "api"
+        ? api.apiAudio(item.id).then((bytes) => {
+            if (cancelled) return null;
+            objectUrl = URL.createObjectURL(new Blob([bytes], { type: "audio/wav" }));
+            return objectUrl;
+          })
+        : api
+            .audioPath(item.id)
+            .then((path) => (path ? convertFileSrc(path.replace(/\\/g, "/")) : null));
+    void source
       .then((path) => {
         if (cancelled) {
           return;
         }
         if (path) {
-          setAudioSrc(convertFileSrc(path.replace(/\\/g, "/")));
+          setAudioSrc(path);
           setAudioMissing(false);
         } else {
           setAudioSrc(null);
           setAudioMissing(true);
+          pendingPlay.current = false;
         }
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (!cancelled) {
           setAudioSrc(null);
           setAudioMissing(true);
+          pendingPlay.current = false;
+          reportError(formatInvokeError(error, copy));
         }
+      })
+      .finally(() => {
+        if (!cancelled) setAudioLoading(false);
       });
     return () => {
       cancelled = true;
+      if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [loadAudio, item.id, item.processedAudioPath, item.rawAudioPath]);
+  }, [
+    loadAudio,
+    item.id,
+    item.processedAudioPath,
+    item.rawAudioPath,
+    item.attemptCount,
+    item.status,
+    item.durationMs,
+    audioVariant,
+    copy,
+  ]);
 
   useEffect(() => {
     if (!pendingPlay.current || !audioSrc) {
       return;
     }
     pendingPlay.current = false;
-    void audioRef.current?.play();
-  }, [audioSrc]);
+    void audioRef.current?.play().catch(() => {
+      setAudioMissing(true);
+      reportError(copy.playbackFailed);
+    });
+  }, [audioSrc, copy.playbackFailed]);
 
   useEffect(() => {
     return () => {
@@ -487,11 +527,39 @@ export function HistoryCard({
         </p>
       ) : null}
       <div className="mt-3 flex items-center gap-3">
+        <Tabs
+          value={audioVariant}
+          onValueChange={(value) => {
+            audioRef.current?.pause();
+            pendingPlay.current = false;
+            setAudioMissing(false);
+            setAudioVariant(value as "full" | "api");
+            setLoadAudio(true);
+          }}
+        >
+          <TabsList aria-label={copy.audioVariant} className="h-7 gap-0 p-0.5">
+            <TabsTrigger
+              value="full"
+              disabled={audioLoading || !canRetry}
+              className="h-6 px-2 text-xs"
+            >
+              {copy.audioFull}
+            </TabsTrigger>
+            <TabsTrigger
+              value="api"
+              disabled={audioLoading || !canRetry}
+              className="h-6 px-2 text-xs"
+            >
+              {copy.audioForApi}
+            </TabsTrigger>
+          </TabsList>
+        </Tabs>
         <button
           type="button"
           className="history-play"
           aria-label={playing ? copy.pause : copy.listen}
-          disabled={audioMissing || !canRetry}
+          disabled={audioLoading || audioMissing || !canRetry}
+          aria-busy={audioLoading}
           onClick={togglePlay}
         >
           {playing ? <Pause className="h-3.5 w-3.5" /> : <Play className="h-3.5 w-3.5" />}
@@ -503,14 +571,21 @@ export function HistoryCard({
           />
         </div>
         <div className="shrink-0 text-right text-[11px] whitespace-nowrap tabular-nums text-muted-foreground">
-          {duration(current)} / {duration(item.durationMs)}
+          {duration(current)} / {audioLoading ? copy.loading : duration(audioDuration)}
         </div>
       </div>
+      {audioVariant === "api" ? (
+        <p className="mt-1 text-xs text-muted-foreground">{copy.audioApiHint}</p>
+      ) : null}
       {audioSrc ? (
         <audio
           ref={audioRef}
           src={audioSrc}
           className="hidden"
+          onLoadedMetadata={(event) => {
+            const seconds = event.currentTarget.duration;
+            if (Number.isFinite(seconds)) setAudioDuration(seconds * 1000);
+          }}
           onPlay={() => setPlaying(true)}
           onPause={() => setPlaying(false)}
           onTimeUpdate={(event) => {

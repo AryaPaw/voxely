@@ -302,6 +302,7 @@ export const api = {
   resetSettings: (wipeApiKey: boolean) => ipc<AppSettings>("reset_settings", { wipeApiKey }),
   copy: (text: string) => ipc<void>("copy_transcript", { text }),
   audioPath: (id: string) => ipc<string | null>("recording_audio_url", { id }),
+  apiAudio: (id: string) => ipc<ArrayBuffer>("recording_api_audio", { id }),
   openAudioDir: () => ipc<void>("open_audio_dir"),
   openGithub: (page?: string) => ipc<void>("open_github", { page }),
   openOpenrouterModels: () => ipc<void>("open_openrouter_models"),

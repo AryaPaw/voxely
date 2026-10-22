@@ -163,6 +163,7 @@ pub fn run() {
             install_update,
             show_system_notification,
             recording_audio_url,
+            recording_api_audio,
             cancel_dictation,
             set_hotkey_capture,
             open_github,
