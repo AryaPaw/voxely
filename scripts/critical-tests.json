@@ -12,7 +12,10 @@
         "app::session::tests::duplicate_stop_preserves_recording_audio_and_usage",
         "app::session::tests::cancel_discards_audio_history_and_usage",
         "app::session::tests::cancel_during_stopping_hides_history_until_audio_cleanup_finishes",
-        "app::session::tests::cancelled_pipeline_delete_failure_is_retried_until_history_and_usage_are_removed"
+        "app::session::tests::cancelled_pipeline_delete_failure_is_retried_until_history_and_usage_are_removed",
+        "dsp::silence::tests::long_quiet_pause_is_capped_and_speech_is_unchanged",
+        "dsp::silence::tests::disabled_short_pauses_and_quiet_speech_are_bit_exact",
+        "dsp::silence::tests::multiple_pauses_preserve_every_voice_segment_and_smooth_quiet_joins"
       ]
     },
     {
@@ -24,7 +27,8 @@
         "app::session::tests::processed_reference_commit_failures_keep_retry_audio_after_restart",
         "app::session::tests::raw_cleanup_failure_keeps_both_references",
         "app::session::tests::startup_repairs_partial_wav_and_restores_capture_duration",
-        "app::session::tests::failed_wav_read_preserves_source_when_history_lookup_fails"
+        "app::session::tests::failed_wav_read_preserves_source_when_history_lookup_fails",
+        "app::session::tests::live_and_retry_uploads_compress_only_the_upload_and_keep_history_duration"
       ]
     },
     {
@@ -93,7 +97,8 @@
         "app::compare::tests::stale_compare_processing_cannot_write_or_release_a_new_take",
         "app::compare::tests::compare_timeout_keeps_busy_until_late_native_capture_and_discards_its_audio",
         "app::compare::tests::cancelled_run_keeps_lease_until_old_worker_finishes",
-        "app::compare::tests::compare_commit_rejects_shutdown_and_released_recording_before_any_write"
+        "app::compare::tests::compare_commit_rejects_shutdown_and_released_recording_before_any_write",
+        "app::compare::tests::compare_compresses_upload_only_and_respects_disabled_setting"
       ]
     },
     {

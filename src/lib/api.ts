@@ -168,6 +168,7 @@ export interface AppSettings {
   debugLogging: boolean;
   retry: RetrySettings;
   textReplacements: TextReplacementSettings;
+  silenceCompression?: { enabled: boolean; maxPauseMs: number };
   activePresetId: string;
   presets: DspPreset[];
   firstRunComplete: boolean;

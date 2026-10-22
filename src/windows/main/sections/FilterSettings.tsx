@@ -9,7 +9,12 @@ import {
   type FilterKind,
 } from "../../../lib/api";
 import { meterFromPeakDb, peakDbFs, previewWarning } from "../../../lib/dsp-level";
-import { formatInvokeError, factoryPresetLabel, type Messages } from "../../../lib/i18n";
+import {
+  formatInvokeError,
+  factoryPresetLabel,
+  resolveUiLocale,
+  type Messages,
+} from "../../../lib/i18n";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { SettingsSwitchRow } from "../../../components/settings/SettingsSwitchRow";
 import { Button } from "../../../components/ui/button";
@@ -81,6 +86,7 @@ function AudioFilterSettings({
   const samplePendingRef = useRef(false);
   const preset = activePreset(settings);
   const signature = presetSignature(preset);
+  const silence = settings.silenceCompression ?? { enabled: true, maxPauseMs: 2000 };
 
   useEffect(() => {
     let disposed = false;
@@ -277,6 +283,28 @@ function AudioFilterSettings({
           />
         </>
       ) : null}
+      <div className="border-t border-border pt-3">
+        <SettingsSwitchRow
+          label={copy.silenceCompressionTitle}
+          checked={silence.enabled}
+          onCheckedChange={(enabled) => onChange({ silenceCompression: { ...silence, enabled } })}
+        />
+        <p className="mb-3 text-xs text-muted-foreground">{copy.silenceCompressionHint}</p>
+        <TuneSlider
+          label={copy.silenceCompressionPause.replace(
+            "{value}",
+            (silence.maxPauseMs / 1000).toLocaleString(
+              resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language),
+            ),
+          )}
+          min={500}
+          max={5000}
+          step={500}
+          value={silence.maxPauseMs}
+          disabled={!silence.enabled}
+          onChange={(maxPauseMs) => onChange({ silenceCompression: { ...silence, maxPauseMs } })}
+        />
+      </div>
       <div className="mt-1 flex flex-wrap items-center gap-3 border-t border-border pt-4">
         <Button disabled={busy} onClick={() => void toggleSample()}>
           {recording ? copy.stopSample : copy.recordSample}
@@ -480,6 +508,7 @@ function TuneSlider({
   step,
   value,
   onChange,
+  disabled = false,
 }: {
   label: string;
   min: number;
@@ -487,11 +516,13 @@ function TuneSlider({
   step: number;
   value: number;
   onChange: (value: number) => void;
+  disabled?: boolean;
 }) {
   return (
     <div className="mb-5">
       <Label className="mb-1 text-sm">{label}</Label>
       <Slider
+        disabled={disabled}
         min={min}
         max={max}
         step={step}

@@ -26,7 +26,7 @@ use crate::audio::capture::{
 };
 use crate::audio::devices::list_input_devices;
 use crate::dsp::metrics::{SAMPLE_RATE, STT_SAMPLE_RATE};
-use crate::dsp::pipeline::{prepare_listen_audio, samples_for_stt};
+use crate::dsp::pipeline::{prepare_listen_audio, prepare_stt_audio};
 use crate::error::AppError;
 use crate::history::repository::{
     audio_dir, can_retry_from_history, new_recording, HistoryRepo, RecordingStatus,
@@ -1659,9 +1659,12 @@ async fn process_and_transcribe_inner(
         return Err(AppError::Cancelled);
     }
     let stt_dir = processed_path.clone();
-    let stt_path = tokio::task::spawn_blocking(move || write_stt_pcm(&processed_pcm, &stt_dir))
-        .await
-        .map_err(|e| AppError::AudioProcessingFailed(e.to_string()))??;
+    let silence = settings.silence_compression.clone();
+    let stt_path = tokio::task::spawn_blocking(move || {
+        write_stt_pcm(&processed_pcm, SAMPLE_RATE, &stt_dir, &silence)
+    })
+    .await
+    .map_err(|e| AppError::AudioProcessingFailed(e.to_string()))??;
     let transcribed = run_transcription(
         app,
         recording_id,
@@ -3109,7 +3112,8 @@ async fn manual_retry_inner(
         Some(settings.language.as_str())
     };
     let stt_source = processed_path.clone();
-    let stt_result = tokio::task::spawn_blocking(move || write_stt_upload(&stt_source))
+    let silence = settings.silence_compression.clone();
+    let stt_result = tokio::task::spawn_blocking(move || write_stt_upload(&stt_source, &silence))
         .await
         .map_err(|err| AppError::AudioProcessingFailed(err.to_string()));
     let stt_result = match stt_result {
@@ -3563,9 +3567,14 @@ fn prepare_processed_audio(
     Ok(processed)
 }
 
-fn write_stt_pcm(processed: &[f32], processed_path: &Path) -> Result<PathBuf, AppError> {
+fn write_stt_pcm(
+    processed: &[f32],
+    rate: u32,
+    processed_path: &Path,
+    silence: &crate::dsp::silence::SilenceCompressionSettings,
+) -> Result<PathBuf, AppError> {
     let downsample_started = Instant::now();
-    let stt = samples_for_stt(processed, SAMPLE_RATE);
+    let stt = prepare_stt_audio(processed, rate, silence)?;
     let downsample_ms = downsample_started.elapsed().as_millis() as u64;
     let stt_path = processed_path.with_extension("stt.wav");
     let stt_write_started = Instant::now();
@@ -3579,17 +3588,18 @@ fn prepare_local_stt(
     preset: crate::dsp::pipeline::DspPreset,
     samples: Vec<f32>,
     processed_path: PathBuf,
+    silence: &crate::dsp::silence::SilenceCompressionSettings,
 ) -> Result<PathBuf, AppError> {
     let processed = prepare_processed_audio(preset, samples, processed_path.clone())?;
-    write_stt_pcm(&processed, &processed_path)
+    write_stt_pcm(&processed, SAMPLE_RATE, &processed_path, silence)
 }
 
-fn write_stt_upload(listen_path: &Path) -> Result<PathBuf, AppError> {
+fn write_stt_upload(
+    listen_path: &Path,
+    silence: &crate::dsp::silence::SilenceCompressionSettings,
+) -> Result<PathBuf, AppError> {
     let (samples, rate) = read_pcm16_wav_with_rate(listen_path)?;
-    let stt = samples_for_stt(&samples, rate);
-    let dest = listen_path.with_extension("stt.wav");
-    write_pcm16_wav(&dest, STT_SAMPLE_RATE, &stt)?;
-    Ok(dest)
+    write_stt_pcm(&samples, rate, listen_path, silence)
 }
 
 #[cfg(test)]
@@ -5240,6 +5250,49 @@ mod tests {
     }
 
     #[test]
+    fn live_and_retry_uploads_compress_only_the_upload_and_keep_history_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("clip.processed.wav");
+        let mut source = vec![0.01; SAMPLE_RATE as usize];
+        source.extend(vec![0.0; SAMPLE_RATE as usize * 10]);
+        source.extend(vec![-0.02; SAMPLE_RATE as usize]);
+        write_pcm16_wav(&path, SAMPLE_RATE, &source).unwrap();
+        let original_bytes = std::fs::read(&path).unwrap();
+        let mut rec = new_recording("test/model".into());
+        rec.duration_ms = 12_000;
+        rec.status = RecordingStatus::Completed;
+        rec.processed_audio_path = Some("clip.processed.wav".into());
+        let history = HistoryRepo::open(&dir.path().join("history.sqlite")).unwrap();
+        history.insert(&rec).unwrap();
+        let settings = crate::dsp::silence::SilenceCompressionSettings::default();
+        let live = write_stt_pcm(&source, SAMPLE_RATE, &path, &settings).unwrap();
+        let (pcm, rate) = read_pcm16_wav_with_rate(&live).unwrap();
+        assert_eq!(rate, STT_SAMPLE_RATE);
+        assert!((pcm.len() as i64 - STT_SAMPLE_RATE as i64 * 4).abs() <= 320);
+        let retry = write_stt_upload(&path, &settings).unwrap();
+        let (retry_pcm, _) = read_pcm16_wav_with_rate(&retry).unwrap();
+        assert!((retry_pcm.len() as i64 - pcm.len() as i64).abs() <= 320);
+        assert_eq!(std::fs::read(&path).unwrap(), original_bytes);
+        let off = crate::dsp::silence::SilenceCompressionSettings {
+            enabled: false,
+            ..Default::default()
+        };
+        let full = write_stt_upload(&path, &off).unwrap();
+        let (full_pcm, _) = read_pcm16_wav_with_rate(&full).unwrap();
+        assert!((full_pcm.len() as i64 - STT_SAMPLE_RATE as i64 * 12).abs() <= 2);
+        let retained = history.get(&rec.id).unwrap().unwrap();
+        assert_eq!(retained.duration_ms, 12_000);
+        let end = rec.created_at + chrono::Duration::seconds(1);
+        assert_eq!(
+            history
+                .get_usage_statistics(rec.created_at, end)
+                .unwrap()
+                .audio_duration_ms,
+            12_000
+        );
+    }
+
+    #[test]
     fn write_stt_upload_downsamples_disk_wav() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("clip.processed.wav");
@@ -5247,7 +5300,7 @@ mod tests {
             .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
             .collect();
         crate::audio::capture::write_pcm16_wav(&path, SAMPLE_RATE, &sine).unwrap();
-        let stt = write_stt_upload(&path).unwrap();
+        let stt = write_stt_upload(&path, &Default::default()).unwrap();
         let (pcm, rate) = read_pcm16_wav_with_rate(&stt).unwrap();
         assert_eq!(rate, STT_SAMPLE_RATE);
         assert!((pcm.len() as i32 - 1600).abs() <= 2);
@@ -5640,6 +5693,7 @@ mod tests {
             crate::dsp::pipeline::DspPreset::stt_fast(),
             sine,
             processed.clone(),
+            &Default::default(),
         )
         .unwrap();
         assert!(processed.exists());
@@ -6281,7 +6335,13 @@ mod tests {
             dir.path().join("missing-parent/output.wav")
         )
         .is_err());
-        assert!(write_stt_pcm(&[0.25; 480], &dir.path().join("absent/output.wav")).is_err());
+        assert!(write_stt_pcm(
+            &[0.25; 480],
+            SAMPLE_RATE,
+            &dir.path().join("absent/output.wav"),
+            &Default::default()
+        )
+        .is_err());
     }
 
     #[test]

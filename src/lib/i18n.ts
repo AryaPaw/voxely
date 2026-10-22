@@ -154,6 +154,10 @@ const ru = {
   durationMinutes: "мин.",
   filtersTitle: "Фильтры",
   audioFiltersTitle: "Аудио",
+  silenceCompressionTitle: "Сокращение тишины",
+  silenceCompressionPause: "Оставлять паузу: {value} с",
+  silenceCompressionHint:
+    "Сокращает длинные тихие паузы перед отправкой в API. Аудио в истории не обрезается.",
   textReplacementsTitle: "Замена слов",
   textReplacementsIntro: "Целые слова и фразы. Правила применяются сверху вниз.",
   textReplacementsEnabled: "Включить замену слов",
@@ -521,6 +525,10 @@ const en = {
   durationMinutes: "min.",
   filtersTitle: "Filters",
   audioFiltersTitle: "Audio",
+  silenceCompressionTitle: "Shorten silence",
+  silenceCompressionPause: "Retain pauses: {value} s",
+  silenceCompressionHint:
+    "Shortens long quiet pauses before sending audio to the API. Doesn't trim audio in history.",
   textReplacementsTitle: "Word replacement",
   textReplacementsIntro: "Whole words and phrases. Rules run from top to bottom.",
   textReplacementsEnabled: "Enable word replacement",

@@ -4,6 +4,7 @@ use super::dynamics::{Dynamics, DynamicsConfig, GateConfig, Limiter, LimiterConf
 use super::high_pass::{apply_gain, GainConfig, HighPass, HighPassConfig};
 use super::metrics::{is_finite_buffer, metrics, AudioMetrics, SAMPLE_RATE, STT_SAMPLE_RATE};
 use super::rnnoise::Rnnoise;
+use super::silence::{compress_silence, SilenceCompressionSettings};
 use crate::audio::resample::resample_sinc;
 use crate::error::AppError;
 
@@ -328,14 +329,57 @@ pub fn samples_for_stt(samples: &[f32], input_rate: u32) -> Vec<f32> {
 pub fn prepare_transcription(
     preset: DspPreset,
     samples: Vec<f32>,
+    silence: &SilenceCompressionSettings,
 ) -> Result<(Vec<f32>, u32), AppError> {
     let (processed, _) = prepare_listen(preset, samples)?;
-    Ok((samples_for_stt(&processed, SAMPLE_RATE), STT_SAMPLE_RATE))
+    Ok((
+        prepare_stt_audio(&processed, SAMPLE_RATE, silence)?,
+        STT_SAMPLE_RATE,
+    ))
+}
+
+pub fn prepare_stt_audio(
+    samples: &[f32],
+    input_rate: u32,
+    silence: &SilenceCompressionSettings,
+) -> Result<Vec<f32>, AppError> {
+    silence.validate()?;
+    if input_rate == 0 || samples.iter().any(|sample| !sample.is_finite()) {
+        return Err(AppError::AudioProcessingFailed(
+            "invalid STT audio input".into(),
+        ));
+    }
+    let mut stt = samples_for_stt(samples, input_rate);
+    compress_silence(&mut stt, STT_SAMPLE_RATE, silence)?;
+    Ok(stt)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stt_compression_preserves_source_and_disable_matches_resampling() {
+        for rate in [STT_SAMPLE_RATE, SAMPLE_RATE] {
+            let mut original = vec![0.01; rate as usize];
+            original.extend(vec![0.0; rate as usize * 10]);
+            original.extend(vec![-0.02; rate as usize]);
+            let source = original.clone();
+            let compact = prepare_stt_audio(&source, rate, &Default::default()).unwrap();
+            assert_eq!(source, original);
+            assert!((compact.len() as i64 - STT_SAMPLE_RATE as i64 * 4).abs() <= 320);
+            let off = SilenceCompressionSettings {
+                enabled: false,
+                ..Default::default()
+            };
+            assert_eq!(
+                prepare_stt_audio(&source, rate, &off).unwrap(),
+                samples_for_stt(&source, rate)
+            );
+        }
+        assert!(prepare_stt_audio(&[0.0], 0, &Default::default()).is_err());
+        assert!(prepare_stt_audio(&[f32::NAN], SAMPLE_RATE, &Default::default()).is_err());
+    }
 
     #[test]
     fn empty_passthrough() {
@@ -350,7 +394,8 @@ mod tests {
             .map(|i| (i as f32 * 440.0 * 2.0 * std::f32::consts::PI / 48_000.0).sin() * 0.2)
             .collect();
         let preset = DspPreset::stt_fast();
-        let (out, rate) = prepare_transcription(preset, sine).unwrap();
+        let (out, rate) =
+            prepare_transcription(preset, sine, &SilenceCompressionSettings::default()).unwrap();
         assert_eq!(rate, 16_000);
         assert!(out.iter().all(|s| s.is_finite()));
         assert!(out.len() < 4800);
@@ -429,7 +474,8 @@ mod tests {
         let (_, six_metrics) = prepare_listen(six.clone(), sine.clone()).unwrap();
         let (_, twelve_metrics) = prepare_listen(twelve, sine.clone()).unwrap();
         assert!(twelve_metrics.rms > six_metrics.rms);
-        let (_, stt_rate) = prepare_transcription(six, sine).unwrap();
+        let (_, stt_rate) =
+            prepare_transcription(six, sine, &SilenceCompressionSettings::default()).unwrap();
         assert_eq!(stt_rate, STT_SAMPLE_RATE);
     }
 

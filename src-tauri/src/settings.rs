@@ -30,6 +30,8 @@ pub struct AppSettings {
     pub retry: RetrySettings,
     #[serde(default)]
     pub text_replacements: TextReplacementSettings,
+    #[serde(default)]
+    pub silence_compression: crate::dsp::silence::SilenceCompressionSettings,
     pub active_preset_id: String,
     pub presets: Vec<DspPreset>,
     pub first_run_complete: bool,
@@ -157,6 +159,7 @@ impl Default for AppSettings {
             debug_logging: false,
             retry: RetrySettings::default(),
             text_replacements: TextReplacementSettings::default(),
+            silence_compression: Default::default(),
             active_preset_id: "stt-optimized".into(),
             presets: vec![DspPreset::stt_fast(), DspPreset::stt_optimized()],
             first_run_complete: false,
@@ -364,6 +367,7 @@ impl AppSettings {
 }
 
 pub(crate) fn validate_settings_graph(settings: &AppSettings) -> Result<(), AppError> {
+    settings.silence_compression.validate()?;
     let invalid = |message: &str| AppError::RequestValidationFailed(message.into());
     if !matches!(settings.theme.as_str(), "light" | "dark" | "system")
         || !matches!(settings.ui_language.as_str(), "auto" | "ru" | "en")
@@ -537,6 +541,27 @@ mod tests {
             .any(|entry| entry.file_name().to_string_lossy().contains(".corrupt-")));
         let original = std::fs::read_to_string(&path).unwrap();
         assert_eq!(original, "{not json");
+    }
+
+    #[test]
+    fn legacy_settings_enable_silence_compression_and_disabled_survives_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut legacy = serde_json::to_value(AppSettings::default()).unwrap();
+        legacy.as_object_mut().unwrap().remove("silenceCompression");
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+        let mut loaded = AppSettings::load(&path).unwrap();
+        assert!(loaded.silence_compression.enabled);
+        assert_eq!(loaded.silence_compression.max_pause_ms, 2000);
+        loaded.silence_compression.enabled = false;
+        loaded.silence_compression.max_pause_ms = 1500;
+        loaded.save(&path).unwrap();
+        assert_eq!(
+            AppSettings::load(&path).unwrap().silence_compression,
+            loaded.silence_compression
+        );
+        loaded.silence_compression.max_pause_ms = 0;
+        assert!(validate_settings_graph(&loaded).is_err());
     }
 
     #[test]

@@ -12,7 +12,7 @@ use crate::audio::capture::{
     CaptureStopOutcome,
 };
 use crate::dsp::metrics::{SAMPLE_RATE, STT_SAMPLE_RATE};
-use crate::dsp::pipeline::{prepare_listen_audio, samples_for_stt};
+use crate::dsp::pipeline::{prepare_listen_audio, prepare_stt_audio};
 use crate::error::AppError;
 use crate::history::repository::audio_dir;
 use crate::transcription::openrouter::{transcribe_file, TranscriptionSuccess};
@@ -290,7 +290,8 @@ fn process_compare_audio(
     prepare: impl FnOnce(Vec<f32>) -> Result<Vec<f32>, AppError>,
 ) -> Result<CompareState, AppError> {
     let listen = prepare(pcm)?;
-    let stt = samples_for_stt(&listen, rate);
+    let silence = ctx.settings.lock().silence_compression.clone();
+    let stt = prepare_stt_audio(&listen, rate, &silence)?;
     commit_compare_audio(ctx, nonce, &listen, &stt)
 }
 
@@ -851,6 +852,30 @@ mod tests {
         release_compare_capture_reservation(&ctx, 3);
         assert_eq!(*ctx.compare_state.lock(), before);
         assert!(crate::app::operations::system_busy(&ctx));
+    }
+
+    #[test]
+    fn compare_compresses_upload_only_and_respects_disabled_setting() {
+        for enabled in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = recording_context(dir.path(), 3);
+            ctx.settings.lock().silence_compression.enabled = enabled;
+            let mut samples = vec![0.01; SAMPLE_RATE as usize];
+            samples.extend(vec![0.0; SAMPLE_RATE as usize * 10]);
+            samples.extend(vec![-0.02; SAMPLE_RATE as usize]);
+            let input_len = samples.len();
+            let snapshot = process_compare_audio(&ctx, 3, samples, SAMPLE_RATE, Ok).unwrap();
+            let (listen, rate) =
+                read_pcm16_wav_with_rate(Path::new(snapshot.listen_path.as_ref().unwrap()))
+                    .unwrap();
+            assert_eq!(rate, SAMPLE_RATE);
+            assert_eq!(listen.len(), input_len);
+            let (stt, rate) =
+                read_pcm16_wav_with_rate(Path::new(snapshot.stt_path.as_ref().unwrap())).unwrap();
+            assert_eq!(rate, STT_SAMPLE_RATE);
+            let seconds = if enabled { 4 } else { 12 };
+            assert!((stt.len() as i64 - i64::from(STT_SAMPLE_RATE) * seconds).abs() <= 320);
+        }
     }
 
     #[test]

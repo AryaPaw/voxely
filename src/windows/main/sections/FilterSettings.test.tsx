@@ -141,6 +141,61 @@ function ReplacementHarness({
 }
 
 describe("FilterSettings", () => {
+  it("enables silence compression by default, adjusts retained pause and disables the control", () => {
+    const changed = vi.fn();
+    renderAudio(<ReplacementHarness onChange={changed} />);
+    const enabled = screen.getByRole("switch", { name: "Shorten silence" });
+    expect(enabled).toHaveAttribute("aria-checked", "true");
+    let slider = screen.getByRole("slider", { name: "Retain pauses: 2 s" });
+    expect(slider).toHaveAttribute("aria-valuenow", "2000");
+    slider.focus();
+    fireEvent.keyDown(slider, { key: "ArrowRight" });
+    expect(changed).toHaveBeenLastCalledWith({
+      silenceCompression: { enabled: true, maxPauseMs: 2500 },
+    });
+    fireEvent.click(enabled);
+    expect(changed).toHaveBeenLastCalledWith({
+      silenceCompression: { enabled: false, maxPauseMs: 2500 },
+    });
+    slider = screen.getByRole("slider", { name: "Retain pauses: 2.5 s" });
+    expect(slider.closest('[data-slot="slider"]')).toHaveAttribute("data-disabled");
+    fireEvent.click(enabled);
+    expect(changed).toHaveBeenLastCalledWith({
+      silenceCompression: { enabled: true, maxPauseMs: 2500 },
+    });
+  });
+
+  it("renders a saved disabled option and Russian labels", () => {
+    const initial = settings();
+    initial.silenceCompression = { enabled: false, maxPauseMs: 1500 };
+    renderAudio(<FilterSettings settings={initial} copy={messagesFor("en")} onChange={vi.fn()} />);
+    expect(screen.getByRole("switch", { name: "Shorten silence" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    expect(screen.getByRole("slider", { name: "Retain pauses: 1.5 s" })).toHaveAttribute(
+      "aria-valuenow",
+      "1500",
+    );
+    cleanup();
+    initial.uiLanguage = "ru";
+    render(
+      <TooltipProvider>
+        <FilterSettings settings={initial} copy={messagesFor("ru")} onChange={vi.fn()} />
+      </TooltipProvider>,
+    );
+    fireEvent.mouseDown(screen.getByRole("tab", { name: messagesFor("ru").audioFiltersTitle }), {
+      button: 0,
+    });
+    expect(
+      screen.getByRole("switch", { name: messagesFor("ru").silenceCompressionTitle }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(messagesFor("ru").silenceCompressionHint)).toBeInTheDocument();
+    expect(screen.getByRole("slider", { name: "Оставлять паузу: 1,5 с" })).toHaveAttribute(
+      "aria-valuenow",
+      "1500",
+    );
+  });
   it("keeps sample controls usable after start failure", async () => {
     const copy = messagesFor("en");
     let resolvePreview!: (preview: DspPreview) => void;
