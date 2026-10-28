@@ -196,7 +196,7 @@ export function HistoryCard({
   const [audioSrc, setAudioSrc] = useState<string | null>(null);
   const [audioVariant, setAudioVariant] = useState<"full" | "api">("full");
   const [audioLoading, setAudioLoading] = useState(false);
-  const [audioDuration, setAudioDuration] = useState(item.durationMs);
+  const [audioDuration, setAudioDuration] = useState<number | null>(item.durationMs);
   const [loadAudio, setLoadAudio] = useState(false);
   const [audioMissing, setAudioMissing] = useState(false);
   const [playing, setPlaying] = useState(false);
@@ -235,7 +235,7 @@ export function HistoryCard({
     setPlaying(false);
     setCurrent(0);
     setProgress(0);
-    setAudioDuration(audioVariant === "full" ? item.durationMs : 0);
+    setAudioDuration(audioVariant === "full" ? item.durationMs : null);
     const source =
       audioVariant === "api"
         ? api.apiAudio(item.id).then((bytes) => {
@@ -369,6 +369,8 @@ export function HistoryCard({
       seconds: copy.durationSeconds,
       minutes: copy.durationMinutes,
     });
+  // Exact minutes omit seconds, so their label isn't the widest possible one.
+  const durationWidthSample = duration(Math.floor(item.durationMs / 60_000) * 60_000 + 59_000);
 
   return (
     <article className="history-card">
@@ -541,14 +543,15 @@ export function HistoryCard({
             <TabsTrigger
               value="full"
               disabled={audioLoading || !canRetry}
-              className="h-6 px-2 text-xs"
+              className="h-6 px-2 text-xs disabled:opacity-100"
             >
               {copy.audioFull}
             </TabsTrigger>
             <TabsTrigger
               value="api"
               disabled={audioLoading || !canRetry}
-              className="h-6 px-2 text-xs"
+              className="h-6 px-2 text-xs disabled:opacity-100"
+              title={copy.audioApiHint}
             >
               {copy.audioForApi}
             </TabsTrigger>
@@ -570,13 +573,20 @@ export function HistoryCard({
             style={{ width: `${progress * 100}%` }}
           />
         </div>
-        <div className="shrink-0 text-right text-[11px] whitespace-nowrap tabular-nums text-muted-foreground">
-          {duration(current)} / {audioLoading ? copy.loading : duration(audioDuration)}
+        <div className="relative grid shrink-0 text-right text-[11px] whitespace-nowrap tabular-nums text-muted-foreground">
+          <span aria-hidden="true" className="invisible col-start-1 row-start-1">
+            {durationWidthSample} / {durationWidthSample}
+          </span>
+          <span className="col-start-1 row-start-1">
+            {duration(current)} / {audioDuration === null ? "--:--" : duration(audioDuration)}
+          </span>
+          {audioLoading ? (
+            <span role="status" className="sr-only">
+              {copy.loading}
+            </span>
+          ) : null}
         </div>
       </div>
-      {audioVariant === "api" ? (
-        <p className="mt-1 text-xs text-muted-foreground">{copy.audioApiHint}</p>
-      ) : null}
       {audioSrc ? (
         <audio
           ref={audioRef}

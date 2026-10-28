@@ -150,7 +150,7 @@ const history: Recording[] = [
   {
     id: "rec-3",
     createdAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
-    durationMs: 68_000,
+    durationMs: 120_000,
     rawAudioPath: "e.wav",
     processedAudioPath: "f.wav",
     transcript:
@@ -344,6 +344,26 @@ export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): P
       return structuredClone(settings) as T;
     case "recording_audio_url":
       return fixtureAudioUrl() as T;
+    case "recording_api_audio":
+      await new Promise((resolve) =>
+        setTimeout(
+          resolve,
+          Math.min(
+            5000,
+            Math.max(0, Number(new URLSearchParams(location.search).get("previewDelayMs")) || 0),
+          ),
+        ),
+      );
+      return (await (
+        await fetch(
+          fixtureAudioUrl(
+            Math.max(
+              0.1,
+              (history.find((item) => item.id === _args?.id)?.durationMs ?? 100) / 1000 - 1,
+            ),
+          ),
+        )
+      ).arrayBuffer()) as T;
     case "get_session_state":
       return sessionFromSearch() as T;
     case "list_history":

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { invoke } from "@tauri-apps/api/core";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Recording } from "../../../lib/api";
@@ -49,6 +49,56 @@ function recording(patch: Partial<Recording> = {}): Recording {
 }
 
 describe("HistoryPane", () => {
+  it("announces preview loading without presenting a zero duration or remounting the card", async () => {
+    let finishPreview!: (bytes: ArrayBuffer) => void;
+    vi.mocked(invoke).mockImplementation((command: string) =>
+      command === "recording_api_audio"
+        ? new Promise<ArrayBuffer>((resolve) => {
+            finishPreview = resolve;
+          })
+        : Promise.resolve("full.wav"),
+    );
+    const create = vi.fn(() => "blob:loaded-preview");
+    vi.stubGlobal(
+      "URL",
+      class extends URL {
+        static createObjectURL = create;
+        static revokeObjectURL = vi.fn();
+      },
+    );
+    const copy = messagesFor("en");
+    const { container, unmount } = render(
+      <HistoryCard
+        item={recording()}
+        copy={copy}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    const card = container.querySelector("article");
+    try {
+      fireEvent.mouseDown(screen.getByRole("tab", { name: "For API" }), {
+        button: 0,
+        ctrlKey: false,
+      });
+      await waitFor(() => expect(finishPreview).toBeDefined());
+      expect(screen.getByRole("status")).toHaveTextContent(copy.loading);
+      expect(screen.getByText("0 sec. / --:--")).toBeInTheDocument();
+      expect(screen.getByRole("button", { name: "Listen" })).toBeDisabled();
+      await act(async () => finishPreview(new ArrayBuffer(44)));
+      const audio = container.querySelector("audio")!;
+      Object.defineProperty(audio, "duration", { value: 12.5 });
+      fireEvent.loadedMetadata(audio);
+      expect(screen.getByText("0 sec. / 13 sec.")).toBeInTheDocument();
+      expect(screen.queryByRole("status")).not.toBeInTheDocument();
+      expect(container.querySelector("article")).toBe(card);
+    } finally {
+      unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("switches between retained audio and disposable API preview and releases its URL", async () => {
     const create = vi.fn(() => "blob:api-preview");
     const revoke = vi.fn();
@@ -294,7 +344,11 @@ describe("HistoryPane", () => {
       />,
     );
     expect(screen.getByRole("heading", { name: "История" })).toBeInTheDocument();
-    expect(screen.getAllByText(/1 мин\. 5 сек\./)).toHaveLength(2);
+    expect(
+      screen
+        .getAllByText(/1 мин\. 5 сек\./)
+        .filter((node) => !node.closest('[aria-hidden="true"]')),
+    ).toHaveLength(2);
     expect(screen.getByRole("button", { name: "Удалить" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Копировать" }));
     await waitFor(() => {
