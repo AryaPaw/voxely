@@ -1962,12 +1962,11 @@ fn overlay_scale_factor(window: &WebviewWindow) -> f64 {
 fn reveal_overlay(window: &WebviewWindow) {
     position_overlay(window);
     decorate_overlay(window);
-    let _ = window.set_ignore_cursor_events(false);
     #[cfg(windows)]
     if let Ok(hwnd) = window.hwnd() {
         crate::windows_int::overlay::show_noactivate(hwnd.0 as isize);
-        return;
     }
+    #[cfg(not(windows))]
     let _ = window.show();
 }
 
@@ -1992,7 +1991,7 @@ fn show_overlay(app: &AppHandle) {
 }
 
 fn build_overlay_window(app: &AppHandle, url: WebviewUrl) -> tauri::Result<WebviewWindow> {
-    WebviewWindowBuilder::new(app, "overlay", url)
+    let builder = WebviewWindowBuilder::new(app, "overlay", url)
         .title("Voxely Overlay")
         .decorations(false)
         .always_on_top(true)
@@ -2002,11 +2001,12 @@ fn build_overlay_window(app: &AppHandle, url: WebviewUrl) -> tauri::Result<Webvi
         .resizable(false)
         .transparent(true)
         .shadow(false)
-        .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT)
-        .build()
+        .inner_size(OVERLAY_WIDTH, OVERLAY_HEIGHT);
+    builder.build()
 }
 
 fn decorate_overlay(window: &WebviewWindow) {
+    #[cfg(not(windows))]
     let _ = window.set_ignore_cursor_events(false);
     #[cfg(windows)]
     if let Ok(hwnd) = window.hwnd() {
@@ -2036,12 +2036,15 @@ pub fn prepare_overlay_window(app: &AppHandle) {
 }
 
 fn hide_overlay_hwnd(window: &WebviewWindow) {
-    let _ = window.set_ignore_cursor_events(true);
     #[cfg(windows)]
     if let Ok(hwnd) = window.hwnd() {
         crate::windows_int::overlay::hide(hwnd.0 as isize);
     }
-    let _ = window.hide();
+    #[cfg(not(windows))]
+    {
+        let _ = window.set_ignore_cursor_events(true);
+        let _ = window.hide();
+    }
 }
 
 fn hide_overlay_now(app: &AppHandle) {
@@ -3601,6 +3604,9 @@ fn write_stt_upload(
     let (samples, rate) = read_pcm16_wav_with_rate(listen_path)?;
     write_stt_pcm(&samples, rate, listen_path, silence)
 }
+
+#[cfg(all(test, windows))]
+mod overlay_visual_tests;
 
 #[cfg(test)]
 mod tests {

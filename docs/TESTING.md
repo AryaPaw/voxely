@@ -28,6 +28,8 @@ Results are generated under `coverage/rust/`: the critical-test result, a bounde
 
 The foreground-dependent Win32 edit-window smoke test remains in the complete suite, but isn't a critical delivery proof: Windows may deny foreground activation, and its conditional assertion then doesn't establish insertion. The critical registry requires deterministic cancellation, partial-delivery and Unicode-chunk contracts instead. Actual foreground delivery remains a separate native acceptance requirement.
 
+The opt-in `app::session::overlay_visual_tests::native_overlay_transparency_survives_visibility_cycles` and `app::session::overlay_visual_tests::native_warmed_overlay_shows_after_hidden_idle` tests require a built `dist` and a visible Windows desktop. They render the production HUD through real WebView2 in a temporary profile. The warmed case starts with the normal pre-created hidden window, then uses `show_overlay` to publish Recording. Owned background/client bounds and pointer hit testing distinguish a visible HUD from an occluded or misplaced sample. A legacy negative control turns black when DWM alpha is disabled; the production reveal path must restore alpha. Forty rapid hide/show cycles verify stable non-layered styles and no focus activation. The tests use no microphone and never touch user settings/history. They don't reconstruct an unlogged Windows event.
+
 ## Verification layers
 
 Layers:

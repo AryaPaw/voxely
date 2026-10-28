@@ -178,10 +178,61 @@ pub fn apply_overlay_exstyle(raw: isize) {
             WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
         };
         let hwnd = HWND(raw as *mut core::ffi::c_void);
-        let mut ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let old_ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
+        let mut ex = old_ex;
         ex |= WS_EX_NOACTIVATE.0 as i32 | WS_EX_TOOLWINDOW.0 as i32;
         ex &= !(WS_EX_APPWINDOW.0 as i32);
-        SetWindowLongW(hwnd, GWL_EXSTYLE, ex);
+        let mut flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        if ex != old_ex {
+            SetWindowLongW(hwnd, GWL_EXSTYLE, ex);
+            flags |= SWP_FRAMECHANGED;
+        }
+        let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+    }
+    if let Err(error) = restore_alpha_blending(raw) {
+        tracing::warn!(error = %error, "overlay alpha blending restoration failed");
+    }
+}
+
+#[cfg(windows)]
+fn restore_alpha_blending(raw: isize) -> windows::core::Result<()> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Dwm::{
+        DwmEnableBlurBehindWindow, DWM_BB_BLURREGION, DWM_BB_ENABLE, DWM_BLURBEHIND,
+    };
+    use windows::Win32::Graphics::Gdi::{CreateRectRgn, DeleteObject, HGDIOBJ};
+    unsafe {
+        let region = CreateRectRgn(0, 0, -1, -1);
+        if region.0.is_null() {
+            return Err(windows::core::Error::from_win32());
+        }
+        let result = DwmEnableBlurBehindWindow(
+            HWND(raw as *mut _),
+            &DWM_BLURBEHIND {
+                dwFlags: DWM_BB_ENABLE | DWM_BB_BLURREGION,
+                fEnable: true.into(),
+                hRgnBlur: region,
+                ..Default::default()
+            },
+        );
+        let _ = DeleteObject(HGDIOBJ(region.0));
+        result
+    }
+}
+
+#[cfg(windows)]
+pub fn show_noactivate(raw: isize) {
+    apply_overlay_exstyle(raw);
+    unsafe {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            SWP_SHOWWINDOW, SW_SHOWNOACTIVATE,
+        };
+        let hwnd = HWND(raw as *mut core::ffi::c_void);
+        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        // Showing a pre-created window must restore its Z-order even when
+        // its extended styles were already correct while it was hidden.
         let _ = SetWindowPos(
             hwnd,
             HWND_TOPMOST,
@@ -189,49 +240,18 @@ pub fn apply_overlay_exstyle(raw: isize) {
             0,
             0,
             0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW,
         );
     }
 }
 
 #[cfg(windows)]
-pub fn show_noactivate(raw: isize) {
-    set_click_through(raw, false);
-    unsafe {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_SHOWNOACTIVATE};
-        let hwnd = HWND(raw as *mut core::ffi::c_void);
-        let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-    }
-    apply_overlay_exstyle(raw);
-}
-
-#[cfg(windows)]
 pub fn hide(raw: isize) {
-    set_click_through(raw, true);
     unsafe {
         use windows::Win32::Foundation::HWND;
         use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
         let hwnd = HWND(raw as *mut core::ffi::c_void);
         let _ = ShowWindow(hwnd, SW_HIDE);
-    }
-}
-
-#[cfg(windows)]
-fn set_click_through(raw: isize, through: bool) {
-    unsafe {
-        use windows::Win32::Foundation::HWND;
-        use windows::Win32::UI::WindowsAndMessaging::{
-            GetWindowLongW, SetWindowLongW, GWL_EXSTYLE, WS_EX_TRANSPARENT,
-        };
-        let hwnd = HWND(raw as *mut core::ffi::c_void);
-        let mut ex = GetWindowLongW(hwnd, GWL_EXSTYLE);
-        if through {
-            ex |= WS_EX_TRANSPARENT.0 as i32;
-        } else {
-            ex &= !(WS_EX_TRANSPARENT.0 as i32);
-        }
-        SetWindowLongW(hwnd, GWL_EXSTYLE, ex);
     }
 }
 
