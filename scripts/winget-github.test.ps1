@@ -69,14 +69,14 @@ function Expect-Failure([scriptblock]$Action, [string]$Pattern) {
 $fixtureRoot = Join-Path ([IO.Path]::GetTempPath()) ('voxely-winget-api-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $fixtureRoot | Out-Null
 $version=$script:version; $up=$script:upstream; $fork=$script:fork
-$hash='e'*64; $headSha='d'*40; $treeSha='c'*40
+$day='2026-10-30'; $hash='e'*64; $headSha='d'*40; $treeSha='c'*40
 $branch="codex/winget-AryaPaw.Voxely-$version"; $ref="$fork/git/ref/heads/$branch"
 $yaml="PackageIdentifier: AryaPaw.Voxely`nPackageVersion: $version`n"
 [IO.File]::WriteAllText((Join-Path $fixtureRoot 'AryaPaw.Voxely.yaml'), $yaml)
 [IO.File]::WriteAllText((Join-Path $fixtureRoot 'AryaPaw.Voxely.locale.en-US.yaml'), $yaml + "Description: Unicode Кириллица`r`n")
-[IO.File]::WriteAllText((Join-Path $fixtureRoot 'AryaPaw.Voxely.installer.yaml'), $yaml + "Installers:`n- InstallerUrl: $(Get-VoxelyVersionedInstallerUrl -Version $version)`n  InstallerSha256: $hash`n")
+[IO.File]::WriteAllText((Join-Path $fixtureRoot 'AryaPaw.Voxely.installer.yaml'), $yaml + "Installers:`n- InstallerUrl: $(Get-VoxelyVersionedInstallerUrl -Version $version)`n  InstallerSha256: $hash`nReleaseDate: $day`n")
 $context=[pscustomobject]@{Owner='fixture-user';BaseSha=$script:old;BaseTree=$treeSha;UpstreamSha=$script:target}
-$entries=@(Get-VoxelyWingetEntries -Directory $fixtureRoot -Version $version -Sha256 $hash)
+$entries=@(Get-VoxelyWingetEntries -Directory $fixtureRoot -Version $version -Sha256 $hash -ReleaseDate $day)
 $files=@($entries|ForEach-Object {@{filename=$_.Path;status='added';sha=$_.Sha}})
 $lookup="$up/pulls?state=all&base=master&head=$([Uri]::EscapeDataString("fixture-user:$branch"))&per_page=2"
 $pr=@{number=42;state='open';head=@{sha=$headSha;ref=$branch;repo=@{full_name='fixture-user/winget-pkgs'}};base=@{ref='master';repo=@{full_name='microsoft/winget-pkgs'}};changed_files=3;html_url='https://github.com/microsoft/winget-pkgs/pull/42'}
@@ -102,7 +102,7 @@ function Add-Pull([bool]$Existing=$false,[bool]$Conflict=$false) {
     Add-Response "$up/pulls/42/files?per_page=100" $files
     Add-Response "$up/pulls/42" $pr
 }
-function Submit-Fixture { Publish-VoxelyWingetSubmission -Context $context -Version $version -ManifestDirectory $fixtureRoot -Sha256 $hash }
+function Submit-Fixture { Publish-VoxelyWingetSubmission -Context $context -Version $version -ManifestDirectory $fixtureRoot -Sha256 $hash -ReleaseDate $day }
 try {
     foreach($entry in $entries) {
         $independent = git hash-object --no-filters -- (Join-Path $fixtureRoot (Split-Path -Leaf $entry.Path))
@@ -256,18 +256,26 @@ try {
     Start-Case
     foreach($matching in @($true,$false)) {
         $manifestHash=if($matching){$hash}else{'f'*64}
-        $yaml="Installers:`n- InstallerUrl: $(Get-VoxelyVersionedInstallerUrl -Version $version)`n  InstallerSha256: $manifestHash`n"
+        $yaml="Installers:`n- InstallerUrl: $(Get-VoxelyVersionedInstallerUrl -Version $version)`n  InstallerSha256: $manifestHash`nReleaseDate: $day`n"
         Add-Response "$up/contents/manifests/a/AryaPaw/Voxely/$version/AryaPaw.Voxely.installer.yaml?ref=master" @{encoding='base64';content=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($yaml))}
-        if($matching){Assert-VoxelyWingetManifestHash -Repo microsoft/winget-pkgs -Ref master -Version $version -Sha256 $hash}
-        else{Expect-Failure {Assert-VoxelyWingetManifestHash -Repo microsoft/winget-pkgs -Ref master -Version $version -Sha256 $hash} 'differs from the release installer'}
+        if($matching){Assert-VoxelyWingetManifestHash -Repo microsoft/winget-pkgs -Ref master -Version $version -Sha256 $hash -ReleaseDate $day}
+        else{Expect-Failure {Assert-VoxelyWingetManifestHash -Repo microsoft/winget-pkgs -Ref master -Version $version -Sha256 $hash -ReleaseDate $day} 'differs from the release installer'}
     }
     Start-Case
-    Expect-Failure {Publish-VoxelyWingetSubmission -Context $context -Version 'bad/version' -ManifestDirectory $fixtureRoot -Sha256 $hash} 'pattern'
-    Expect-Failure {Publish-VoxelyWingetSubmission -Context $context -Version $version -ManifestDirectory $fixtureRoot -Sha256 ('f'*64)} 'differs from the release installer'
+    Expect-Failure {Publish-VoxelyWingetSubmission -Context $context -Version 'bad/version' -ManifestDirectory $fixtureRoot -Sha256 $hash -ReleaseDate $day} 'pattern'
+    Expect-Failure {Publish-VoxelyWingetSubmission -Context $context -Version $version -ManifestDirectory $fixtureRoot -Sha256 ('f'*64) -ReleaseDate $day} 'differs from the release installer'
     [IO.File]::WriteAllText((Join-Path $fixtureRoot 'unexpected.yaml'), 'not publishable')
     Expect-Failure {Submit-Fixture} 'exactly three'
     Remove-Item -LiteralPath (Join-Path $fixtureRoot 'unexpected.yaml')
     Assert-True ($script:calls.Count -eq 0) 'Bad files reached API'
+    $installerPath = Join-Path $fixtureRoot 'AryaPaw.Voxely.installer.yaml'
+    $originalInstaller = [IO.File]::ReadAllText($installerPath)
+    foreach ($badDate in @('', 'ReleaseDate: 2026-10-29', "ReleaseDate: $day`nReleaseDate: $day")) {
+        [IO.File]::WriteAllText($installerPath, $originalInstaller.Replace("ReleaseDate: $day", $badDate))
+        Expect-Failure {Submit-Fixture} 'ReleaseDate'
+        Assert-True ($script:calls.Count -eq 0) 'Missing/wrong/duplicate ReleaseDate reached GitHub'
+    }
+    [IO.File]::WriteAllText($installerPath, $originalInstaller)
     Start-Case; $env:WINGET_CREATE_GITHUB_TOKEN=''
     Expect-Failure {Initialize-VoxelyWingetSubmission -Version $version} 'requires env'
     Assert-True ($script:calls.Count -eq 0 -and $env:GH_TOKEN -ceq 'fixture-read-only-release-token') 'Credential separation broken'

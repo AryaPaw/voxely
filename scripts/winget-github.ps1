@@ -115,17 +115,22 @@ function Assert-VoxelyWingetManifestHash {
         [Parameter(Mandatory)][ValidatePattern('^[a-zA-Z0-9-]+/winget-pkgs$')][string]$Repo,
         [Parameter(Mandatory)][ValidatePattern('^(master|[a-fA-F0-9]{40})$')][string]$Ref,
         [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
-        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$Sha256
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$Sha256,
+        [Parameter(Mandatory)][ValidatePattern('^\d{4}-\d{2}-\d{2}$')][string]$ReleaseDate
     )
     $path = "repos/$Repo/contents/manifests/a/AryaPaw/Voxely/$Version/AryaPaw.Voxely.installer.yaml`?ref=$Ref"
     $response = (Invoke-VoxelyWingetApi -Path $path).Data
     if ($response.encoding -ne 'base64') { throw 'Existing WinGet installer manifest is not verifiable.' }
     $manifest = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($response.content))
-    Assert-VoxelyWingetInstallerContent -Manifest $manifest -Version $Version -Sha256 $Sha256
+    Assert-VoxelyWingetInstallerContent -Manifest $manifest -Version $Version -Sha256 $Sha256 -ReleaseDate $ReleaseDate
 }
 
 function Assert-VoxelyWingetInstallerContent {
-    param([string]$Manifest, [string]$Version, [string]$Sha256)
+    param([string]$Manifest, [string]$Version, [string]$Sha256, [string]$ReleaseDate)
+    $dates = [regex]::Matches($Manifest, '(?m)^ReleaseDate:\s*([^\r\n]+)\r?$')
+    if ($dates.Count -ne 1 -or $dates[0].Groups[1].Value.Trim() -cne $ReleaseDate) {
+        throw 'WinGet ReleaseDate is missing or differs from the GitHub Release publication date.'
+    }
     $hashes = [regex]::Matches($manifest, '(?m)^\s*InstallerSha256:\s*([A-Fa-f0-9]{64})\s*$')
     $urls = [regex]::Matches($manifest, '(?m)^\s*(?:-\s*)?InstallerUrl:\s*(\S+)\s*$')
     if ($hashes.Count -ne 1 -or $hashes[0].Groups[1].Value -ne $Sha256 -or
@@ -135,7 +140,7 @@ function Assert-VoxelyWingetInstallerContent {
 }
 
 function Get-VoxelyWingetEntries {
-    param([string]$Directory, [string]$Version, [string]$Sha256)
+    param([string]$Directory, [string]$Version, [string]$Sha256, [string]$ReleaseDate)
     $root = Get-Item -LiteralPath $Directory -Force
     for ($ancestor = $root; $null -ne $ancestor; $ancestor = $ancestor.Parent) {
         if ($ancestor.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Manifest directory contains a reparse point.' }
@@ -153,7 +158,7 @@ function Get-VoxelyWingetEntries {
             if ($matches.Count -ne 1 -or $matches[0].Groups[1].Value.Trim() -cne $field.Value) { throw "Invalid manifest $($field.Key)." }
         }
         if ($file.Name -ceq "$id.installer.yaml") {
-            Assert-VoxelyWingetInstallerContent -Manifest $content -Version $Version -Sha256 $Sha256
+            Assert-VoxelyWingetInstallerContent -Manifest $content -Version $Version -Sha256 $Sha256 -ReleaseDate $ReleaseDate
         }
         $bytes = [Text.Encoding]::UTF8.GetBytes($content)
         $header = [Text.Encoding]::UTF8.GetBytes("blob $($bytes.Length)`0")
@@ -224,9 +229,10 @@ function Publish-VoxelyWingetSubmission {
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
         [Parameter(Mandatory)][string]$ManifestDirectory,
-        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$Sha256
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{64}$')][string]$Sha256,
+        [Parameter(Mandatory)][ValidatePattern('^\d{4}-\d{2}-\d{2}$')][string]$ReleaseDate
     )
-    $entries = @(Get-VoxelyWingetEntries -Directory $ManifestDirectory -Version $Version -Sha256 $Sha256)
+    $entries = @(Get-VoxelyWingetEntries -Directory $ManifestDirectory -Version $Version -Sha256 $Sha256 -ReleaseDate $ReleaseDate)
     $branch = Publish-VoxelyWingetBranch -Context $Context -Version $Version -Entries $entries
     $head = [Uri]::EscapeDataString("$($branch.Owner):$($branch.Branch)")
     $lookup = "repos/microsoft/winget-pkgs/pulls?state=all&base=master&head=$head&per_page=2"

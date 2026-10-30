@@ -49,7 +49,7 @@ function Assert-VoxelyGithubRelease {
         [string]$Repo = "AryaPaw/voxely"
     )
     $tag = "v$Version"
-    $release = gh release view $tag --repo $Repo --json tagName,assets,url 2>$null
+    $release = gh release view $tag --repo $Repo --json tagName,assets,url,publishedAt 2>$null
     if ($LASTEXITCODE -ne 0 -or -not $release) {
         throw "GitHub Release $tag does not exist on $Repo. Do not invent a latest URL."
     }
@@ -65,7 +65,29 @@ function Assert-VoxelyGithubRelease {
         HtmlUrl      = $data.url
         InstallerUrl = $asset.url
         AssetName    = $asset.name
+        ReleaseDate  = Get-VoxelyReleaseDate -PublishedAt $data.publishedAt
     }
+}
+
+function Get-VoxelyReleaseDate {
+    param([object]$PublishedAt)
+    if ($null -eq $PublishedAt -or [string]::IsNullOrWhiteSpace([string]$PublishedAt)) {
+        throw 'GitHub Release has no publication timestamp.'
+    }
+    try { $stamp = [DateTimeOffset]$PublishedAt }
+    catch { throw 'GitHub Release has an invalid publication timestamp.' }
+    return $stamp.UtcDateTime.ToString('yyyy-MM-dd', [Globalization.CultureInfo]::InvariantCulture)
+}
+
+function Get-VoxelyWingetUpdateArguments {
+    param([string]$Version, [string]$OutDir, $Release)
+    return @(
+        'update', (Get-VoxelyWingetPackageId),
+        '--urls', (Get-VoxelyWingetCreateUrlArg -Version $Version),
+        '--version', $Version, '--out', $OutDir, '--no-open',
+        '--release-date', $Release.ReleaseDate,
+        '--release-notes-url', $Release.HtmlUrl
+    )
 }
 
 function Install-VoxelyWingetCreate {
