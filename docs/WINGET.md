@@ -87,7 +87,7 @@ Windows Sandbox: `scripts/run-windows-sandbox.ps1` after a local NSIS build (not
 
 1. Have a non-draft GitHub Release `vX.Y.Z` whose asset is `Voxely_X.Y.Z_x64-setup.exe` (existing `v0.2.12` already matches this pattern).
 2. Sign the Microsoft CLA if you have not.
-3. Create a **classic** PAT (fine-grained tokens are not supported by winget-create) with `public_repo` and `workflow`. `workflow` allows fork synchronization to bring in upstream `.github/workflows` changes. `repo` also covers `public_repo`, but isn't needed for these public repositories. Don't grant `delete_repo`; this automation doesn't delete forks.
+3. Create a **classic** PAT with `public_repo` only. Leave `repo`, `workflow` and `delete_repo` unchecked: this automation doesn't update workflows, access private repositories or delete forks.
 4. On a Windows machine: `wingetcreate new https://github.com/AryaPaw/voxely/releases/download/vX.Y.Z/Voxely_X.Y.Z_x64-setup.exe`
 5. Set PackageIdentifier to `AryaPaw.Voxely`. Confirm `nullsoft`, `x64`, `user`. Do not keep a guessed SHA; let the tool hash the download.
 6. `winget validate` and a silent local install/uninstall as above. Reinstall once and confirm a single Apps & Features entry.
@@ -104,25 +104,27 @@ After `AryaPaw.Voxely` exists on the community source:
 Git tag vX.Y.Z -> existing release.yml -> GitHub Release
   -> optional winget.yml (only if WINGET_AUTO_UPDATE=true)
   -> check published version and existing PR
-  -> verify PAT scopes and fast-forward fork master
-  -> wingetcreate update AryaPaw.Voxely --urls "<versioned-url>|x64|user" --version X.Y.Z --submit --no-open
+  -> wingetcreate update (generation and validation only)
+  -> isolated version branch containing exactly three manifests
+  -> verify immutable diff and open or reuse the version PR
 ```
 
 The token is read from `WINGET_CREATE_GITHUB_TOKEN` in the environment. Never pass `--token` on the command line (it can appear in logs).
 
 `GH_TOKEN` stays the read-only Actions token for release inspection/download. Fork operations use only `WINGET_CREATE_GITHUB_TOKEN`, including identity and scope checks. Workflow inputs enter PowerShell through environment variables; the script validates `X.Y.Z` before using the version.
 
-All WinGet workflow runs share one concurrency group because every version updates the same fork. Before submission:
+WinGet runs share one concurrency group to prevent duplicate submissions. The dedicated classic PAT needs only `public_repo`. Neither `repo` nor `workflow` is required; don't expand access to private repositories. GitHub's token UI may select `repo` automatically when `workflow` is selected, so leave `workflow` unchecked.
 
-- If the version is already in `microsoft/winget-pkgs`, compare its installer URL and SHA256 with the downloaded release installer before exiting successfully. Mismatched bytes require a new version.
-- If the token owner's exact version PR is open, verify its repository, changed-file scope and installer URL/SHA256 at the immutable PR head SHA, print its URL and exit successfully. Search/API errors stop the job rather than being treated as "no PR".
-- Require a classic PAT with `public_repo` (or `repo`) and `workflow` before any write. Expiration, insufficient scopes and missing/wrong forks fail with an actionable error.
-- Verify the token owner's `winget-pkgs` is a writable fork of `microsoft/winget-pkgs` with default branch `master`.
-- Capture upstream/fork SHAs and refuse synchronization if fork `master` has unique commits. Update only `master`, using GitHub's reference API with `force=false`, then read it back. PR branches aren't modified. Concurrent ref conflicts get at most three attempts; every attempt rechecks ancestry.
+- An already published version is checked against the release installer URL and SHA256 before returning successfully.
+- An existing open version PR is checked for the correct fork, base and exactly three added manifest paths. Its installer URL and SHA256 are verified at its immutable head SHA. A closed version PR requires inspection instead of creating a duplicate. Search/API errors remain fatal.
+- New submissions require a public writable fork of `microsoft/winget-pkgs`. The script captures upstream and fork master SHAs and selects their common ancestor. Stale or diverged master branches are preserved, including user commits.
+- Official `wingetcreate` generates and validates the manifests; its `--submit` path isn't used because it synchronizes fork master.
+- Only the three regular YAML files for the requested version can enter a new tree. Their package ID, version and release installer hash/URL are checked. File size is bounded and reparse points are rejected.
+- GitHub Git Data APIs create one commit and a version branch named `codex/winget-AryaPaw.Voxely-X.Y.Z`. No existing ref, master branch or workflow file is updated. A compare against the captured upstream SHA must contain exactly the three additions with the expected Git blob hashes before a PR can be opened.
+- Retries reuse a matching branch and PR. Ref creation races and duplicate-PR responses are resolved by reading and validating existing state. An existing branch with unrelated changes or different bytes is never overwritten. No force push, fork deletion or token replacement is used.
+- Public PR creation is verified again at the expected head SHA. If another writer changes that branch, the job fails for inspection rather than claiming success.
 
-The reference API avoids depending on `merge-upstream` for a large stale fork. This also prevents destructive recovery from a divergent branch. GitHub outages, expired/revoked tokens, or a manually diverged fork still need attention; errors remain fatal.
-
-Offline regression fixtures run through `bun run winget:test-lib` and `bun run verify:metadata`. They check idempotency, scopes, credential separation, fast-forward-only writes, divergence, concurrent conflicts and API failures without contacting GitHub.
+Offline API fixtures run through `bun run winget:test-lib` and `bun run verify:metadata`. They execute the production request and publisher functions using a token fixture with only `public_repo`, including fresh creation, stale/diverged forks, retries, collisions, concurrent creation, API errors, credential isolation and exact manifest-only diffs.
 
 The helper pins the official `wingetcreate 1.12.13.0` executable and its SHA256 in `Get-VoxelyWingetCreateRelease`. Downloads use a bounded temporary file in the cache directory. A failed transfer or hash mismatch cannot replace the cached executable; a corrupt or older cache is repaired on the next successful download. Update the version, versioned URL and hash together from the [official release](https://github.com/microsoft/winget-create/releases/tag/v1.12.13.0).
 
@@ -132,11 +134,11 @@ The helper pins the official `wingetcreate 1.12.13.0` executable and its SHA256 
 
 ### Recovering the old fork-sync error
 
-For `The forked repository could not be synced with the upstream commits`, update the existing classic PAT's scopes to include `workflow` at [GitHub token settings](https://github.com/settings/tokens). If you regenerate or replace it, update the existing `WINGET_CREATE_GITHUB_TOKEN` Actions secret too. Never paste it into a log, workflow YAML or chat.
+Deploy this automation to the workflow ref and rerun `winget.yml` for the already published version with `submit=true`. Keep the existing `public_repo` token. Don't add `workflow`, grant private-repository access, synchronize/reset master, regenerate the token or delete the fork. If an older release tag still contains the old synchronization code, dispatch the standalone WinGet workflow from the updated main branch instead of rerunning that old tag's code.
 
-After this automation is on the selected workflow ref, run `winget.yml` again for the published version with `submit=true`. A successful existing submission is a no-op; a new version first synchronizes the fork. Don't rebuild the release, move its tag, delete the fork or use a force push to recover.
+An existing matching PR is a read-only no-op; a fresh version uses a separate branch from shared history. This avoids the permission problem even when upstream workflows changed after the fork was created. GitHub outages, revoked/expired tokens and manually conflicting version branches can still fail safely and require attention.
 
-References: [GitHub reference updates and permissions](https://docs.github.com/en/rest/git/refs#update-a-reference), [winget-create token setup](https://github.com/microsoft/winget-create/blob/main/doc/token.md), [winget-create fork synchronization implementation](https://github.com/microsoft/winget-create/blob/main/src/WingetCreateCore/Common/GitHub.cs).
+References: [GitHub reference creation](https://docs.github.com/en/rest/git/refs#create-a-reference), [Git trees](https://docs.github.com/en/rest/git/trees#create-a-tree), [Git commits](https://docs.github.com/en/rest/git/commits#create-a-commit), [winget-create token setup](https://github.com/microsoft/winget-create/blob/main/doc/token.md).
 
 Manual retry without rebuilding Voxely:
 
@@ -153,10 +155,10 @@ A failed WinGet job does not unpublish the GitHub Release.
 
 ## Secrets and variables
 
-| Name                         | Kind             | When                                                                                           |
-| ---------------------------- | ---------------- | ---------------------------------------------------------------------------------------------- |
-| `WINGET_CREATE_GITHUB_TOKEN` | Actions secret   | Classic PAT, `public_repo` and `workflow`; token owner must have a writable `winget-pkgs` fork |
-| `WINGET_AUTO_UPDATE`         | Actions variable | Set to `true` only after the first `AryaPaw.Voxely` PR is merged                               |
-| `TAURI_SIGNING_PRIVATE_KEY`  | Existing secret  | Unchanged; not used by WinGet                                                                  |
+| Name                         | Kind             | When                                                                                        |
+| ---------------------------- | ---------------- | ------------------------------------------------------------------------------------------- |
+| `WINGET_CREATE_GITHUB_TOKEN` | Actions secret   | Classic PAT, `public_repo` only; token owner must have a public writable `winget-pkgs` fork |
+| `WINGET_AUTO_UPDATE`         | Actions variable | Set to `true` only after the first `AryaPaw.Voxely` PR is merged                            |
+| `TAURI_SIGNING_PRIVATE_KEY`  | Existing secret  | Unchanged; not used by WinGet                                                               |
 
 Do not commit tokens. Do not put the PAT in workflow YAML.

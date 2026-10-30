@@ -48,6 +48,7 @@ if ($Submit) {
     $submission = Initialize-VoxelyWingetSubmission -Version $Version
     if ($submission.Status -ne "ready") {
         Assert-VoxelyWingetManifestHash -Repo $submission.ManifestRepo -Ref $submission.ManifestRef -Version $Version -Sha256 $hash
+        if ($submission.Status -eq 'open-pr') { Assert-VoxelyWingetPullSnapshot -Submission $submission }
         Write-Host "WinGet $Version already has matching status $($submission.Status): $($submission.Url). No duplicate submitted."
         exit 0
     }
@@ -89,10 +90,13 @@ $args = @(
     "--out", $OutDir,
     "--no-open"
 )
-if ($Submit) {
-    $args += "--submit"
-    Write-Host "Submitting PR to microsoft/winget-pkgs (token from env only)"
-}
+# wingetcreate generates and validates only. Its submission path synchronizes
+# fork master and can require workflow/private-repository permissions.
 & $create @args
 if ($LASTEXITCODE -ne 0) { throw "wingetcreate failed with $LASTEXITCODE" }
 Write-Host "Manifest output: $OutDir"
+if ($Submit) {
+    $manifestDirectory = Join-Path $OutDir "manifests/a/AryaPaw/Voxely/$Version"
+    $url = Publish-VoxelyWingetSubmission -Context $submission.Context -Version $Version -ManifestDirectory $manifestDirectory -Sha256 $hash
+    Write-Host "WinGet PR: $url"
+}

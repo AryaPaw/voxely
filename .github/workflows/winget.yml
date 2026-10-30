@@ -27,7 +27,7 @@ permissions:
   contents: read
 
 concurrency:
-  # All versions update the same fork master branch.
+  # Serialize submissions to avoid duplicate PRs; fork master is never updated.
   group: winget-submit
   cancel-in-progress: false
 
