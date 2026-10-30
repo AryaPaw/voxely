@@ -3,6 +3,8 @@ use std::time::{Duration, Instant};
 
 use crate::error::AppError;
 
+pub const MAX_ADDITIONAL_RETRIES: u32 = 5;
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RetryPolicy {

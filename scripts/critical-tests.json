@@ -8,14 +8,21 @@
         "audio::capture::tests::startup_timeout_releases_owner_only_after_native_worker_cleanup",
         "audio::capture::tests::stop_timeout_does_not_kill_worker_and_cancel_cleans_late_wav_after_join",
         "audio::capture::tests::duration_cap_matches_across_input_rates",
+        "audio::capture::tests::overflow_keeps_recording_and_preserves_speech_until_explicit_stop",
+        "audio::capture::tests::busy_meter_does_not_block_the_audio_callback",
+        "audio::capture::tests::capture_queue_reserves_ten_seconds_at_the_device_rate",
         "audio::capture::tests::pcm_flush_preserves_short_chunk_and_stops_at_exact_frame_limit",
+        "dsp::silence::tests::long_quiet_pause_is_capped_and_speech_is_unchanged",
+        "dsp::silence::tests::disabled_short_pauses_and_quiet_speech_are_bit_exact",
+        "dsp::silence::tests::multiple_pauses_preserve_every_voice_segment_and_smooth_quiet_joins",
+        "dsp::rnnoise::tests::drain_and_alignment_match_zero_padded_reference_for_every_tail_size",
+        "dsp::rnnoise::tests::chunked_processing_and_reuse_preserve_complete_aligned_signal",
+        "dsp::pipeline::tests::rnnoise_edge_signal_stays_aligned_after_dry_wet_mix_and_pcm16_storage",
+        "app::session::tests::capture_limit_is_distinct_from_queue_loss_and_device_failure",
         "app::session::tests::duplicate_stop_preserves_recording_audio_and_usage",
         "app::session::tests::cancel_discards_audio_history_and_usage",
         "app::session::tests::cancel_during_stopping_hides_history_until_audio_cleanup_finishes",
-        "app::session::tests::cancelled_pipeline_delete_failure_is_retried_until_history_and_usage_are_removed",
-        "dsp::silence::tests::long_quiet_pause_is_capped_and_speech_is_unchanged",
-        "dsp::silence::tests::disabled_short_pauses_and_quiet_speech_are_bit_exact",
-        "dsp::silence::tests::multiple_pauses_preserve_every_voice_segment_and_smooth_quiet_joins"
+        "app::session::tests::cancelled_pipeline_delete_failure_is_retried_until_history_and_usage_are_removed"
       ]
     },
     {
@@ -26,9 +33,13 @@
         "app::session::tests::finalized_capture_write_failure_preserves_audio_and_actual_storage_error",
         "app::session::tests::processed_reference_commit_failures_keep_retry_audio_after_restart",
         "app::session::tests::raw_cleanup_failure_keeps_both_references",
+        "app::session::tests::live_and_retry_uploads_compress_only_the_upload_and_keep_history_duration",
         "app::session::tests::startup_repairs_partial_wav_and_restores_capture_duration",
         "app::session::tests::failed_wav_read_preserves_source_when_history_lookup_fails",
-        "app::session::tests::live_and_retry_uploads_compress_only_the_upload_and_keep_history_duration"
+        "app::session::tests::initial_history_insert_failure_releases_start_ownership_before_hud_publication",
+        "audio::capture::tests::wav_readers_reject_invalid_metadata_before_allocating_or_resampling",
+        "audio::capture::tests::wav_readers_reject_sparse_oversized_files_without_loading_payload",
+        "app::session::tests::hostile_wav_retry_releases_reservation_without_resampling_or_modifying_source"
       ]
     },
     {
@@ -38,7 +49,20 @@
         "app::session::tests::delayed_pipeline_cannot_adopt_shutdown_or_new_session_generation",
         "app::session::tests::live_pipeline_requires_the_original_owner_and_cancel_sender",
         "app::session::tests::late_live_metadata_cannot_revive_cancelled_or_interrupted_recordings",
-        "app::session::tests::completed_insertion_releases_lifecycle_before_waiting_for_ui_cancel"
+        "app::session::tests::completed_insertion_releases_lifecycle_before_waiting_for_ui_cancel",
+        "windows_int::insert_engine::tests::start_capture_is_never_replaced_by_live_focus",
+        "windows_int::insert_engine::tests::same_process_other_root_copies_without_restoring",
+        "windows_int::insert_engine::tests::restore_failure_is_not_reported_as_a_user_window_switch",
+        "windows_int::insert_engine::tests::first_chunk_preserves_actual_policy_when_focus_or_identity_changes",
+        "windows_int::insert_engine::tests::missing_or_foreign_focus_never_receives_keys",
+        "windows_int::insert_engine::tests::delivery_uses_current_child_class_after_hotkey_release",
+        "windows_int::insert_engine::tests::changing_child_during_delivery_stops_before_next_chunk",
+        "windows_int::text_injector::native_tests::root_lifetime_survives_owned_edit_child_recreation",
+        "windows_int::text_injector::native_tests::stop_target_adoption_preserves_same_window_marker_and_releases_previous_window",
+        "app::session::tests::automatic_stop_and_stop_without_external_window_keep_start_target",
+        "app::session::tests::stop_target_selection_finishes_before_cancel_can_replace_session_ownership",
+        "app::session::tests::shutdown_cancellation_boundary_signals_live_and_retry_and_waits_for_their_owner",
+        "app::session::tests::shutdown_between_retry_reservation_and_registration_prevents_new_work"
       ]
     },
     {
@@ -47,7 +71,8 @@
       "tests": [
         "app::session::tests::retry_cancellation_restores_original_status_and_keeps_started_attempt",
         "app::session::tests::cancelled_retry_storage_failure_keeps_staged_audio_until_restore_is_durable",
-        "app::session::tests::retry_attempt_is_attributed_to_the_model_used_for_the_request"
+        "app::session::tests::retry_attempt_is_attributed_to_the_model_used_for_the_request",
+        "app::session::tests::history_retry_reservation_recovers_terminal_storage_fault_without_another_api_call"
       ]
     },
     {
@@ -58,7 +83,15 @@
         "history::repository::tests::failed_usage_update_rolls_back_recording_changes",
         "history::repository::tests::usage_counts_retries_partial_cost_and_manual_delete_separately",
         "history::repository::tests::manual_delete_removes_history_and_usage_in_one_transaction",
-        "history::repository::tests::usage_expiry_and_full_clear_survive_restart"
+        "history::repository::tests::usage_expiry_and_full_clear_survive_restart",
+        "history::repository::tests::usage_prune_is_atomic_and_preserves_exact_cutoff_without_querying_statistics",
+        "app::session::tests::usage_maintenance_expires_metadata_without_opening_statistics_or_expiring_history",
+        "app::session::tests::attempt_storage_failure_preserves_paid_text_and_recovers_cost_once",
+        "app::session::tests::deferred_usage_attempt_cannot_restore_deleted_or_cancelled_metrics",
+        "app::session::tests::deferred_usage_capacity_reserves_all_configured_attempts_before_api_admission",
+        "app::session::tests::usage_reservation_covers_retry_settings_changed_after_admission",
+        "transcription::openrouter::tests::malformed_200_keeps_confirmed_cost_in_progress_and_usage_journal",
+        "transcription::openrouter::tests::malformed_200_does_not_invent_or_accept_invalid_cost"
       ]
     },
     {
@@ -94,11 +127,22 @@
       "purpose": "Commit comparison audio atomically and keep stale, cancelled or delayed workers from replacing a new take.",
       "tests": [
         "app::compare::tests::compare_second_output_failure_rolls_back_only_new_files_and_keeps_previous_clip",
+        "app::compare::tests::compare_compresses_upload_only_and_respects_disabled_setting",
         "app::compare::tests::stale_compare_processing_cannot_write_or_release_a_new_take",
         "app::compare::tests::compare_timeout_keeps_busy_until_late_native_capture_and_discards_its_audio",
         "app::compare::tests::cancelled_run_keeps_lease_until_old_worker_finishes",
-        "app::compare::tests::compare_commit_rejects_shutdown_and_released_recording_before_any_write",
-        "app::compare::tests::compare_compresses_upload_only_and_respects_disabled_setting"
+        "app::compare::tests::compare_commit_rejects_shutdown_and_released_recording_before_any_write"
+      ]
+    },
+    {
+      "id": "settings-transfer",
+      "purpose": "Reject invalid settings imports, preserve local lifecycle and retention state, and restore the settings snapshot and hotkey after an application failure.",
+      "tests": [
+        "settings_transfer::tests::round_trip_preserves_user_settings_and_local_state",
+        "settings::tests::legacy_settings_enable_silence_compression_and_disabled_survives_restart",
+        "settings_transfer::tests::rejects_invalid_files_without_mutating_current",
+        "commands::tests::failed_import_side_effect_restores_all_fields_with_a_new_sequence",
+        "app::shortcuts::tests::failed_registration_does_not_skip_restoring_the_previous_hotkey"
       ]
     },
     {

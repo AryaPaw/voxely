@@ -16,6 +16,7 @@ mod logging;
 mod notify;
 mod runtime_diagnostics;
 mod settings;
+mod settings_transfer;
 mod text_replacements;
 mod transcription;
 mod updates;
@@ -48,6 +49,7 @@ pub fn run() {
             show_main(app, "history");
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             MacosLauncher::LaunchAgent,
             Some(vec!["--autostart"]),
@@ -125,6 +127,9 @@ pub fn run() {
             overlay_pointer_matches,
             get_settings,
             save_settings,
+            export_settings_file,
+            read_settings_file,
+            import_settings,
             acknowledge_first_run_disclosure,
             preview_retention_settings,
             apply_retention_settings,

@@ -255,6 +255,9 @@ export const api = {
   settings: () => ipc<AppSettings>("get_settings"),
   runtimeInfo: () => ipc<RuntimeInfo>("get_runtime_info"),
   saveSettings: (settings: AppSettings) => ipc<AppSettings>("save_settings", { settings }),
+  exportSettingsFile: () => ipc<boolean>("export_settings_file"),
+  readSettingsFile: () => ipc<string | null>("read_settings_file"),
+  importSettings: (data: string) => ipc<AppSettings>("import_settings", { data }),
   acknowledgeFirstRunDisclosure: () => ipc<AppSettings>("acknowledge_first_run_disclosure"),
   previewRetentionSettings: (settings: AppSettings) =>
     ipc<RetentionPreview>("preview_retention_settings", { settings }),

@@ -2,18 +2,22 @@ param(
     [string]$ProcessName = "voxely",
     [string]$Scenario = "manual",
     [ValidateSet("debug", "release")]
-    [string]$Profile = "debug",
+    [string]$Profile = "release",
+    [int]$TargetProcessId = 0,
     [string]$OutFile
 )
 
 $ErrorActionPreference = "Stop"
 
 function Get-OwnedTree {
-    param([string]$Name)
+    param([string]$Name, [string]$ExecutablePath, [int]$TargetId)
 
-    $roots = @(Get-Process -Name $Name -ErrorAction SilentlyContinue)
+    $roots = @(Get-Process -Name $Name -ErrorAction SilentlyContinue | Where-Object {
+        [string]::Equals($_.Path, $ExecutablePath, [StringComparison]::OrdinalIgnoreCase) -and
+            ($TargetId -eq 0 -or $_.Id -eq $TargetId)
+    })
     if ($roots.Count -eq 0) {
-        return @()
+        throw "No running $ExecutablePath process matches the requested profile/PID."
     }
 
     $all = @(Get-CimInstance Win32_Process)
@@ -72,7 +76,9 @@ function Get-Row {
     }
 }
 
-$owned = @(Get-OwnedTree -Name $ProcessName)
+$repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+$expectedExe = Join-Path $repo "src-tauri/target/$Profile/$ProcessName.exe"
+$owned = @(Get-OwnedTree -Name $ProcessName -ExecutablePath $expectedExe -TargetId $TargetProcessId)
 $rows = @($owned | ForEach-Object { Get-Row $_ })
 $webview = @($rows | Where-Object { $_.name -eq "msedgewebview2" }).Count
 
@@ -87,7 +93,6 @@ $tree = [ordered]@{
 }
 
 $git = "unknown"
-$repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 try {
     $git = (git -C $repo rev-parse --short HEAD).Trim()
 } catch {

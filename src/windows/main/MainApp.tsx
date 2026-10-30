@@ -531,8 +531,7 @@ export function MainApp() {
                   copy={copy}
                   onChange={(patch) => void persist({ ...settings, ...patch })}
                   onSettingsReplaced={(next, wipeApiKey) => {
-                    setSettings(next);
-                    applyTheme(next.theme);
+                    setSettings((prev) => acceptSavedSettings(prev, next));
                     if (wipeApiKey) {
                       setKeyConfigured(false);
                     }

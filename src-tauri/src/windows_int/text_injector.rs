@@ -1,5 +1,13 @@
 pub use crate::windows_int::insert_engine::*;
 
+pub fn adopt_stop_target(current: &mut Option<CapturedTarget>, at_stop: Option<CapturedTarget>) {
+    let Some(at_stop) = at_stop else { return };
+    let previous = current.replace(at_stop);
+    if let Some(previous) = previous.filter(|old| !old.shares_lifetime_marker(at_stop)) {
+        native::release_session_target(previous);
+    }
+}
+
 pub fn insert_transcript_now(
     mode: &str,
     captured: Option<CapturedTarget>,
@@ -9,13 +17,17 @@ pub fn insert_transcript_now(
     abort: impl Fn() -> bool,
     hotkey: &str,
 ) -> InsertOutcome {
+    struct ReleaseTarget(Option<CapturedTarget>);
+    impl Drop for ReleaseTarget {
+        fn drop(&mut self) {
+            if let Some(target) = self.0 {
+                native::release_session_target(target);
+            }
+        }
+    }
+    let _target_lifetime = ReleaseTarget(captured);
     let abort_ref: &dyn Fn() -> bool = &abort;
-    let skip = [overlay_root, main_root]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    let live = native::capture_session_target(&skip, captured.map(|t| t.generation).unwrap_or(0));
-    let captured = resolve_captured_insert_target(captured, live, overlay_root, main_root);
+    let captured = resolve_captured_insert_target(captured, None, overlay_root, main_root);
     let mut world = native::LiveWorld {
         overlay_root,
         main_root,
@@ -48,12 +60,13 @@ pub mod native {
     };
     use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
     use windows::Win32::UI::Input::KeyboardAndMouse::{
-        GetAsyncKeyState, SendInput, SetFocus, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-        KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN,
-        VK_RCONTROL, VK_RMENU, VK_RSHIFT, VK_RWIN,
+        GetAsyncKeyState, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
+        KEYEVENTF_UNICODE, VIRTUAL_KEY, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_LWIN, VK_RCONTROL,
+        VK_RMENU, VK_RSHIFT, VK_RWIN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow, SetForegroundWindow,
+        GetForegroundWindow, GetPropW, GetWindowThreadProcessId, IsIconic, IsWindow, RemovePropW,
+        SetForegroundWindow, SetPropW,
     };
 
     pub struct LiveWorld {
@@ -70,17 +83,41 @@ pub mod native {
                 if !fg.is_invalid() {
                     GetWindowThreadProcessId(fg, Some(&mut foreground_pid));
                 }
-                let focus_root = thread_focus_hwnd(fg).and_then(|hwnd| hwnd_root_value(hwnd));
+                let focus = thread_focus_hwnd(fg);
+                let focus_root = focus.and_then(|hwnd| hwnd_root_value(hwnd));
                 let (target_alive, target_iconic, window_class, integrity_blocked) =
                     if let Some(target) = captured {
                         let hwnd = HWND(target.hwnd as *mut _);
                         let window_ok = IsWindow(hwnd).as_bool();
                         let root = if window_ok { root_hwnd(hwnd) } else { hwnd };
-                        let alive = window_ok && pid_matches(hwnd, target.pid);
+                        let pid_ok = window_ok && pid_matches(hwnd, target.pid);
+                        let root_ok = window_ok && hwnd_root_value(hwnd) == Some(target.root);
+                        let thread_ok = window_ok && window_thread_id(hwnd) == target.tid;
+                        let marker_ok = window_ok && session_target_marker_matches(&target);
+                        let alive = window_ok && pid_ok && root_ok && thread_ok && marker_ok;
+                        if !alive {
+                            tracing::warn!(
+                                generation = target.generation,
+                                captured_hwnd = target.hwnd,
+                                captured_root = target.root,
+                                captured_pid = target.pid,
+                                captured_tid = target.tid,
+                                window_exists = window_ok,
+                                pid_matches = pid_ok,
+                                root_matches = root_ok,
+                                thread_matches = thread_ok,
+                                lifetime_marker_matches = marker_ok,
+                                "insertion target identity rejected"
+                            );
+                        }
                         (
                             alive,
                             alive && IsIconic(root).as_bool(),
-                            if alive { window_class_name(hwnd) } else { None },
+                            if alive && focus_root == Some(target.root) {
+                                focus.and_then(|hwnd| window_class_name(hwnd))
+                            } else {
+                                None
+                            },
                             if alive {
                                 integrity_blocked(target.pid)
                             } else {
@@ -99,6 +136,7 @@ pub mod native {
                         Some(foreground_pid)
                     },
                     focus_root,
+                    focus_hwnd: focus.map(|hwnd| hwnd.0 as usize),
                     overlay_root: self.overlay_root,
                     main_root: self.main_root,
                     target_alive,
@@ -116,23 +154,9 @@ pub mod native {
                     return false;
                 }
                 let _guard = attach_input(hwnd);
-                let ok = SetForegroundWindow(hwnd).as_bool();
-                let _ = SetFocus(HWND(target.hwnd as *mut _));
+                let _ = SetForegroundWindow(hwnd);
                 drop(_guard);
-                hwnd_root_value(GetForegroundWindow()) == Some(target.root) || ok
-            }
-        }
-
-        fn focus_caret(&mut self, target: &CapturedTarget) -> bool {
-            unsafe {
-                let hwnd = HWND(target.hwnd as *mut _);
-                if !IsWindow(hwnd).as_bool() {
-                    return false;
-                }
-                let _guard = attach_input(hwnd);
-                let focused = SetFocus(hwnd).is_ok();
-                drop(_guard);
-                focused || thread_focus_hwnd(hwnd).is_some_and(|focus| focus == hwnd)
+                hwnd_root_value(GetForegroundWindow()) == Some(target.root)
             }
         }
 
@@ -179,26 +203,74 @@ pub mod native {
     }
 
     pub fn capture_session_target(skip_roots: &[usize], generation: u64) -> Option<CapturedTarget> {
-        inspect_foreground(skip_roots).map(|mut target| {
+        let captured = inspect_foreground(skip_roots).and_then(|mut target| {
             target.generation = generation;
-            target
-        })
+            bind_session_target(target)
+        });
+        tracing::info!(
+            generation,
+            captured_hwnd = captured.map(|target| target.hwnd),
+            captured_root = captured.map(|target| target.root),
+            captured_pid = captured.map(|target| target.pid),
+            captured_tid = captured.map(|target| target.tid),
+            "insertion target captured"
+        );
+        captured
+    }
+
+    fn session_target_property() -> windows::core::HSTRING {
+        format!("Voxely.InsertTarget.{}", std::process::id()).into()
+    }
+
+    pub(super) fn bind_session_target(target: CapturedTarget) -> Option<CapturedTarget> {
+        let token = usize::try_from(target.generation).ok()?.checked_add(1)?;
+        // Window properties are removed by Windows when the HWND is destroyed.
+        // PID/TID/root equality alone cannot detect reuse on the same UI thread.
+        unsafe {
+            if let Err(error) = SetPropW(
+                HWND(target.hwnd as *mut _),
+                &session_target_property(),
+                HANDLE(token as *mut _),
+            ) {
+                tracing::warn!(
+                    generation = target.generation,
+                    captured_hwnd = target.hwnd,
+                    error_code = error.code().0,
+                    "insertion lifetime marker could not be bound"
+                );
+                return None;
+            }
+        }
+        Some(target)
+    }
+
+    fn session_target_marker_matches(target: &CapturedTarget) -> bool {
+        let Some(token) = usize::try_from(target.generation)
+            .ok()
+            .and_then(|g| g.checked_add(1))
+        else {
+            return false;
+        };
+        unsafe {
+            GetPropW(HWND(target.hwnd as *mut _), &session_target_property()).0 as usize == token
+        }
+    }
+
+    pub fn release_session_target(target: CapturedTarget) {
+        if session_target_marker_matches(&target) {
+            unsafe {
+                let _ = RemovePropW(HWND(target.hwnd as *mut _), &session_target_property());
+            }
+        }
     }
 
     fn inspect_foreground(skip_roots: &[usize]) -> Option<CapturedTarget> {
         unsafe {
             let foreground = GetForegroundWindow();
             hwnd_to_native(foreground)?;
-            let captured = if let Some(focus) = thread_focus_hwnd(foreground) {
-                if hwnd_root_value(focus) == hwnd_root_value(foreground) {
-                    hwnd_to_native(focus)
-                } else {
-                    hwnd_to_native(foreground)
-                }
-            } else {
-                hwnd_to_native(foreground)
-            }?;
-            let hwnd = HWND(captured.value as *mut _);
+            // The stable recipient is the original top-level window. Its child
+            // controls can be recreated while dictation is in progress.
+            let hwnd = root_hwnd(foreground);
             let root = hwnd_root_value(hwnd)?;
             if skip_roots.contains(&root) {
                 return None;
@@ -206,7 +278,7 @@ pub mod native {
             let mut pid = 0u32;
             let tid = GetWindowThreadProcessId(hwnd, Some(&mut pid));
             Some(CapturedTarget {
-                hwnd: captured.value,
+                hwnd: root,
                 root,
                 pid,
                 tid,
@@ -545,6 +617,7 @@ pub mod native {
                 foreground_root: None,
                 foreground_pid: None,
                 focus_root: None,
+                focus_hwnd: None,
                 overlay_root: self.overlay_root,
                 main_root: self.main_root,
                 target_alive: false,
@@ -555,10 +628,6 @@ pub mod native {
         }
 
         fn restore_foreground(&mut self, _target: &CapturedTarget) -> bool {
-            false
-        }
-
-        fn focus_caret(&mut self, _target: &CapturedTarget) -> bool {
             false
         }
 
@@ -592,6 +661,8 @@ pub mod native {
         None
     }
 
+    pub fn release_session_target(_target: CapturedTarget) {}
+
     pub fn wait_for_keys_up(_keys: &[u16], _timeout: Duration) {}
 
     pub fn clipboard_copy(_text: &str) -> Result<(), AppError> {
@@ -604,14 +675,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn insert_prefers_live_focus() {
+    fn insert_preserves_start_target_without_live_fallback() {
         let desktop = NativeHwnd { value: 1 };
         let field = NativeHwnd { value: 2 };
         let overlay = NativeHwnd { value: 3 };
         let main = NativeHwnd { value: 4 };
         assert_eq!(
             resolve_insert_target(Some(desktop), Some(field), Some(overlay), Some(main)),
-            Some(field)
+            Some(desktop)
         );
         assert_eq!(
             resolve_insert_target(Some(desktop), Some(overlay), Some(overlay), Some(main)),
@@ -619,7 +690,7 @@ mod tests {
         );
         assert_eq!(
             resolve_insert_target(None, Some(field), Some(overlay), Some(main)),
-            Some(field)
+            None
         );
         assert!(capture_skips_voxely_roots(1, Some(1), Some(2)));
     }
@@ -651,69 +722,208 @@ mod tests {
 }
 
 #[cfg(all(test, windows))]
+mod native_tests;
+
+#[cfg(all(test, windows))]
 mod hwnd_tests {
     use super::*;
     use windows::core::w;
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GetWindowTextW, ShowWindow, SW_SHOW, WS_OVERLAPPEDWINDOW,
-        WS_VISIBLE,
+        CreateWindowExW, DestroyWindow, DispatchMessageW, GetForegroundWindow, GetWindowTextW,
+        GetWindowThreadProcessId, PeekMessageW, SetForegroundWindow, TranslateMessage, MSG,
+        PM_REMOVE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
     };
 
+    // Opt-in native focus check: uses only owned edit windows and intercepts
+    // clipboard delivery so the user's clipboard and applications stay intact.
     #[test]
-    fn edit_window_accepts_cyrillic_and_emoji_without_replay() {
+    #[ignore = "requires an interactive Windows desktop and temporarily changes foreground"]
+    fn native_start_target_survives_foreground_switch() {
+        unsafe fn settle_foreground(expected: HWND) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                let mut message = MSG::default();
+                while PeekMessageW(&mut message, None, 0, 0, PM_REMOVE).as_bool() {
+                    let _ = TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                }
+                if GetForegroundWindow() == expected || std::time::Instant::now() >= deadline {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        }
+        struct OwnedWindow(HWND);
+        impl Drop for OwnedWindow {
+            fn drop(&mut self) {
+                unsafe {
+                    let _ = DestroyWindow(self.0);
+                }
+            }
+        }
+        struct FixtureWorld {
+            native: native::LiveWorld,
+            copied: Option<String>,
+        }
+        impl InsertWorld for FixtureWorld {
+            fn snapshot(&self, target: Option<CapturedTarget>) -> WorldSnapshot {
+                self.native.snapshot(target)
+            }
+            fn restore_foreground(&mut self, _: &CapturedTarget) -> bool {
+                panic!("must not steal focus from the other window")
+            }
+            fn wait_keys_up(&mut self, _: &[u16], _: std::time::Duration) {
+                panic!("must not prepare keyboard delivery after a user switch")
+            }
+            fn send_keys(&mut self, _: &[InsertKey]) -> ChunkSend {
+                panic!("must not send any keys to the other window")
+            }
+            fn clipboard_copy(&mut self, text: &str) -> Result<(), crate::error::AppError> {
+                self.copied = Some(text.into());
+                Ok(())
+            }
+        }
         unsafe {
-            let Ok(edit) = CreateWindowExW(
-                Default::default(),
-                w!("EDIT"),
-                w!(""),
-                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                40,
-                40,
-                400,
-                200,
-                HWND::default(),
-                None,
-                None,
-                None,
-            ) else {
-                return;
+            let original_foreground = GetForegroundWindow();
+            let create = |title| {
+                OwnedWindow(
+                    CreateWindowExW(
+                        Default::default(),
+                        w!("EDIT"),
+                        title,
+                        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                        40,
+                        40,
+                        400,
+                        200,
+                        HWND::default(),
+                        None,
+                        None,
+                        None,
+                    )
+                    .expect("create owned edit window"),
+                )
             };
-            let _ = ShowWindow(edit, SW_SHOW);
-            let target = CapturedTarget {
-                hwnd: edit.0 as usize,
-                root: edit.0 as usize,
+            let first = create(w!("Voxely insertion fixture A"));
+            let second = create(w!("Voxely insertion fixture B"));
+            struct ForegroundRestore(HWND);
+            impl Drop for ForegroundRestore {
+                fn drop(&mut self) {
+                    unsafe {
+                        let _ = SetForegroundWindow(self.0);
+                    }
+                }
+            }
+            let _restore = ForegroundRestore(original_foreground);
+            let _ = SetForegroundWindow(first.0);
+            settle_foreground(first.0);
+            if GetForegroundWindow() != first.0
+                && std::env::var("VOXELY_NATIVE_FOCUS_WAIT").as_deref() == Ok("1")
+            {
+                // Automation may not own foreground permission. Give the
+                // desktop controller time to activate this exact owned window.
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
+                while GetForegroundWindow() != first.0 && std::time::Instant::now() < deadline {
+                    settle_foreground(first.0);
+                }
+            }
+            assert_eq!(
+                GetForegroundWindow(),
+                first.0,
+                "foreground activation denied"
+            );
+            let start = native::capture_session_target(&[], 42).expect("capture start window");
+            assert_eq!(start.root, first.0 .0 as usize);
+            assert!(
+                SetForegroundWindow(second.0).as_bool(),
+                "foreground switch denied"
+            );
+            settle_foreground(second.0);
+            assert_eq!(
+                GetForegroundWindow(),
+                second.0,
+                "switched window must really own foreground"
+            );
+            let live = CapturedTarget {
+                hwnd: second.0 .0 as usize,
+                root: second.0 .0 as usize,
                 pid: std::process::id(),
-                tid: 0,
-                generation: 1,
+                tid: GetWindowThreadProcessId(second.0, None),
+                generation: 42,
             };
-            let mut world = native::LiveWorld {
-                overlay_root: None,
-                main_root: None,
-            };
-            let restored = world.restore_foreground(&target);
-            let never = || false;
-            let text = "Привет 👍";
-            let outcome = run_insert(
-                &mut world,
-                InsertRequest {
-                    mode: "unicode",
-                    text,
-                    captured: Some(target),
+            let captured = resolve_captured_insert_target(Some(start), Some(live), None, None);
+            assert_eq!(captured, Some(start));
+            let mut world = FixtureWorld {
+                native: native::LiveWorld {
                     overlay_root: None,
                     main_root: None,
-                    hotkey: "",
-                    abort: &never,
                 },
+                copied: None,
+            };
+            let never = || false;
+            let text = "Private transcript";
+            assert_eq!(
+                run_insert(
+                    &mut world,
+                    InsertRequest {
+                        mode: "unicode",
+                        text,
+                        captured,
+                        overlay_root: None,
+                        main_root: None,
+                        hotkey: "",
+                        abort: &never,
+                    }
+                ),
+                InsertOutcome::Copied {
+                    reason: CopyReason::UserSwitched
+                }
             );
-            let mut buf = [0u16; 64];
-            let n = GetWindowTextW(edit, &mut buf);
-            let got = String::from_utf16_lossy(&buf[..n as usize]);
-            let _ = DestroyWindow(edit);
-            assert_ne!(outcome, InsertOutcome::Failed);
-            if restored && outcome == InsertOutcome::Inserted && !got.is_empty() {
-                assert_eq!(got, text);
+            assert_eq!(world.copied.as_deref(), Some(text));
+            assert_eq!(GetForegroundWindow(), second.0);
+            let mut buffer = [0u16; 64];
+            let len = GetWindowTextW(second.0, &mut buffer);
+            assert_eq!(
+                String::from_utf16_lossy(&buffer[..len as usize]),
+                "Voxely insertion fixture B"
+            );
+            for invalid in [
+                CapturedTarget {
+                    pid: start.pid.wrapping_add(1),
+                    ..start
+                },
+                CapturedTarget {
+                    tid: start.tid.wrapping_add(1),
+                    ..start
+                },
+                CapturedTarget {
+                    root: second.0 .0 as usize,
+                    ..start
+                },
+            ] {
+                assert!(!world.snapshot(Some(invalid)).target_alive);
             }
+            assert!(world.snapshot(Some(start)).target_alive);
+            native::release_session_target(start);
+            assert!(
+                !world.snapshot(Some(start)).target_alive,
+                "lost lifetime marker must reject a reused HWND"
+            );
+            let rebound = native::bind_session_target(CapturedTarget {
+                generation: start.generation + 1,
+                ..start
+            })
+            .unwrap();
+            assert!(
+                !world.snapshot(Some(start)).target_alive,
+                "a new lifetime must not validate the old target"
+            );
+            assert!(world.snapshot(Some(rebound)).target_alive);
+            native::release_session_target(rebound);
+            native::release_session_target(live);
+            drop(first);
+            assert!(!world.snapshot(Some(start)).target_alive);
         }
     }
 }

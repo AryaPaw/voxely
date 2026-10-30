@@ -29,11 +29,28 @@ pub fn insert_outcome_toast(
         InsertOutcome::Copied {
             reason: CopyReason::ClipboardBusy,
         } => None,
-        InsertOutcome::Copied { .. } => Some((
+        InsertOutcome::Copied { reason } => Some((
             title,
-            if english {
+            match (english, reason) {
+                (true, CopyReason::UserSwitched) => "A different window is active. Text copied; paste it yourself.".into(),
+                (false, CopyReason::UserSwitched) => "Активно другое окно. Текст скопирован, вставьте вручную.".into(),
+                (true, CopyReason::NoTarget) => "No insertion window was found. Text copied; paste it yourself.".into(),
+                (false, CopyReason::NoTarget) => "Окно для вставки не найдено. Текст скопирован, вставьте вручную.".into(),
+                (true, CopyReason::TargetGone) => "The original window is no longer available. Text copied; paste it yourself.".into(),
+                (false, CopyReason::TargetGone) => "Исходное окно недоступно. Текст скопирован, вставьте вручную.".into(),
+                (true, CopyReason::Minimized) => "The original window is minimized. Text copied; paste it yourself.".into(),
+                (false, CopyReason::Minimized) => "Исходное окно свёрнуто. Текст скопирован, вставьте вручную.".into(),
+                (true, CopyReason::IntegrityBlocked) => "Insertion into the original window requires higher privileges. Text copied; paste it yourself.".into(),
+                (false, CopyReason::IntegrityBlocked) => "Недостаточно прав для вставки в исходное окно. Текст скопирован, вставьте вручную.".into(),
+                (true, CopyReason::SendBlocked) => "Windows blocked keyboard delivery. Text copied; paste it yourself.".into(),
+                (false, CopyReason::SendBlocked) => "Windows отклонила отправку текста. Текст скопирован, вставьте вручную.".into(),
+                (true, CopyReason::RestoreFailed) => "Couldn't restore focus to the original window. Text copied; paste it yourself.".into(),
+                (false, CopyReason::RestoreFailed) => "Не удалось вернуть фокус в исходное окно. Текст скопирован, вставьте вручную.".into(),
+                (true, CopyReason::FocusNotReady) => "The input field in the original window doesn't have focus. Text copied; paste it yourself.".into(),
+                (false, CopyReason::FocusNotReady) => "Поле ввода в исходном окне не получило фокус. Текст скопирован, вставьте вручную.".into(),
+                (true, _) =>
                 "Text copied. Paste it yourself.".into()
-            } else {
+                , (false, _) =>
                 "Текст скопирован, вставьте вручную".into()
             },
         )),
@@ -274,5 +291,41 @@ mod tests {
         let partial = insert_outcome_toast("ru", InsertOutcome::PartialCopied).unwrap();
         assert!(partial.1.contains("прервана"));
         assert_eq!(ToastDispatch::Dispatched, ToastDispatch::Dispatched);
+    }
+
+    #[test]
+    fn fallback_notifications_identify_the_actual_cause_in_both_languages() {
+        let cases = [
+            (CopyReason::UserSwitched, "другое окно", "different window"),
+            (CopyReason::RestoreFailed, "вернуть фокус", "restore focus"),
+            (
+                CopyReason::FocusNotReady,
+                "не получило фокус",
+                "doesn't have focus",
+            ),
+            (
+                CopyReason::TargetGone,
+                "окно недоступно",
+                "window is no longer available",
+            ),
+            (CopyReason::Minimized, "свёрнуто", "minimized"),
+            (
+                CopyReason::IntegrityBlocked,
+                "Недостаточно прав",
+                "higher privileges",
+            ),
+            (CopyReason::SendBlocked, "отклонила", "blocked keyboard"),
+            (CopyReason::NoTarget, "не найдено", "was found"),
+        ];
+        for (reason, russian, english) in cases {
+            assert!(insert_outcome_toast("ru", InsertOutcome::Copied { reason })
+                .unwrap()
+                .1
+                .contains(russian));
+            assert!(insert_outcome_toast("en", InsertOutcome::Copied { reason })
+                .unwrap()
+                .1
+                .contains(english));
+        }
     }
 }

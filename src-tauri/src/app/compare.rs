@@ -685,6 +685,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             samples,
             truncated: false,
+            limit_reached: false,
             capture_error: None,
         }
     }
@@ -1238,6 +1239,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: vec![0.1; 8],
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });

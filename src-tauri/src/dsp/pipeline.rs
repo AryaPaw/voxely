@@ -220,10 +220,10 @@ impl DspPipeline {
                     }
                     let mut out = self.rnnoise.process(&samples);
                     out.extend(self.rnnoise.flush());
-                    if out.len() < samples.len() {
-                        out.resize(samples.len(), 0.0);
-                    } else {
-                        out.truncate(samples.len());
+                    if out.len() != samples.len() {
+                        return Err(AppError::AudioProcessingFailed(
+                            "RNNoise returned an incomplete aligned buffer".into(),
+                        ));
                     }
                     if mix >= 1.0 {
                         samples = out;
@@ -532,6 +532,54 @@ mod tests {
         for i in 0..mix_out.len() {
             let expected = dry_out[i] * 0.4 + wet_out[i] * 0.6;
             assert!((mix_out[i] - expected).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn rnnoise_edge_signal_stays_aligned_after_dry_wet_mix_and_pcm16_storage() {
+        use nnnoiseless::DenoiseState;
+        let len = DenoiseState::FRAME_SIZE * 6 + 37;
+        let input: Vec<f32> = (0..len).map(|i| (i as f32 * 0.13).sin() * 0.2).collect();
+        let mut state = DenoiseState::new();
+        let mut reference = Vec::new();
+        for (index, chunk) in input
+            .chunks(DenoiseState::FRAME_SIZE)
+            .chain(std::iter::once(&[][..]))
+            .enumerate()
+        {
+            let mut frame = [0.0; DenoiseState::FRAME_SIZE];
+            for (sample, source) in frame.iter_mut().zip(chunk) {
+                *sample = source * 32768.0;
+            }
+            let mut output = [0.0; DenoiseState::FRAME_SIZE];
+            state.process_frame(&mut output, &frame);
+            if index > 0 {
+                reference.extend(output.map(|sample| (sample / 32768.0).clamp(-1.0, 1.0)));
+            }
+        }
+        reference.truncate(len);
+        assert!(reference[..480].iter().any(|sample| sample.abs() > 0.001));
+        assert!(reference[len - 37..]
+            .iter()
+            .any(|sample| sample.abs() > 0.001));
+        let dir = tempfile::tempdir().unwrap();
+        for mix in [0.0, 0.5, 1.0] {
+            let mut preset = DspPreset::stt_optimized();
+            preset.order.retain(|slot| slot.kind == FilterKind::Rnnoise);
+            preset.rnnoise_mix = mix;
+            let actual = prepare_listen_audio(preset, input.clone()).unwrap();
+            assert_eq!(actual.len(), len);
+            let path = dir.path().join(format!("mix-{mix}.wav"));
+            crate::audio::capture::write_pcm16_wav(&path, SAMPLE_RATE, &actual).unwrap();
+            let stored = crate::audio::capture::read_pcm16_wav(&path).unwrap();
+            assert_eq!(stored.len(), len);
+            for ((dry, wet), (actual, stored)) in
+                input.iter().zip(&reference).zip(actual.iter().zip(&stored))
+            {
+                let expected = dry * (1.0 - mix) + wet * mix;
+                assert!((actual - expected).abs() < 1e-6);
+                assert!((stored - expected).abs() < 2.0 / 32768.0);
+            }
         }
     }
 

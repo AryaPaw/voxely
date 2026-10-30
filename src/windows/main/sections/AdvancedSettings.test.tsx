@@ -47,6 +47,83 @@ function settings(): AppSettings {
 }
 
 describe("AdvancedSettings failure paths", () => {
+  function renderTransfer(replaced = vi.fn()) {
+    render(
+      <AdvancedSettings
+        settings={settings()}
+        copy={messagesFor("en")}
+        onChange={vi.fn()}
+        onSettingsReplaced={replaced}
+      />,
+    );
+    return replaced;
+  }
+
+  it("exports and reports success only when a file is saved", async () => {
+    const save = vi
+      .spyOn(api, "exportSettingsFile")
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    renderTransfer();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() => expect(save).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Export" })).toBeEnabled());
+    expect(toast.success).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Export" }));
+    await waitFor(() =>
+      expect(toast.success).toHaveBeenCalledWith(messagesFor("en").settingsExported),
+    );
+  });
+
+  it("requires confirmation, cancels without writing and imports only the selected file", async () => {
+    vi.spyOn(api, "readSettingsFile").mockResolvedValue("selected-json");
+    const next = settings();
+    const apply = vi.spyOn(api, "importSettings").mockResolvedValue(next);
+    const replaced = renderTransfer();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    let dialog = await screen.findByRole("alertdialog");
+    expect(apply).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: messagesFor("en").cancel }));
+    await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
+    expect(apply).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    dialog = await screen.findByRole("alertdialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(replaced).toHaveBeenCalledWith(next, false));
+    expect(apply).toHaveBeenCalledWith("selected-json");
+    expect(toast.success).toHaveBeenCalledWith(messagesFor("en").settingsImported);
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  });
+
+  it("file picker cancellation doesn't open confirmation or replace settings", async () => {
+    const pick = vi.spyOn(api, "readSettingsFile").mockResolvedValue(null);
+    const replaced = renderTransfer();
+    fireEvent.click(screen.getByRole("button", { name: "Import" }));
+    await waitFor(() => expect(pick).toHaveBeenCalledOnce());
+    await waitFor(() => expect(screen.getByRole("button", { name: "Import" })).toBeEnabled());
+    expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+    expect(replaced).not.toHaveBeenCalled();
+  });
+
+  it.each(["exportSettingsFile", "readSettingsFile", "importSettings"] as const)(
+    "reports %s failure without replacing settings",
+    async (method) => {
+      vi.spyOn(api, "readSettingsFile").mockResolvedValue("selected-json");
+      vi.spyOn(api, method).mockRejectedValue({ code: "StorageFailed" });
+      const replaced = renderTransfer();
+      fireEvent.click(
+        screen.getByRole("button", { name: method === "exportSettingsFile" ? "Export" : "Import" }),
+      );
+      if (method === "importSettings") {
+        fireEvent.click(
+          within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Import" }),
+        );
+      }
+      await waitFor(() => expect(reportError).toHaveBeenCalledOnce());
+      expect(replaced).not.toHaveBeenCalled();
+      expect(toast.success).not.toHaveBeenCalled();
+    },
+  );
   it.each([false, true])(
     "confirms reset with wipeApiKey=%s and publishes the returned settings",
     async (wipe) => {

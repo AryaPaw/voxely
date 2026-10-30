@@ -63,6 +63,11 @@ export function TextReplacementSettings({
     });
   }
 
+  function addRule() {
+    if (textSettings.rules.length >= RULE_LIMIT) return;
+    update({ rules: [...textSettings.rules, { from: "", to: "", caseSensitive: false }] });
+  }
+
   function onDragEnd({ active, over }: DragEndEvent) {
     if (!over || active.id === over.id) return;
     const from = ruleIds.indexOf(String(active.id));
@@ -119,9 +124,7 @@ export function TextReplacementSettings({
             type="button"
             size="sm"
             disabled={textSettings.rules.length >= RULE_LIMIT}
-            onClick={() =>
-              update({ rules: [...textSettings.rules, { from: "", to: "", caseSensitive: false }] })
-            }
+            onClick={addRule}
           >
             <Plus />
             {copy.textReplacementAddRule}
@@ -185,6 +188,18 @@ export function TextReplacementSettings({
               </ol>
             </SortableContext>
           </DndContext>
+          <div className="px-4 pb-3">
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              disabled={textSettings.rules.length >= RULE_LIMIT}
+              onClick={addRule}
+            >
+              <Plus />
+              {copy.textReplacementAddRule}
+            </Button>
+          </div>
         </>
       )}
       <p className="border-t border-border px-4 py-2 text-xs text-muted-foreground">

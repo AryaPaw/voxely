@@ -343,6 +343,25 @@ describe("FilterSettings", () => {
 });
 
 describe("compact replacement editor", () => {
+  it("adds a rule from beneath the list and respects the shared limit", () => {
+    const initial = settings();
+    initial.textReplacements.rules = Array.from({ length: 99 }, (_, i) => ({
+      from: `word${i}`,
+      to: "replacement",
+      caseSensitive: false,
+    }));
+    render(<ReplacementHarness initial={initial} />);
+    const buttons = screen.getAllByText("Add rule");
+    expect(buttons).toHaveLength(2);
+    expect(
+      screen.getByRole("list").compareDocumentPosition(buttons[1]) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    fireEvent.click(buttons[1]);
+    expect(screen.getByRole("list").children).toHaveLength(100);
+    expect(screen.getByLabelText("Find 100")).toHaveValue("");
+    for (const button of screen.getAllByText("Add rule")) expect(button).toBeDisabled();
+  });
   function sortableRules() {
     const initial = settings();
     initial.textReplacements.rules = [

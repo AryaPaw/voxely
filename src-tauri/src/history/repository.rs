@@ -441,25 +441,23 @@ impl HistoryRepo {
     }
 
     pub fn prune_usage_statistics(&self, cutoff: DateTime<Utc>) -> Result<(), AppError> {
-        self.conn
-            .execute(
-                "DELETE FROM usage_dictations WHERE created_at < ?1",
-                params![cutoff.to_rfc3339()],
-            )
-            .map_err(storage_err)?;
-        self.conn
-            .execute(
-                "DELETE FROM usage_attempts WHERE occurred_at < ?1",
-                params![cutoff.to_rfc3339()],
-            )
-            .map_err(storage_err)?;
-        self.conn
-            .execute(
-                "DELETE FROM usage_suppressed WHERE recording_id NOT IN (SELECT id FROM recordings)",
-                [],
-            )
-            .map_err(storage_err)?;
-        Ok(())
+        let tx = self.conn.unchecked_transaction().map_err(storage_err)?;
+        tx.execute(
+            "DELETE FROM usage_dictations WHERE created_at < ?1",
+            params![cutoff.to_rfc3339()],
+        )
+        .map_err(storage_err)?;
+        tx.execute(
+            "DELETE FROM usage_attempts WHERE occurred_at < ?1",
+            params![cutoff.to_rfc3339()],
+        )
+        .map_err(storage_err)?;
+        tx.execute(
+            "DELETE FROM usage_suppressed WHERE recording_id NOT IN (SELECT id FROM recordings)",
+            [],
+        )
+        .map_err(storage_err)?;
+        tx.commit().map_err(storage_err)
     }
 
     pub fn get_usage_statistics(
@@ -2357,5 +2355,74 @@ mod tests {
             .dictations,
             0
         );
+    }
+
+    #[test]
+    fn usage_prune_is_atomic_and_preserves_exact_cutoff_without_querying_statistics() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("retention.db")).unwrap();
+        let cutoff = Utc::now() - chrono::Duration::days(90);
+        let mut old = new_recording("vendor/old".into());
+        old.created_at = cutoff - chrono::Duration::milliseconds(1);
+        repo.insert(&old).unwrap();
+        let mut boundary = new_recording("vendor/boundary".into());
+        boundary.created_at = cutoff;
+        repo.insert(&boundary).unwrap();
+        for rec in [&old, &boundary] {
+            repo.record_attempt(
+                &TranscriptionAttempt {
+                    id: format!("attempt-{}", rec.id),
+                    recording_id: rec.id.clone(),
+                    attempt_number: 1,
+                    started_at: rec.created_at,
+                    ended_at: Some(rec.created_at),
+                    outcome: "success".into(),
+                    error_category: None,
+                    http_status: Some(200),
+                    latency_ms: Some(1),
+                },
+                Some(0.01),
+            )
+            .unwrap();
+        }
+        repo.conn.execute_batch(
+            "CREATE TRIGGER reject_retention BEFORE DELETE ON usage_attempts BEGIN SELECT RAISE(ABORT, 'injected retention failure'); END;",
+        ).unwrap();
+        assert!(repo.prune_usage_statistics(cutoff).is_err());
+        for table in ["usage_dictations", "usage_attempts"] {
+            let count: i64 = repo
+                .conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 2);
+        }
+        repo.conn
+            .execute_batch("DROP TRIGGER reject_retention")
+            .unwrap();
+        repo.prune_usage_statistics(cutoff).unwrap();
+        for table in ["usage_dictations", "usage_attempts"] {
+            let count: i64 = repo
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE recording_id=?1"),
+                    params![boundary.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 1);
+            let old_count: i64 = repo
+                .conn
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE recording_id=?1"),
+                    params![old.id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(old_count, 0);
+        }
+        assert!(repo.get(&old.id).unwrap().is_some());
+        assert!(repo.get(&boundary.id).unwrap().is_some());
     }
 }

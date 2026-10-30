@@ -57,6 +57,83 @@ pub fn save_settings(
     persist_settings(&app, ctx.inner().as_ref(), settings)
 }
 
+#[tauri::command]
+pub async fn export_settings_file(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppContext>>,
+) -> Result<bool, AppError> {
+    use tauri_plugin_dialog::DialogExt;
+    let text = crate::settings_transfer::export(&ctx.settings.lock())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
+            .dialog()
+            .file()
+            .add_filter("JSON", &["json"])
+            .set_file_name("voxely-settings.json")
+            .blocking_save_file()
+        else {
+            return Ok(false);
+        };
+        let path = file
+            .into_path()
+            .map_err(|err| AppError::StorageFailed(err.to_string()))?;
+        let temporary = path.with_file_name(format!(".voxely-export-{}.tmp", uuid::Uuid::new_v4()));
+        let result =
+            std::fs::write(&temporary, text).and_then(|()| std::fs::rename(&temporary, &path));
+        if let Err(err) = result {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(AppError::StorageFailed(err.to_string()));
+        }
+        Ok(true)
+    })
+    .await
+    .map_err(|err| AppError::StorageFailed(err.to_string()))?
+}
+
+#[tauri::command]
+pub async fn read_settings_file(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppContext>>,
+) -> Result<Option<String>, AppError> {
+    use tauri_plugin_dialog::DialogExt;
+    let current = ctx.settings.lock().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let Some(file) = app
+            .dialog()
+            .file()
+            .add_filter("JSON", &["json"])
+            .blocking_pick_file()
+        else {
+            return Ok(None);
+        };
+        let path = file
+            .into_path()
+            .map_err(|err| AppError::StorageFailed(err.to_string()))?;
+        let file =
+            std::fs::File::open(path).map_err(|err| AppError::StorageFailed(err.to_string()))?;
+        let text = crate::settings_transfer::read(file)?;
+        crate::settings_transfer::import(&text, &current)?;
+        Ok(Some(text))
+    })
+    .await
+    .map_err(|err| AppError::StorageFailed(err.to_string()))?
+}
+
+#[tauri::command]
+pub fn import_settings(
+    app: AppHandle,
+    ctx: State<'_, Arc<AppContext>>,
+    data: String,
+) -> Result<AppSettings, AppError> {
+    persist_settings_with(
+        &app,
+        ctx.inner().as_ref(),
+        |current| crate::settings_transfer::import(&data, current),
+        false,
+        false,
+    )
+}
+
 fn persist_settings(
     app: &AppHandle,
     ctx: &AppContext,
@@ -68,15 +145,32 @@ fn persist_settings(
 fn persist_settings_inner(
     app: &AppHandle,
     ctx: &AppContext,
-    mut settings: AppSettings,
+    settings: AppSettings,
+    run_retention: bool,
+    allow_retention_change: bool,
+) -> Result<AppSettings, AppError> {
+    persist_settings_with(
+        app,
+        ctx,
+        |_| Ok(settings),
+        run_retention,
+        allow_retention_change,
+    )
+}
+
+fn persist_settings_with(
+    app: &AppHandle,
+    ctx: &AppContext,
+    prepare: impl FnOnce(&AppSettings) -> Result<AppSettings, AppError>,
     run_retention: bool,
     allow_retention_change: bool,
 ) -> Result<AppSettings, AppError> {
     let _writer = ctx.settings_write_gate.lock();
+    let previous = ctx.settings.lock().clone();
+    let mut settings = prepare(&previous)?;
     settings.retry.validate()?;
     settings.mic_tune.validate()?;
     validate_settings_graph(&settings)?;
-    let previous = ctx.settings.lock().clone();
     settings.retention_policy_confirmed = previous.retention_policy_confirmed;
     if !allow_retention_change
         && (settings.retention != previous.retention
@@ -94,21 +188,23 @@ fn persist_settings_inner(
         crate::app::shortcuts::parse_hotkey(&settings.hotkey)?;
     }
     let hotkey_changed = settings.hotkey != previous.hotkey;
-    write_ordered_settings_snapshot(ctx, &mut settings, &previous)?;
-    if hotkey_changed {
-        if let Err(err) = crate::app::shortcuts::sync_shortcuts(app) {
-            write_settings_snapshot(ctx, &previous)?;
-            let _ = crate::app::shortcuts::sync_shortcuts(app);
-            return Err(err);
+    let autostart_changed = settings.start_with_windows != previous.start_with_windows;
+    if let Err(error) = commit_settings_snapshot(ctx, &mut settings, &previous, |snapshot| {
+        ctx.transport
+            .lock()
+            .sync(snapshot.retry.to_policy().connect_timeout)?;
+        if hotkey_changed {
+            crate::app::shortcuts::sync_shortcuts(app)?;
         }
-    }
-    if settings.start_with_windows != previous.start_with_windows {
-        if let Err(err) = crate::app::lifecycle::sync_autostart(app, settings.start_with_windows) {
-            settings.start_with_windows = previous.start_with_windows;
-            write_settings_snapshot(ctx, &settings)?;
-            let _ = app.emit_to("main", "settings://changed", settings.clone());
-            return Err(err);
+        if autostart_changed {
+            crate::app::lifecycle::sync_autostart(app, snapshot.start_with_windows)?;
         }
+        Ok(())
+    }) {
+        let restored = ctx.settings.lock().clone();
+        let _ = app.emit_to("main", "settings://changed", restored.clone());
+        let _ = app.emit_to("overlay", "settings://changed", restored);
+        return Err(error);
     }
     let _ = app.emit_to("main", "settings://changed", settings.clone());
     let _ = app.emit_to("overlay", "settings://changed", settings.clone());
@@ -121,13 +217,33 @@ fn persist_settings_inner(
     if previous.ui_language != settings.ui_language {
         let _ = configure_tray(app);
     }
-    ctx.transport
-        .lock()
-        .sync(settings.retry.to_policy().connect_timeout)?;
     if settings.debug_logging != previous.debug_logging {
         crate::logging::apply_debug_logging(settings.debug_logging);
     }
     Ok(settings)
+}
+
+// The writer gate is held by the caller. A failed multi-field import restores the
+// entire snapshot; a fresh sequence lets subscribers accept the rollback.
+fn commit_settings_snapshot(
+    ctx: &AppContext,
+    settings: &mut AppSettings,
+    previous: &AppSettings,
+    mut synchronize: impl FnMut(&AppSettings) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if !write_ordered_settings_snapshot(ctx, settings, previous)? {
+        return Ok(());
+    }
+    if let Err(error) = synchronize(settings) {
+        let mut restored = previous.clone();
+        restored.write_seq = settings.write_seq.saturating_add(1);
+        write_settings_snapshot(ctx, &restored)?;
+        if let Err(rollback_error) = synchronize(&restored) {
+            return Err(AppError::StorageFailed(format!("Settings were restored, but runtime rollback failed: {rollback_error}; original error: {error}")));
+        }
+        return Err(error);
+    }
+    Ok(())
 }
 
 fn write_settings_snapshot(ctx: &AppContext, settings: &AppSettings) -> Result<(), AppError> {
@@ -1440,6 +1556,7 @@ mod tests {
                         sample_rate: SAMPLE_RATE,
                         samples: vec![0.1; 8],
                         truncated: false,
+                        limit_reached: false,
                         capture_error: None,
                     })
                 }
@@ -1977,6 +2094,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: vec![0.1; 8],
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -2068,6 +2186,51 @@ mod tests {
         assert!(write_settings_snapshot(&ctx, &next).is_err());
         assert_eq!(*ctx.settings.lock(), previous);
         assert_eq!(AppSettings::load(&ctx.settings_path).unwrap(), previous);
+    }
+
+    #[test]
+    fn failed_import_side_effect_restores_all_fields_with_a_new_sequence() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let previous = ctx.settings.lock().clone();
+        previous.save(&ctx.settings_path).unwrap();
+        let mut source = previous.clone();
+        source.theme = "light".into();
+        source.debug_logging = true;
+        source.hotkey = "Ctrl+Alt+Space".into();
+        source.start_with_windows = true;
+        source.retry.connect_timeout_ms = 9000;
+        let mut next = crate::settings_transfer::import(
+            &crate::settings_transfer::export(&source).unwrap(),
+            &previous,
+        )
+        .unwrap();
+        let _writer = ctx.settings_write_gate.lock();
+        let mut snapshots = Vec::new();
+        let result = commit_settings_snapshot(&ctx, &mut next, &previous, |snapshot| {
+            snapshots.push(snapshot.clone());
+            ctx.transport
+                .lock()
+                .sync(snapshot.retry.to_policy().connect_timeout)?;
+            if snapshots.len() == 1 {
+                Err(AppError::StorageFailed("autostart denied".into()))
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(snapshots.len(), 2);
+        let saved = AppSettings::load(&ctx.settings_path).unwrap();
+        assert_eq!(*ctx.settings.lock(), saved);
+        assert_eq!(snapshots[1], saved);
+        assert!(saved.write_seq > next.write_seq);
+        assert_eq!(
+            ctx.transport.lock().connect_timeout(),
+            previous.retry.to_policy().connect_timeout
+        );
+        let mut restored = saved;
+        restored.write_seq = previous.write_seq;
+        assert_eq!(restored, previous);
     }
 
     #[test]

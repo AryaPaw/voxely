@@ -5,7 +5,7 @@
 <h1 align="center">Voxely</h1>
 
 <p align="center">
-  Windows dictation. Press the hotkey, speak, and the transcript lands in the window you started in.
+  Windows dictation. Press the hotkey, speak, and stop in the window where you want the transcript.
 </p>
 
 <p align="center">
@@ -97,7 +97,7 @@ Compare transcripts from the same recording side by side.
 2. Click the field where the text should go.
 3. Press **Ctrl+Shift+Space** (change this in **General**).
 4. Speak. The HUD at the bottom of the screen shows recording and level.
-5. Press the hotkey again to stop. Repeated presses during processing are ignored. The transcript is inserted into the window you started in.
+5. Focus the destination window and press the hotkey again to stop. Repeated presses during processing are ignored. The transcript is inserted into that window. If another app is active when transcription finishes, the text is copied instead. Stopping from Voxely or reaching the recording limit keeps the window selected at recording start.
 6. Hover the HUD to **cancel**. Escape also cancels.
 
 History keeps transcripts locally so you can copy, listen, and search.

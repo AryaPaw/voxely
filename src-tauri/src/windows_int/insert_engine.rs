@@ -23,6 +23,12 @@ pub struct CapturedTarget {
 }
 
 impl CapturedTarget {
+    pub fn shares_lifetime_marker(self, other: Self) -> bool {
+        // The property is keyed by HWND and stores generation + 1. PID/TID
+        // can differ if Windows reused the handle before a new binding.
+        self.hwnd == other.hwnd && self.generation == other.generation
+    }
+
     pub fn from_hwnd(hwnd: NativeHwnd, root: usize, pid: u32, tid: u32, generation: u64) -> Self {
         Self {
             hwnd: hwnd.value,
@@ -42,6 +48,8 @@ pub enum CopyReason {
     Minimized,
     IntegrityBlocked,
     SendBlocked,
+    RestoreFailed,
+    FocusNotReady,
     ClipboardMode,
     ClipboardBusy,
 }
@@ -74,6 +82,7 @@ pub struct WorldSnapshot {
     pub foreground_root: Option<usize>,
     pub foreground_pid: Option<u32>,
     pub focus_root: Option<usize>,
+    pub focus_hwnd: Option<usize>,
     pub overlay_root: Option<usize>,
     pub main_root: Option<usize>,
     pub target_alive: bool,
@@ -93,7 +102,6 @@ pub enum ChunkSend {
 pub trait InsertWorld {
     fn snapshot(&self, captured: Option<CapturedTarget>) -> WorldSnapshot;
     fn restore_foreground(&mut self, target: &CapturedTarget) -> bool;
-    fn focus_caret(&mut self, target: &CapturedTarget) -> bool;
     fn wait_keys_up(&mut self, keys: &[u16], timeout: Duration);
     fn send_keys(&mut self, keys: &[InsertKey]) -> ChunkSend;
     fn clipboard_copy(&mut self, text: &str) -> Result<(), AppError>;
@@ -123,11 +131,16 @@ pub fn classify_insert_policy(snap: &WorldSnapshot) -> InsertPolicy {
         return InsertPolicy::CopyOnly(CopyReason::IntegrityBlocked);
     }
     match snap.foreground_root {
-        Some(fg) if fg == target.root => InsertPolicy::SendUnicode,
+        Some(fg) if fg == target.root => {
+            if snap.focus_root == Some(target.root) && snap.focus_hwnd.is_some() {
+                InsertPolicy::SendUnicode
+            } else {
+                InsertPolicy::CopyOnly(CopyReason::FocusNotReady)
+            }
+        }
         Some(fg) if snap.overlay_root == Some(fg) || snap.main_root == Some(fg) => {
             InsertPolicy::RestoreThenSend
         }
-        Some(_) if snap.foreground_pid == Some(target.pid) => InsertPolicy::RestoreThenSend,
         Some(_) => InsertPolicy::CopyOnly(CopyReason::UserSwitched),
         None => InsertPolicy::CopyOnly(CopyReason::NoTarget),
     }
@@ -306,15 +319,12 @@ pub fn resolve_insert_target(
 
 pub fn resolve_captured_insert_target(
     start: Option<CapturedTarget>,
-    live: Option<CapturedTarget>,
+    _live: Option<CapturedTarget>,
     overlay_root: Option<usize>,
     main_root: Option<usize>,
 ) -> Option<CapturedTarget> {
-    if let Some(live) = live {
-        if !capture_skips_voxely_roots(live.root, overlay_root, main_root) {
-            return Some(live);
-        }
-    }
+    // Session owns the target selected at explicit stop (or recording start
+    // for automatic stop/HUD). API completion must never choose a new recipient.
     start.filter(|target| !capture_skips_voxely_roots(target.root, overlay_root, main_root))
 }
 
@@ -372,10 +382,12 @@ fn run_insert_locked(world: &mut dyn InsertWorld, req: InsertRequest<'_>) -> Ins
     if (req.abort)() {
         return InsertOutcome::CancelledBeforeDelivery;
     }
-    match classify_insert_policy(&snap) {
+    let policy = classify_insert_policy(&snap);
+    log_insert_decision("before_delivery", &snap, policy);
+    match policy {
         InsertPolicy::CopyOnly(reason) => copy_full(world, req.text, reason),
         InsertPolicy::RestoreThenSend => restore_then_send(world, req, snap),
-        InsertPolicy::SendUnicode => send_unicode(world, req, snap),
+        InsertPolicy::SendUnicode => send_unicode(world, req),
     }
 }
 
@@ -392,6 +404,38 @@ fn annotated_snapshot(
     snap
 }
 
+fn log_insert_decision(stage: &'static str, snap: &WorldSnapshot, policy: InsertPolicy) {
+    // Fixed metadata fields only: never log transcript text, titles or field contents.
+    tracing::info!(
+        stage,
+        policy = ?policy,
+        generation = snap.captured.map(|target| target.generation),
+        captured_hwnd = snap.captured.map(|target| target.hwnd),
+        captured_root = snap.captured.map(|target| target.root),
+        captured_pid = snap.captured.map(|target| target.pid),
+        captured_tid = snap.captured.map(|target| target.tid),
+        foreground_root = snap.foreground_root,
+        foreground_pid = snap.foreground_pid,
+        focus_root = snap.focus_root,
+        focus_hwnd = snap.focus_hwnd,
+        overlay_root = snap.overlay_root,
+        main_root = snap.main_root,
+        target_alive = snap.target_alive,
+        target_iconic = snap.target_iconic,
+        integrity_blocked = snap.integrity_blocked,
+        window_class = snap.window_class.as_deref(),
+        "insertion target decision"
+    );
+}
+
+fn blocked_policy_reason(policy: InsertPolicy) -> Option<CopyReason> {
+    match policy {
+        InsertPolicy::CopyOnly(reason) => Some(reason),
+        InsertPolicy::RestoreThenSend => Some(CopyReason::FocusNotReady),
+        InsertPolicy::SendUnicode => None,
+    }
+}
+
 fn restore_then_send(
     world: &mut dyn InsertWorld,
     req: InsertRequest<'_>,
@@ -400,32 +444,42 @@ fn restore_then_send(
     let Some(target) = snap.captured else {
         return copy_full(world, req.text, CopyReason::NoTarget);
     };
-    if !world.restore_foreground(&target) {
-        return copy_full(world, req.text, CopyReason::UserSwitched);
+    let restored = world.restore_foreground(&target);
+    tracing::info!(
+        restored,
+        generation = target.generation,
+        "insertion focus restore result"
+    );
+    if !restored {
+        let after = annotated_snapshot(world, req.captured, req.overlay_root, req.main_root);
+        log_insert_decision("restore_failed", &after, classify_insert_policy(&after));
+        return copy_full(world, req.text, CopyReason::RestoreFailed);
     }
-    let _ = world.focus_caret(&target);
     let snap = annotated_snapshot(world, req.captured, req.overlay_root, req.main_root);
-    match classify_insert_policy(&snap) {
-        InsertPolicy::SendUnicode => send_unicode(world, req, snap),
+    let policy = classify_insert_policy(&snap);
+    log_insert_decision("after_restore", &snap, policy);
+    match policy {
+        InsertPolicy::SendUnicode => send_unicode(world, req),
         InsertPolicy::CopyOnly(reason) => copy_full(world, req.text, reason),
-        InsertPolicy::RestoreThenSend => copy_full(world, req.text, CopyReason::UserSwitched),
+        InsertPolicy::RestoreThenSend => copy_full(world, req.text, CopyReason::FocusNotReady),
     }
 }
 
-fn send_unicode(
-    world: &mut dyn InsertWorld,
-    req: InsertRequest<'_>,
-    snap: WorldSnapshot,
-) -> InsertOutcome {
-    if let Some(target) = snap.captured {
-        let _ = world.focus_caret(&target);
-    }
+fn send_unicode(world: &mut dyn InsertWorld, req: InsertRequest<'_>) -> InsertOutcome {
     world.wait_keys_up(
         &hotkey_keys_to_release(req.hotkey),
         Duration::from_millis(300),
     );
     if (req.abort)() {
         return InsertOutcome::CancelledBeforeDelivery;
+    }
+    // Hotkey release and foreground restoration can change both focus and the
+    // native control class. Plan keys only from the actual delivery recipient.
+    let snap = annotated_snapshot(world, req.captured, req.overlay_root, req.main_root);
+    let policy = classify_insert_policy(&snap);
+    if let Some(reason) = blocked_policy_reason(policy) {
+        log_insert_decision("after_keys_up", &snap, policy);
+        return copy_full(world, req.text, reason);
     }
     let units = plan_logical_units(req.text, snap.window_class.as_deref());
     let mut cursor = 0usize;
@@ -441,18 +495,32 @@ fn send_unicode(
             };
         }
         let live = annotated_snapshot(world, req.captured, req.overlay_root, req.main_root);
-        if !matches!(classify_insert_policy(&live), InsertPolicy::SendUnicode) {
+        let policy = classify_insert_policy(&live);
+        if let Some(reason) = blocked_policy_reason(policy) {
+            log_insert_decision("before_chunk", &live, policy);
             return if any {
                 copy_and(world, req.text, InsertOutcome::PartialCopied)
             } else {
-                copy_full(world, req.text, CopyReason::UserSwitched)
+                copy_full(world, req.text, reason)
+            };
+        }
+        if live.focus_hwnd != snap.focus_hwnd {
+            log_insert_decision("focus_changed_during_delivery", &live, policy);
+            return if any {
+                copy_and(world, req.text, InsertOutcome::PartialCopied)
+            } else {
+                copy_full(world, req.text, CopyReason::FocusNotReady)
             };
         }
         let end = next_logical_chunk_end(&units, cursor, chunk);
         let keys: Vec<InsertKey> = units[cursor..end].iter().flatten().copied().collect();
         let planned_events = (keys.len() * 2) as u32;
         let started = std::time::Instant::now();
-        match world.send_keys(&keys) {
+        let sent = world.send_keys(&keys);
+        if sent != ChunkSend::Complete {
+            tracing::warn!(planned_events, result = ?sent, "insertion keyboard delivery incomplete");
+        }
+        match sent {
             ChunkSend::Complete => {
                 any = true;
                 cursor = end;
@@ -465,7 +533,6 @@ fn send_unicode(
                 return copy_and(world, req.text, InsertOutcome::PartialCopied);
             }
         }
-        let _ = planned_events;
     }
     tracing::info!(
         policy = "send_unicode",
@@ -522,6 +589,11 @@ mod tests {
         clipboard_fail: bool,
         actions: RefCell<Vec<String>>,
         restore_ok: bool,
+        after_keys_up: Option<WorldSnapshot>,
+        after_first_send: Option<WorldSnapshot>,
+        focus_override: Option<Option<usize>>,
+        focus_root_override: Option<Option<usize>>,
+        sent_keys: Vec<InsertKey>,
     }
 
     impl FakeWorld {
@@ -542,7 +614,8 @@ mod tests {
                 captured,
                 foreground_root: self.foreground_root,
                 foreground_pid: self.foreground_pid,
-                focus_root: self.foreground_root,
+                focus_root: self.focus_root_override.unwrap_or(self.foreground_root),
+                focus_hwnd: self.focus_override.unwrap_or(self.foreground_root),
                 overlay_root: self.overlay_root,
                 main_root: self.main_root,
                 target_alive: self.alive,
@@ -563,16 +636,22 @@ mod tests {
             self.restore_ok
         }
 
-        fn focus_caret(&mut self, _target: &CapturedTarget) -> bool {
-            self.actions.borrow_mut().push("focus".into());
-            true
-        }
-
         fn wait_keys_up(&mut self, _keys: &[u16], _timeout: Duration) {
             self.actions.borrow_mut().push("wait_keys".into());
+            if let Some(snapshot) = self.after_keys_up.take() {
+                self.foreground_root = snapshot.foreground_root;
+                self.foreground_pid = snapshot.foreground_pid;
+                self.alive = snapshot.target_alive;
+                self.iconic = snapshot.target_iconic;
+                self.integrity_blocked = snapshot.integrity_blocked;
+                self.window_class = snapshot.window_class;
+                self.focus_override = Some(snapshot.focus_hwnd);
+                self.focus_root_override = Some(snapshot.focus_root);
+            }
         }
 
         fn send_keys(&mut self, keys: &[InsertKey]) -> ChunkSend {
+            self.sent_keys.extend_from_slice(keys);
             self.actions
                 .borrow_mut()
                 .push(format!("send:{}", keys.len()));
@@ -582,6 +661,10 @@ mod tests {
                 .copied()
                 .unwrap_or(ChunkSend::Complete);
             self.send_at += 1;
+            if let Some(snapshot) = self.after_first_send.take() {
+                self.focus_override = Some(snapshot.focus_hwnd);
+                self.focus_root_override = Some(snapshot.focus_root);
+            }
             result
         }
 
@@ -629,11 +712,88 @@ mod tests {
         let never = || false;
         let outcome = run_insert(&mut world, request("unicode", "hi", Some(target), &never));
         assert_eq!(outcome, InsertOutcome::Inserted);
-        assert_eq!(
-            world.actions.borrow().as_slice(),
-            ["focus", "wait_keys", "send:2"]
-        );
+        assert_eq!(world.actions.borrow().as_slice(), ["wait_keys", "send:2"]);
         assert!(world.clipboard.is_none());
+    }
+
+    #[test]
+    fn missing_or_foreign_focus_never_receives_keys() {
+        let target = FakeWorld::target(10);
+        for (focus, root) in [(None, None), (Some(50), Some(50))] {
+            let mut world = FakeWorld {
+                captured: Some(target),
+                foreground_root: Some(target.root),
+                alive: true,
+                focus_override: Some(focus),
+                focus_root_override: Some(root),
+                ..FakeWorld::default()
+            };
+            let never = || false;
+            assert_eq!(
+                run_insert(&mut world, request("unicode", "text", Some(target), &never)),
+                InsertOutcome::Copied {
+                    reason: CopyReason::FocusNotReady
+                }
+            );
+            assert!(world.sent_keys.is_empty());
+            assert_eq!(world.actions.borrow().as_slice(), ["copy:4"]);
+        }
+    }
+
+    #[test]
+    fn delivery_uses_current_child_class_after_hotkey_release() {
+        let target = FakeWorld::target(10);
+        let mut world = FakeWorld {
+            captured: Some(target),
+            foreground_root: Some(target.root),
+            alive: true,
+            window_class: Some("Chrome_WidgetWin_1".into()),
+            ..FakeWorld::default()
+        };
+        let mut ready = world.snapshot(Some(target));
+        ready.focus_hwnd = Some(99);
+        ready.window_class = Some("Edit".into());
+        world.after_keys_up = Some(ready);
+        let never = || false;
+        assert_eq!(
+            run_insert(
+                &mut world,
+                request("unicode", "a\r\nb", Some(target), &never)
+            ),
+            InsertOutcome::Inserted
+        );
+        assert_eq!(
+            world.sent_keys,
+            [
+                InsertKey::Unicode(97),
+                InsertKey::VirtualKey(13),
+                InsertKey::Unicode(98)
+            ]
+        );
+    }
+
+    #[test]
+    fn changing_child_during_delivery_stops_before_next_chunk() {
+        let target = FakeWorld::target(10);
+        let mut world = FakeWorld {
+            captured: Some(target),
+            foreground_root: Some(target.root),
+            alive: true,
+            window_class: Some("Chrome_WidgetWin_1".into()),
+            ..FakeWorld::default()
+        };
+        let mut moved = world.snapshot(Some(target));
+        moved.focus_hwnd = Some(99);
+        world.after_first_send = Some(moved);
+        let text = "a".repeat(2048);
+        let never = || false;
+        assert_eq!(
+            run_insert(&mut world, request("unicode", &text, Some(target), &never)),
+            InsertOutcome::PartialCopied
+        );
+        assert_eq!(world.send_at, 1);
+        assert_eq!(world.sent_keys.len(), UNICODE_CHUNK_UNITS_CHROMIUM);
+        assert_eq!(world.clipboard.as_deref(), Some(text.as_str()));
     }
 
     #[test]
@@ -653,8 +813,75 @@ mod tests {
         assert_eq!(outcome, InsertOutcome::Inserted);
         assert_eq!(
             world.actions.borrow().as_slice(),
-            ["restore", "focus", "focus", "wait_keys", "send:2"]
+            ["restore", "wait_keys", "send:2"]
         );
+    }
+
+    #[test]
+    fn restore_failure_is_not_reported_as_a_user_window_switch() {
+        let target = FakeWorld::target(10);
+        let mut world = FakeWorld {
+            captured: Some(target),
+            foreground_root: Some(3),
+            alive: true,
+            restore_ok: false,
+            ..FakeWorld::default()
+        };
+        let never = || false;
+        assert_eq!(
+            run_insert(&mut world, request("unicode", "test", Some(target), &never)),
+            InsertOutcome::Copied {
+                reason: CopyReason::RestoreFailed
+            }
+        );
+        assert_eq!(world.actions.borrow().as_slice(), ["restore", "copy:4"]);
+    }
+
+    #[test]
+    fn first_chunk_preserves_actual_policy_when_focus_or_identity_changes() {
+        let target = FakeWorld::target(10);
+        for reason in [
+            CopyReason::TargetGone,
+            CopyReason::Minimized,
+            CopyReason::IntegrityBlocked,
+            CopyReason::NoTarget,
+            CopyReason::UserSwitched,
+            CopyReason::FocusNotReady,
+        ] {
+            let mut world = FakeWorld {
+                captured: Some(target),
+                foreground_root: Some(10),
+                foreground_pid: Some(target.pid),
+                alive: true,
+                ..FakeWorld::default()
+            };
+            let mut after = world.snapshot(Some(target));
+            match reason {
+                CopyReason::TargetGone => after.target_alive = false,
+                CopyReason::Minimized => after.target_iconic = true,
+                CopyReason::IntegrityBlocked => after.integrity_blocked = Some(true),
+                CopyReason::NoTarget => after.foreground_root = None,
+                CopyReason::UserSwitched => {
+                    after.foreground_root = Some(99);
+                    after.foreground_pid = Some(99);
+                }
+                CopyReason::FocusNotReady => after.foreground_root = Some(3),
+                _ => unreachable!(),
+            }
+            world.after_keys_up = Some(after);
+            let never = || false;
+            assert_eq!(
+                run_insert(&mut world, request("unicode", "test", Some(target), &never)),
+                InsertOutcome::Copied { reason },
+                "{reason:?}"
+            );
+            assert_eq!(world.clipboard.as_deref(), Some("test"));
+            assert!(!world
+                .actions
+                .borrow()
+                .iter()
+                .any(|action| action.starts_with("send:")));
+        }
     }
 
     #[test]
@@ -686,7 +913,7 @@ mod tests {
     }
 
     #[test]
-    fn live_focus_wins_over_start_capture() {
+    fn start_capture_is_never_replaced_by_live_focus() {
         let start = FakeWorld::target(10);
         let live = CapturedTarget {
             hwnd: 21,
@@ -697,7 +924,7 @@ mod tests {
         };
         assert_eq!(
             resolve_captured_insert_target(Some(start), Some(live), Some(3), Some(4)),
-            Some(live)
+            Some(start)
         );
         assert_eq!(
             resolve_captured_insert_target(
@@ -716,7 +943,7 @@ mod tests {
         );
         assert_eq!(
             resolve_captured_insert_target(None, Some(live), Some(3), Some(4)),
-            Some(live)
+            None
         );
         assert_eq!(
             resolve_insert_target(
@@ -725,12 +952,12 @@ mod tests {
                 Some(NativeHwnd { value: 3 }),
                 Some(NativeHwnd { value: 4 }),
             ),
-            Some(NativeHwnd { value: 20 })
+            Some(NativeHwnd { value: 10 })
         );
     }
 
     #[test]
-    fn same_process_other_hwnd_restores_then_sends() {
+    fn same_process_other_root_copies_without_restoring() {
         let target = FakeWorld::target(10);
         let mut world = FakeWorld {
             captured: Some(target),
@@ -744,11 +971,13 @@ mod tests {
         };
         let never = || false;
         let outcome = run_insert(&mut world, request("unicode", "hi", Some(target), &never));
-        assert_eq!(outcome, InsertOutcome::Inserted);
         assert_eq!(
-            world.actions.borrow().as_slice(),
-            ["restore", "focus", "focus", "wait_keys", "send:2"]
+            outcome,
+            InsertOutcome::Copied {
+                reason: CopyReason::UserSwitched
+            }
         );
+        assert_eq!(world.actions.borrow().as_slice(), ["copy:2"]);
     }
 
     #[test]

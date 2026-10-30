@@ -470,6 +470,12 @@ async fn one_attempt(
         retry_after: None,
         cost_usd: None,
     })?;
+    let usage = parsed.get("usage").cloned();
+    let cost = usage
+        .as_ref()
+        .and_then(|u| u.get("cost"))
+        .and_then(|v| v.as_f64())
+        .filter(|cost| cost.is_finite() && *cost >= 0.0);
     let text = parsed
         .get("text")
         .and_then(|v| v.as_str())
@@ -478,15 +484,9 @@ async fn one_attempt(
             error: AppError::ResponseMalformed,
             http_status: Some(status),
             retry_after: None,
-            cost_usd: None,
+            cost_usd: cost,
         })?
         .to_string();
-    let usage = parsed.get("usage").cloned();
-    let cost = usage
-        .as_ref()
-        .and_then(|u| u.get("cost"))
-        .and_then(|v| v.as_f64())
-        .filter(|cost| cost.is_finite() && *cost >= 0.0);
     Ok(TranscriptionSuccess {
         text,
         usage_json: usage.map(|u| u.to_string()),
@@ -941,6 +941,118 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, AppError::ResponseMalformed);
+    }
+
+    #[tokio::test]
+    async fn malformed_200_keeps_confirmed_cost_in_progress_and_usage_journal() {
+        use crate::history::repository::{new_recording, HistoryRepo, TranscriptionAttempt};
+        for body in [
+            serde_json::json!({"usage":{"cost":0.01}}),
+            serde_json::json!({"text":null,"usage":{"cost":0.01}}),
+            serde_json::json!({"text":42,"usage":{"cost":0.01}}),
+        ] {
+            let server = MockServer::start();
+            let mock = server.mock(|when, then| {
+                when.method(POST).path("/audio/transcriptions");
+                then.status(200).json_body(body);
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let path = wav_fixture(dir.path());
+            let client = reqwest::Client::new();
+            let (_tx, rx) = tokio::sync::watch::channel(false);
+            let mut events = Vec::new();
+            let result = transcribe_file_with_progress(
+                &client,
+                &server.base_url(),
+                "test-key",
+                "vendor/model",
+                None,
+                &path,
+                RetryPolicy {
+                    automatic_retries: false,
+                    ..Default::default()
+                },
+                Duration::from_secs(1),
+                rx,
+                |progress| events.push(progress),
+            )
+            .await;
+            assert_eq!(result.unwrap_err(), AppError::ResponseMalformed);
+            mock.assert_hits(1);
+            let finished = events
+                .iter()
+                .find_map(|event| match event {
+                    SttProgress::Finished {
+                        outcome,
+                        http_status,
+                        cost_usd,
+                        ..
+                    } => Some((*outcome, *http_status, *cost_usd)),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(finished, ("error", Some(200), Some(0.01)));
+            let repo = HistoryRepo::open(&dir.path().join("usage.db")).unwrap();
+            let rec = new_recording("vendor/model".into());
+            repo.insert(&rec).unwrap();
+            repo.record_attempt(
+                &TranscriptionAttempt {
+                    id: "malformed-cost".into(),
+                    recording_id: rec.id.clone(),
+                    attempt_number: 1,
+                    started_at: rec.created_at,
+                    ended_at: Some(rec.created_at),
+                    outcome: finished.0.into(),
+                    error_category: Some("response_malformed".into()),
+                    http_status: finished.1.map(i64::from),
+                    latency_ms: Some(1),
+                },
+                finished.2,
+            )
+            .unwrap();
+            let stats = repo
+                .get_usage_statistics(
+                    rec.created_at,
+                    rec.created_at + chrono::Duration::seconds(1),
+                )
+                .unwrap();
+            assert_eq!(stats.api_requests, 1);
+            assert_eq!(stats.unpriced_attempts, 0);
+            assert_eq!(stats.reported_cost_usd, 0.01);
+        }
+    }
+
+    #[tokio::test]
+    async fn malformed_200_does_not_invent_or_accept_invalid_cost() {
+        for cost in [
+            serde_json::Value::Null,
+            serde_json::json!(-1),
+            serde_json::json!("0.01"),
+        ] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path("/audio/transcriptions");
+                then.status(200)
+                    .json_body(serde_json::json!({"usage":{"cost":cost}}));
+            });
+            let dir = tempfile::tempdir().unwrap();
+            let path = wav_fixture(dir.path());
+            let error = one_attempt(
+                &reqwest::Client::new(),
+                &server.base_url(),
+                "test-key",
+                "vendor/model",
+                None,
+                &path,
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(error.error, AppError::ResponseMalformed);
+            assert_eq!(error.cost_usd, None);
+        }
     }
 
     #[test]

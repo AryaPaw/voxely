@@ -97,7 +97,7 @@ impl Default for RetrySettings {
 
 impl RetrySettings {
     pub fn validate(&self) -> Result<(), AppError> {
-        if self.additional_retries > 5 {
+        if self.additional_retries > crate::transcription::retry::MAX_ADDITIONAL_RETRIES {
             return Err(AppError::RequestValidationFailed(
                 "additional retries must be 0-5".into(),
             ));

@@ -206,6 +206,7 @@ export function HistoryCard({
   const [retrying, setRetrying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingPlay = useRef(false);
+  const playback = useRef({ generation: 0 }).current;
   const copiedTimer = useRef<number | null>(null);
   const failed = item.status === "failed" || item.status === "interrupted";
   const processing = item.status === "processing";
@@ -229,6 +230,7 @@ export function HistoryCard({
       return;
     }
     let cancelled = false;
+    playback.generation++;
     let objectUrl: string | null = null;
     setAudioLoading(true);
     setAudioSrc(null);
@@ -273,6 +275,7 @@ export function HistoryCard({
       });
     return () => {
       cancelled = true;
+      playback.generation++;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [
@@ -285,6 +288,7 @@ export function HistoryCard({
     item.durationMs,
     audioVariant,
     copy,
+    playback,
   ]);
 
   useEffect(() => {
@@ -292,11 +296,15 @@ export function HistoryCard({
       return;
     }
     pendingPlay.current = false;
-    void audioRef.current?.play().catch(() => {
+    const node = audioRef.current;
+    if (!node) return;
+    const generation = ++playback.generation;
+    void node.play().catch(() => {
+      if (generation !== playback.generation || audioRef.current !== node) return;
       setAudioMissing(true);
       reportError(copy.playbackFailed);
     });
-  }, [audioSrc, copy.playbackFailed]);
+  }, [audioSrc, copy.playbackFailed, playback]);
 
   useEffect(() => {
     return () => {
@@ -310,11 +318,14 @@ export function HistoryCard({
     const node = audioRef.current;
     if (node) {
       if (node.paused) {
+        const generation = ++playback.generation;
         void node.play().catch(() => {
+          if (generation !== playback.generation || audioRef.current !== node) return;
           setAudioMissing(true);
           reportError(copy.playbackFailed);
         });
       } else {
+        playback.generation++;
         node.pause();
       }
       return;
@@ -532,6 +543,7 @@ export function HistoryCard({
         <Tabs
           value={audioVariant}
           onValueChange={(value) => {
+            playback.generation++;
             audioRef.current?.pause();
             pendingPlay.current = false;
             setAudioMissing(false);

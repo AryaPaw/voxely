@@ -95,18 +95,20 @@ Ten live dictations through Voxely and timed Unicode insert into Notepad/Cursor 
 
 Do not treat PE/NSIS size, Criterion DSP times, or a single `voxely.exe` Working Set as WebView2 RAM. The unit is the tree: `voxely.exe` plus owned `msedgewebview2.exe` children. Always pair Private Bytes with Working Set.
 
-Debug and release are separate series. Daily driver: `src-tauri/target/debug/voxely.exe`.
+Debug and release are separate series. Daily driver: `src-tauri/target/release/voxely.exe`, built with `VOXELY_LOCAL_BUILD=1`. Debug measurements below are historical evidence, not the current release baseline.
 
 Live `%APPDATA%\Voxely` is never the history 0/100/500 fixture. Debug-only override: `VOXELY_DATA_DIR` must be `%APPDATA%\VoxelyPerf` or `VoxelyPerf-*` under `%APPDATA%`. Release builds ignore the variable.
 
 ### Commands
 
 ```
-pwsh -File scripts/perf/Get-VoxelyProcessTree.ps1 -Profile debug -Scenario fresh-tray
-pwsh -File scripts/perf/Invoke-VoxelyPerfCampaign.ps1 -Profile debug -Scenario fresh-tray-or-running
+pwsh -File scripts/perf/Get-VoxelyProcessTree.ps1 -Profile release -Scenario warm-main
+pwsh -File scripts/perf/Invoke-VoxelyPerfCampaign.ps1 -Profile release -Scenario warm-main
 ```
 
 JSON schema: `docs/perf/process-tree.schema.json` (`voxely-perf/v1`). Raw trials go to `docs/perf/trials/` (gitignored).
+
+The campaign binds one exact executable path, PID and start time. It collects three trials with five samples each after a ten-second settle, then saves raw process-tree samples and median/p95 memory summaries. A missing process or a restart fails the campaign; an empty snapshot isn't evidence. Sampling doesn't open windows, start recording or edit history. Cold/warm launch, overlay, history size and recording duration are separate controlled scenarios. Memory quantiles aren't operation latency: measure the actual operation separately.
 
 `overlay_timing` is elapsed since overlay show, not first paint. Overlay reports `overlay_mark_frame` after React mount / first animation frame.
 
@@ -124,7 +126,7 @@ N=1 local debug snapshots on AryaPaw-PC (not a 10-30 s settled campaign, not med
 
 Do not treat those two rows as a before/after of the same scenario. They differ in overlay lifetime and settle time. History 0/100/500, overlay cold/warm, 8 s / 60 s recording, WPR wakeups, and release series are incomplete. Until three campaigns exist, numbers are informational.
 
-The overlay window loads `overlay.html` / OverlayApp only. Loading `index.html` in that window mounts MainApp; overlay ACL has no `get_runtime_info`, so the HUD becomes a Retry screen. Overlay is created hidden at launch. Relative `./assets` URLs, inline transparent CSS, and `https://ipc.localhost` plus `script-src` eval/inline remain in CSP. HUD logical viewport is 320x72. Overlay is placed on the insert-target monitor when a captured HWND exists, otherwise the cursor monitor. Main is centered on the foreground window's monitor unless that window is Voxely. Debug daily-driver uses the same `%APPDATA%\Voxely` as release; it skips auto-update polling. Local builds add a native window-title suffix (`Voxely (local)` / `Voxely (локальная версия)`). Sandbox is a settings nav page, not the window title. History cards fetch `recording_audio_url` and mount `<audio>` only after Listen.
+The overlay window loads `overlay.html` / OverlayApp only. Loading `index.html` in that window mounts MainApp; overlay ACL has no `get_runtime_info`, so the HUD becomes a Retry screen. Overlay is created hidden at launch. Relative `./assets` URLs, inline transparent CSS, and `https://ipc.localhost` plus `script-src` eval/inline remain in CSP. HUD logical viewport is 320x72. Overlay is placed on the insert-target monitor when a captured HWND exists, otherwise the cursor monitor. Main is centered on the foreground window's monitor unless that window is Voxely. Debug builds use the same `%APPDATA%\Voxely` as release; it skips auto-update polling. Local builds add a native window-title suffix (`Voxely (local)` / `Voxely (локальная версия)`). Sandbox is a settings nav page, not the window title. History cards fetch `recording_audio_url` and mount `<audio>` only after Listen.
 
 ### Overlay / main lifecycle
 
@@ -132,10 +134,10 @@ Default remains hide (not destroy) for overlay (created hidden at launch) and ma
 
 ## Supply chain
 
-The MSRV source of truth is `rust-version` in `src-tauri/Cargo.toml`. CI reads that value and compiles with `cargo build --locked --all-targets`, then runs clippy/tests on `stable`. The current locked Tauri dependency graph requires Rust 1.90 or newer.
+The MSRV source of truth is `rust-version` in `src-tauri/Cargo.toml`. CI reads that value and compiles with `cargo build --locked --all-targets`, then runs clippy/tests with the compiler pinned in `rust-toolchain.toml`. The current locked Tauri dependency graph requires Rust 1.90 or newer.
 
 Removed unused direct Rust crates: `rand`, `sha2`, `directories`, `once_cell`, `bytes`, `base64`. Dropped unused `reqwest` `blocking`, `nnnoiseless` default `bin` features, and `tracing-subscriber` `json`. Frontend dropped unused JS wrappers `@tauri-apps/plugin-opener`, `plugin-process`, `plugin-updater` (Rust plugins stay). `shadcn` stays because `src/styles.css` imports `shadcn/tailwind.css`.
 
-`cargo audit`: `BLOCKED` (subcommand not installed). `bun audit`: moderate Vitest mocker path traversal (`GHSA-82fw-gwwq-j7x9`); production app does not ship Vitest. Vitest 4 is deferred as an isolated major.
+On 2026-10-26, the repository-local `cargo-audit` scan found zero vulnerabilities after compatible TLS/runtime patches and removal of the unused legacy ZIP updater feature. Six informational warnings remain: `async-std` is in the development-only HTTP mock chain; the other warned crates are absent from the resolved Windows dependency tree. The pinned Bun audit also returned no advisories after compatible tooling updates. These scans are dated evidence, not a guarantee about future advisories. Updater feeds remain signed NSIS executables; legacy Tauri v1 ZIP archives are not a generated product format.
 
 Deferred majors (not mixed with HWND/capture): `reqwest` 0.12 vs 0.13 duplicate, `windows` 0.54/0.58/0.61, `cpal` 0.15, `rusqlite` 0.32, `keyring` 3, `rtrb` 0.3, Criterion 0.5.

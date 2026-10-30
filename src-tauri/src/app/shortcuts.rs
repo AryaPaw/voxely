@@ -96,10 +96,20 @@ pub fn post_session_command(app: &AppHandle, command: SessionCommand) {
     });
 }
 
-fn log_unregister(app: &AppHandle) {
-    if let Err(error) = app.global_shortcut().unregister_all() {
-        tracing::error!(error = %error, "unregister_all failed");
+fn apply_shortcut_layout(
+    applied: &mut Option<ShortcutLayout>,
+    desired: ShortcutLayout,
+    synchronize: impl FnOnce(&ShortcutLayout) -> Result<(), AppError>,
+) -> Result<(), AppError> {
+    if !shortcut_layout_changed(applied.as_ref(), &desired) {
+        return Ok(());
     }
+    // Native registration can fail after removing the old shortcut. Never let
+    // a cached previous layout suppress registration during settings rollback.
+    *applied = None;
+    synchronize(&desired)?;
+    *applied = Some(desired);
+    Ok(())
 }
 
 pub fn sync_shortcuts(app: &AppHandle) -> Result<(), AppError> {
@@ -113,27 +123,30 @@ pub fn sync_shortcuts(app: &AppHandle) -> Result<(), AppError> {
         hotkey: spec.clone(),
         suspended,
     };
-    if !shortcut_layout_changed(ctx.applied_shortcut_layout.lock().as_ref(), &desired) {
-        return Ok(());
-    }
-    if suspended {
-        log_unregister(app);
-        escape_hook::uninstall();
-        *ctx.applied_shortcut_layout.lock() = Some(desired);
-        return Ok(());
-    }
-    log_unregister(app);
-    let shortcut = parse_hotkey(&spec)?;
-    app.global_shortcut()
-        .on_shortcut(shortcut, |app, _shortcut, event| {
-            if event.state == ShortcutState::Pressed {
-                post_session_command(app, SessionCommand::Toggle);
-            }
-        })
-        .map_err(|e| AppError::HotkeyFailed(e.to_string()))?;
-    escape_hook::install(app);
-    *ctx.applied_shortcut_layout.lock() = Some(desired);
-    Ok(())
+    let mut applied = ctx.applied_shortcut_layout.lock();
+    apply_shortcut_layout(&mut applied, desired, |layout| {
+        let shortcut = if layout.suspended {
+            None
+        } else {
+            Some(parse_hotkey(&layout.hotkey)?)
+        };
+        app.global_shortcut()
+            .unregister_all()
+            .map_err(|e| AppError::HotkeyFailed(e.to_string()))?;
+        if let Some(shortcut) = shortcut {
+            app.global_shortcut()
+                .on_shortcut(shortcut, |app, _shortcut, event| {
+                    if event.state == ShortcutState::Pressed {
+                        post_session_command(app, SessionCommand::Toggle);
+                    }
+                })
+                .map_err(|e| AppError::HotkeyFailed(e.to_string()))?;
+            escape_hook::install(app);
+        } else {
+            escape_hook::uninstall();
+        }
+        Ok(())
+    })
 }
 
 pub fn set_hotkeys_suspended(app: &AppHandle, suspended: bool) -> Result<(), AppError> {
@@ -146,6 +159,37 @@ pub fn set_hotkeys_suspended(app: &AppHandle, suspended: bool) -> Result<(), App
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_registration_does_not_skip_restoring_the_previous_hotkey() {
+        let previous = ShortcutLayout {
+            hotkey: "Ctrl+Shift+Space".into(),
+            suspended: false,
+        };
+        let desired = ShortcutLayout {
+            hotkey: "Alt+X".into(),
+            suspended: false,
+        };
+        let mut applied = Some(previous.clone());
+        let mut registered = Some(previous.hotkey.clone());
+        assert!(apply_shortcut_layout(&mut applied, desired, |_| {
+            registered = None; // The native unregister succeeded before registration failed.
+            Err(AppError::HotkeyFailed("occupied".into()))
+        })
+        .is_err());
+        assert!(applied.is_none());
+        apply_shortcut_layout(&mut applied, previous.clone(), |layout| {
+            registered = Some(layout.hotkey.clone());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(registered, Some(previous.hotkey.clone()));
+        assert_eq!(applied, Some(previous.clone()));
+        apply_shortcut_layout(&mut applied, previous, |_| {
+            panic!("unchanged layout must not re-register")
+        })
+        .unwrap();
+    }
 
     #[test]
     fn idle_does_not_want_escape() {

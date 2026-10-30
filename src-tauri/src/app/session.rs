@@ -48,6 +48,14 @@ use crate::windows_int::text_injector::{
 type ShutdownCaptureCompletion = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 const SHUTDOWN_CAPTURE_CLEANUP_BOUND: Duration = Duration::from_secs(30);
 const CANCELLED_CLEANUP_MAX_ATTEMPTS: u32 = 8;
+const MAX_PENDING_ATTEMPTS: usize = 256;
+
+#[derive(Clone)]
+struct PendingAttempt {
+    row: crate::history::repository::TranscriptionAttempt,
+    cost_usd: Option<f64>,
+    model: String,
+}
 
 pub struct AppContext {
     pub settings_path: PathBuf,
@@ -98,6 +106,7 @@ pub struct AppContext {
     pub settings_recovery: Mutex<bool>,
     pub filter_recording: AtomicBool,
     cancelled_deletion_retries: Arc<Mutex<HashSet<String>>>,
+    pending_attempts: Mutex<Vec<PendingAttempt>>,
 }
 
 impl AppContext {
@@ -174,6 +183,7 @@ impl AppContext {
             settings_recovery: Mutex::new(recovered),
             filter_recording: AtomicBool::new(false),
             cancelled_deletion_retries: Arc::new(Mutex::new(HashSet::new())),
+            pending_attempts: Mutex::new(Vec::new()),
         })
     }
 
@@ -218,7 +228,7 @@ pub fn toggle_recording(app: &AppHandle) -> Result<(), AppError> {
     let state = ctx.state.lock().clone();
     match toggle_hotkey_action(&state) {
         ToggleHotkeyAction::Start => start_recording(app),
-        ToggleHotkeyAction::Stop => stop_recording(app),
+        ToggleHotkeyAction::Stop => stop_recording(app, StopOrigin::Explicit),
         ToggleHotkeyAction::Ignore => Ok(()),
     }
 }
@@ -249,7 +259,7 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
                 if let Some(id) = recording_id.as_deref() {
                     discard_pending_capture_recording_locked(&ctx, id);
                 } else {
-                    *ctx.captured_target.lock() = None;
+                    clear_captured_target(&ctx);
                     ctx.cancel_tx.lock().take();
                 }
             } else {
@@ -269,7 +279,7 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
                 });
             }
             ctx.abort_start.store(true, Ordering::SeqCst);
-            *ctx.captured_target.lock() = None;
+            clear_captured_target(&ctx);
             ctx.emit_history(app);
             ctx.emit_state(app);
             play_cancel_cue(&ctx);
@@ -367,7 +377,7 @@ fn discard_pending_capture_recording_locked(ctx: &AppContext, recording_id: &str
     if let Some(cleanup) = ctx.capture_cleanup.lock().as_ref() {
         cleanup.discard_late_result();
     }
-    *ctx.captured_target.lock() = None;
+    clear_captured_target(ctx);
     ctx.cancel_tx.lock().take();
 }
 
@@ -387,7 +397,7 @@ fn discard_uncommitted_recording_locked(ctx: &AppContext) {
         }
     }
     ctx.capture_cleanup.lock().take();
-    *ctx.captured_target.lock() = None;
+    clear_captured_target(ctx);
     ctx.cancel_tx.lock().take();
 }
 
@@ -398,7 +408,7 @@ fn discard_stopping_recording_locked(ctx: &AppContext) {
     } else if let Some(id) = ctx.session_recording_id.lock().clone() {
         discard_pending_capture_recording_locked(ctx, &id);
     } else {
-        *ctx.captured_target.lock() = None;
+        clear_captured_target(ctx);
         ctx.cancel_tx.lock().take();
     }
 }
@@ -793,12 +803,18 @@ fn lock_current_session_generation(
         .then_some(lifecycle)
 }
 
+fn clear_captured_target(ctx: &AppContext) {
+    if let Some(target) = ctx.captured_target.lock().take() {
+        native::release_session_target(target);
+    }
+}
+
 fn clear_live_session_locked(ctx: &AppContext, recording_id: &str) {
     let is_current = ctx.session_recording_id.lock().as_deref() == Some(recording_id);
     if is_current {
         *ctx.session_recording_id.lock() = None;
         ctx.capture_cleanup.lock().take();
-        *ctx.captured_target.lock() = None;
+        clear_captured_target(ctx);
         ctx.cancel_tx.lock().take();
     }
 }
@@ -808,6 +824,22 @@ fn cancel_history_retries(ctx: &AppContext) {
     for tx in senders.values() {
         let _ = tx.send(true);
     }
+}
+
+fn register_history_retry(
+    ctx: &AppContext,
+    recording_id: &str,
+) -> Result<tokio::sync::watch::Receiver<bool>, AppError> {
+    // Shutdown takes the same admission gate before setting its flag and
+    // signalling watchers. Registration must not miss that cancellation.
+    let _admission = crate::app::operations::lock_admission(ctx);
+    if ctx.shutdown_requested.load(Ordering::SeqCst) {
+        return Err(AppError::Cancelled);
+    }
+    history_retry_allowed(&ctx.state.lock())?;
+    let (tx, rx) = tokio::sync::watch::channel(false);
+    ctx.retry_cancel.lock().insert(recording_id.to_string(), tx);
+    Ok(rx)
 }
 
 pub fn signal_retry_cancel(
@@ -842,6 +874,23 @@ fn play_cancel_cue(ctx: &AppContext) {
     }
 }
 
+fn persist_capture_start(
+    ctx: &AppContext,
+    rec: &crate::history::repository::Recording,
+) -> Result<(), AppError> {
+    let inserted = ctx.history.lock().insert(rec);
+    if let Err(err) = inserted {
+        let _ = ctx.transition(SessionEvent::CaptureFailed(err.clone()));
+        ctx.cancel_tx.lock().take();
+        clear_captured_target(ctx);
+        *ctx.session_recording_id.lock() = None;
+        ctx.capture_starting.store(false, Ordering::SeqCst);
+        return Err(err);
+    }
+    *ctx.session_recording_id.lock() = Some(rec.id.clone());
+    Ok(())
+}
+
 fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
     let _session_lifecycle = ctx.session_lifecycle.lock();
@@ -874,24 +923,28 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     let skip = voxely_window_roots(app);
     let generation = ctx.session_generation.load(Ordering::SeqCst);
     *ctx.captured_target.lock() = native::capture_session_target(&skip, generation);
-    ctx.overlay_timeline.lock().begin_show();
-    show_overlay(app);
-    schedule_keep_captured_caret(app, generation);
-    ctx.emit_state(app);
     let settings = ctx.settings.lock().clone();
-    if settings.notifications {
-        crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Start);
-    }
     let id = uuid::Uuid::new_v4().to_string();
     let dest = audio_dir(&ctx.data_dir).join(format!("{id}.raw.wav"));
     let mut rec = new_recording(settings.model.clone());
     rec.id = id.clone();
     rec.raw_audio_path = Some(format!("{id}.raw.wav"));
     rec.status = RecordingStatus::Processing;
-    ctx.history.lock().insert(&rec).inspect_err(|err| {
-        let _ = ctx.transition(SessionEvent::CaptureFailed(err.clone()));
-    })?;
-    *ctx.session_recording_id.lock() = Some(id.clone());
+    if let Err(err) = persist_capture_start(&ctx, &rec) {
+        drop(_admission);
+        drop(_session_lifecycle);
+        hide_overlay_now(app);
+        ctx.emit_state(app);
+        crate::notify::show_error(app, &err);
+        return Err(err);
+    }
+    ctx.overlay_timeline.lock().begin_show();
+    show_overlay(app);
+    schedule_keep_captured_caret(app, generation);
+    ctx.emit_state(app);
+    if settings.notifications {
+        crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Start);
+    }
     ctx.capture_starting.store(true, Ordering::SeqCst);
     ctx.pending_native_capture_starts
         .fetch_add(1, Ordering::SeqCst);
@@ -1230,14 +1283,14 @@ fn schedule_capture_limit_watch(app: &AppHandle, generation: u64) {
         if should_auto_stop_capture(&state, finished) {
             let handle = app.clone();
             let _ = app.run_on_main_thread(move || {
-                auto_stop_truncated_capture(&handle);
+                auto_stop_finished_capture(&handle);
             });
             return;
         }
     });
 }
 
-fn auto_stop_truncated_capture(app: &AppHandle) {
+fn auto_stop_finished_capture(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
     let finished = ctx
         .capture
@@ -1247,9 +1300,9 @@ fn auto_stop_truncated_capture(app: &AppHandle) {
     if !should_auto_stop_capture(&ctx.state.lock(), finished) {
         return;
     }
-    ctx.overlay.lock().set_limit_reached(true);
-    ctx.emit_overlay(app);
-    let _ = stop_recording(app);
+    // A finished worker may mean a limit, device failure or I/O failure.
+    // Publish its reason only after CaptureResult becomes available.
+    let _ = stop_recording(app, StopOrigin::Automatic);
 }
 
 fn spawn_openrouter_prewarm(ctx: &AppContext) {
@@ -1261,7 +1314,17 @@ fn spawn_openrouter_prewarm(ctx: &AppContext) {
     });
 }
 
-fn take_capture_for_stop(ctx: &AppContext) -> Result<Option<CaptureSession>, AppError> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopOrigin {
+    Explicit,
+    Automatic,
+}
+
+fn take_capture_for_stop(
+    ctx: &AppContext,
+    origin: StopOrigin,
+    capture_target: impl FnOnce(u64) -> Option<CapturedTarget>,
+) -> Result<Option<CaptureSession>, AppError> {
     let _session_lifecycle = ctx.session_lifecycle.lock();
     let _admission = crate::app::operations::lock_admission(ctx);
     // Recheck after acquiring the lifecycle lock: another stop may have won.
@@ -1272,13 +1335,38 @@ fn take_capture_for_stop(ctx: &AppContext) -> Result<Option<CaptureSession>, App
     if session.is_some() {
         ctx.transition(SessionEvent::StopRequested)?;
         ctx.capture_stopping.store(true, Ordering::SeqCst);
+        // Choose once under the same ownership lock as stop. Neither duplicate
+        // stop, cancellation nor API completion can substitute another window.
+        if origin == StopOrigin::Explicit {
+            let generation = ctx.session_generation.load(Ordering::SeqCst);
+            let at_stop = capture_target(generation);
+            let mut target = ctx.captured_target.lock();
+            let start_root = target.map(|target| target.root);
+            crate::windows_int::text_injector::adopt_stop_target(&mut target, at_stop);
+            tracing::info!(
+                generation,
+                start_root,
+                stop_root = at_stop.map(|target| target.root),
+                selected_root = target.map(|target| target.root),
+                "insertion target selected at explicit stop"
+            );
+        }
     }
     Ok(session)
 }
 
-fn stop_recording(app: &AppHandle) -> Result<(), AppError> {
+fn stop_recording(app: &AppHandle, origin: StopOrigin) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
-    let session = take_capture_for_stop(&ctx)?;
+    // Tauri's HWND getters may synchronize with the UI thread. Resolve only
+    // our excluded roots before taking lifecycle/admission ownership.
+    let skip = if origin == StopOrigin::Explicit {
+        voxely_window_roots(app)
+    } else {
+        Vec::new()
+    };
+    let session = take_capture_for_stop(&ctx, origin, |generation| {
+        native::capture_session_target(&skip, generation)
+    })?;
     let Some(session) = session else {
         return Ok(());
     };
@@ -1288,7 +1376,6 @@ fn stop_recording(app: &AppHandle) -> Result<(), AppError> {
      * completes, so another operation cannot start in the gap.
      */
     ctx.emit_state(app);
-    refresh_insert_target(app);
     if ctx.settings.lock().notifications {
         crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Stop);
     }
@@ -1439,9 +1526,9 @@ fn finish_stop(
             return;
         }
     };
-    if result.truncated {
-        ctx.overlay.lock().set_limit_reached(true);
-    }
+    ctx.overlay
+        .lock()
+        .set_limit_reached(capture_reached_api_limit(&result));
     ctx.emit_history(app);
     if let Some(err) = capture_failure {
         clear_live_session(&ctx, &id);
@@ -1851,27 +1938,6 @@ fn voxely_window_roots(app: &AppHandle) -> Vec<usize> {
         .collect()
 }
 
-fn refresh_insert_target(app: &AppHandle) {
-    let ctx = app.state::<Arc<AppContext>>();
-    let overlay_root = overlay_native_hwnd(app).map(|h| h.value);
-    let main_root = native_hwnd_for_label(app, "main").map(|h| h.value);
-    let skip = [overlay_root, main_root]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    let generation = ctx.session_generation.load(Ordering::SeqCst);
-    let start = *ctx.captured_target.lock();
-    let live = native::capture_session_target(&skip, generation);
-    if let Some(target) = crate::windows_int::insert_engine::resolve_captured_insert_target(
-        start,
-        live,
-        overlay_root,
-        main_root,
-    ) {
-        *ctx.captured_target.lock() = Some(target);
-    }
-}
-
 fn keep_captured_caret(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
     let Some(target) = *ctx.captured_target.lock() else {
@@ -1888,15 +1954,10 @@ fn keep_captured_caret(app: &AppHandle) {
     snap.main_root = main_root;
     snap.captured = Some(target);
     match crate::windows_int::insert_engine::classify_insert_policy(&snap) {
-        InsertPolicy::SendUnicode => {
-            let _ = world.focus_caret(&target);
-        }
         InsertPolicy::RestoreThenSend => {
-            if world.restore_foreground(&target) {
-                let _ = world.focus_caret(&target);
-            }
+            let _ = world.restore_foreground(&target);
         }
-        InsertPolicy::CopyOnly(_) => {}
+        InsertPolicy::SendUnicode | InsertPolicy::CopyOnly(_) => {}
     }
 }
 
@@ -2109,9 +2170,7 @@ pub(crate) fn shutdown_session(app: &AppHandle) -> bool {
     let admission = crate::app::operations::lock_admission(&ctx);
     ctx.filter_generation.fetch_add(1, Ordering::SeqCst);
     ctx.meter_generation.fetch_add(1, Ordering::SeqCst);
-    if let Some(tx) = ctx.cancel_tx.lock().take() {
-        let _ = tx.send(true);
-    }
+    request_transcription_cancel_for_shutdown(&ctx);
     let recording_id = ctx.session_recording_id.lock().clone();
     if let Some(session) = ctx.capture.lock().take() {
         ctx.capture_stopping.store(true, Ordering::SeqCst);
@@ -2175,7 +2234,7 @@ pub(crate) fn shutdown_session(app: &AppHandle) -> bool {
     drop(admission);
     *ctx.session_recording_id.lock() = None;
     ctx.capture_cleanup.lock().take();
-    *ctx.captured_target.lock() = None;
+    clear_captured_target(&ctx);
     let _ = ctx.transition(SessionEvent::Shutdown);
     // Queued capture completion runs on the UI thread and also needs lifecycle.
     // Never retain this guard while waiting for an HWND/UI getter.
@@ -2191,6 +2250,8 @@ pub(crate) fn shutdown_session(app: &AppHandle) -> bool {
 }
 
 fn shutdown_capture_cleanup_pending(ctx: &AppContext) -> bool {
+    let transcriptions_pending = !ctx.in_flight.lock().is_empty();
+    let attempts_pending = !ctx.pending_attempts.lock().is_empty();
     ctx.capture_starting.load(Ordering::SeqCst)
         || ctx.capture_stopping.load(Ordering::SeqCst)
         || ctx.pending_native_capture_starts.load(Ordering::SeqCst) > 0
@@ -2201,6 +2262,15 @@ fn shutdown_capture_cleanup_pending(ctx: &AppContext) -> bool {
         || ctx.filter_recording.load(Ordering::SeqCst)
         || ctx.meter_monitor.lock().is_some()
         || ctx.meter_starting.load(Ordering::SeqCst)
+        || transcriptions_pending
+        || attempts_pending
+}
+
+fn request_transcription_cancel_for_shutdown(ctx: &AppContext) {
+    if let Some(tx) = ctx.cancel_tx.lock().as_ref() {
+        tx.send_replace(true);
+    }
+    cancel_history_retries(ctx);
 }
 
 fn shutdown_session_exit_ready(ctx: &AppContext) -> bool {
@@ -2489,7 +2559,23 @@ fn salvage_raw_tmp(audio_root: &Path, rec: &mut crate::history::repository::Reco
 }
 
 fn begin_transcription(ctx: &AppContext, recording_id: &str) -> Result<(), AppError> {
-    if !ctx.in_flight.lock().insert(recording_id.to_string()) {
+    // Settings can change after admission. Reserve the validated maximum so a
+    // later snapshot cannot exceed the accounting capacity already promised.
+    let reserved_attempts = (1 + crate::transcription::retry::MAX_ADDITIONAL_RETRIES) as usize;
+    let pending = ctx.pending_attempts.lock();
+    let mut in_flight = ctx.in_flight.lock();
+    if pending.len().saturating_add(
+        in_flight
+            .len()
+            .saturating_add(1)
+            .saturating_mul(reserved_attempts),
+    ) > MAX_PENDING_ATTEMPTS
+    {
+        return Err(AppError::StorageFailed(
+            "usage journal recovery is pending".into(),
+        ));
+    }
+    if !in_flight.insert(recording_id.to_string()) {
         return Err(AppError::TranscriptionInProgress);
     }
     Ok(())
@@ -2604,9 +2690,62 @@ fn persist_attempt(
         http_status: http_status.map(|s| s as i64),
         latency_ms: Some(latency_ms as i64),
     };
-    ctx.history
+    let result = ctx
+        .history
         .lock()
-        .record_attempt_for_model(&row, cost_usd, model)
+        .record_attempt_for_model(&row, cost_usd, model);
+    if result.is_err() {
+        let mut pending = ctx.pending_attempts.lock();
+        if pending.len() < MAX_PENDING_ATTEMPTS {
+            pending.push(PendingAttempt {
+                row,
+                cost_usd,
+                model: model.to_string(),
+            });
+        } else {
+            tracing::error!(recording_id, "usage recovery queue capacity exceeded");
+        }
+    }
+    result
+}
+
+fn flush_pending_attempts(ctx: &AppContext) -> bool {
+    // Don't hold the admission/accounting mutex across SQLite I/O. Bound work
+    // per tick and stop on the first storage failure instead of retrying every
+    // pending row against a locked or unavailable database.
+    let mut recovered = false;
+    for _ in 0..8 {
+        let Some(attempt) = ctx.pending_attempts.lock().first().cloned() else {
+            return recovered;
+        };
+        // The transaction refuses absent/suppressed recordings. Delayed
+        // accounting cannot recreate metrics after manual cancellation.
+        let result = ctx.history.lock().record_attempt_for_model(
+            &attempt.row,
+            attempt.cost_usd,
+            &attempt.model,
+        );
+        if result.is_err() {
+            return recovered;
+        }
+        ctx.pending_attempts
+            .lock()
+            .retain(|pending| pending.row.id != attempt.row.id);
+        recovered = true;
+    }
+    recovered
+}
+
+fn preserve_transcription_result(
+    result: Result<crate::transcription::openrouter::TranscriptionSuccess, AppError>,
+    persistence_error: Option<AppError>,
+    on_storage_error: impl FnOnce(&AppError),
+) -> Result<crate::transcription::openrouter::TranscriptionSuccess, AppError> {
+    if let Some(err) = persistence_error {
+        on_storage_error(&err);
+    }
+    // A journal failure must not discard text already returned by the provider.
+    result
 }
 
 async fn run_transcription(
@@ -2658,9 +2797,10 @@ async fn run_transcription(
         },
     )
     .await;
-    if let Some(err) = persistence_error.lock().take() {
-        return Err(err);
-    }
+    let result = preserve_transcription_result(result, persistence_error.lock().take(), |err| {
+        tracing::error!(error = %err, recording_id, "API result retained; usage journal recovery pending");
+        crate::notify::show_error(app, err);
+    });
     result.map(|mut success| {
         success.attempt = success.attempt.saturating_add(attempt_offset);
         success
@@ -2739,7 +2879,13 @@ fn apply_configured_retention_admitted(
         return Ok(Vec::new());
     }
     let settings = ctx.settings.lock().clone();
-    let protected = crate::app::operations::protected_recording_ids(ctx);
+    let mut protected = crate::app::operations::protected_recording_ids(ctx);
+    protected.extend(
+        ctx.pending_attempts
+            .lock()
+            .iter()
+            .map(|attempt| attempt.row.recording_id.clone()),
+    );
     let audio = audio_dir(&ctx.data_dir);
     let names = crate::app::operations::protected_audio_names(ctx);
     let history = ctx.history.lock();
@@ -2755,13 +2901,35 @@ fn apply_configured_retention_admitted(
     .map(|result| result.deleted)
 }
 
+fn maintain_usage_statistics(
+    ctx: &AppContext,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), AppError> {
+    flush_pending_attempts(ctx);
+    ctx.history
+        .lock()
+        .prune_usage_statistics(now - chrono::Duration::days(90))
+}
+
 pub fn start_retention_maintenance(app: AppHandle) {
     tauri::async_runtime::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(10 * 60));
+        let mut recovery_interval = tokio::time::interval(Duration::from_secs(1));
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = recovery_interval.tick() => {
+                    let ctx = app.state::<Arc<AppContext>>();
+                    if flush_pending_attempts(&ctx) { ctx.emit_history(&app); }
+                    schedule_deferred_shutdown_exit(&app, &ctx);
+                    continue;
+                },
+                _ = interval.tick() => {},
+            }
             let ctx = app.state::<Arc<AppContext>>();
             retry_pending_cancelled_recordings(&ctx);
+            if let Err(err) = maintain_usage_statistics(&ctx, chrono::Utc::now()) {
+                tracing::warn!(error = %err, "periodic usage retention failed");
+            }
             let _admission = crate::app::operations::lock_admission(&ctx);
             if crate::app::operations::system_busy(&ctx) || *ctx.settings_recovery.lock() {
                 continue;
@@ -3010,12 +3178,27 @@ async fn manual_history_transcription(
         }
         begin_transcription(&ctx, &recording_id)?;
     }
-    let result = manual_retry_inner(&app, &recording_id, reprocess_original).await;
-    ctx.retry_cancel.lock().remove(&recording_id);
-    ctx.in_flight.lock().remove(&recording_id);
+    let result = run_reserved_history_retry(
+        &ctx,
+        &recording_id,
+        manual_retry_inner(&app, &recording_id, reprocess_original),
+    )
+    .await;
+    schedule_deferred_shutdown_exit(&app, &ctx);
     if let Err(err) = &result {
         crate::notify::show_error(&app, err);
     }
+    result
+}
+
+async fn run_reserved_history_retry<T>(
+    ctx: &AppContext,
+    recording_id: &str,
+    work: impl std::future::Future<Output = Result<T, AppError>>,
+) -> Result<T, AppError> {
+    let result = work.await;
+    ctx.retry_cancel.lock().remove(recording_id);
+    ctx.in_flight.lock().remove(recording_id);
     result
 }
 
@@ -3025,9 +3208,7 @@ async fn manual_retry_inner(
     reprocess_original: bool,
 ) -> Result<crate::history::repository::Recording, AppError> {
     let ctx = app.state::<Arc<AppContext>>();
-    history_retry_allowed(&ctx.state.lock())?;
-    let (tx, rx) = tokio::sync::watch::channel(false);
-    ctx.retry_cancel.lock().insert(recording_id.to_string(), tx);
+    let rx = register_history_retry(&ctx, recording_id)?;
     let settings = ctx.settings.lock().clone();
     let mut rec = ctx
         .history
@@ -3173,28 +3354,14 @@ async fn manual_retry_inner(
     } else {
         transcribed
     };
-    match transcribed {
+    let failure = match transcribed {
         Ok(success) => {
-            let transcript = crate::text_replacements::apply_text_replacements(
-                success.text,
-                &settings.text_replacements,
-            );
-            let cancel_gate = ctx.retry_cancel.lock();
-            if *rx.borrow() {
-                drop(cancel_gate);
-                restore_cancelled_retry(
-                    ctx.inner(),
-                    recording_id,
-                    &original_recording,
-                    staged_processed.as_deref(),
-                )?;
-                ctx.emit_history(app);
-                release_retry_session(ctx.inner(), app, recording_id, Some(AppError::Cancelled));
-                return Err(AppError::Cancelled);
-            }
             rec.status = RecordingStatus::Completed;
             rec.model = settings.model.clone();
-            rec.transcript = Some(transcript);
+            rec.transcript = Some(crate::text_replacements::apply_text_replacements(
+                success.text,
+                &settings.text_replacements,
+            ));
             rec.attempt_count = rec.attempt_count.max(success.attempt as i64);
             rec.usage_json = success.usage_json;
             rec.cost = success.cost;
@@ -3208,36 +3375,92 @@ async fn manual_retry_inner(
                 rec.last_error_code = None;
                 rec.last_error_message = None;
             }
-            rec.updated_at = chrono::Utc::now();
-            ctx.history.lock().update(&rec)?;
-            drop(cancel_gate);
-            ctx.emit_history(app);
-            release_retry_session(ctx.inner(), app, recording_id, None);
-            Ok(rec)
+            None
         }
-        Err(AppError::Cancelled) => {
-            restore_cancelled_retry(
-                ctx.inner(),
-                recording_id,
-                &original_recording,
-                staged_processed.as_deref(),
-            )?;
-            ctx.emit_history(app);
-            release_retry_session(ctx.inner(), app, recording_id, Some(AppError::Cancelled));
-            Err(AppError::Cancelled)
-        }
+        Err(AppError::Cancelled) => Some(AppError::Cancelled),
         Err(err) => {
-            if let Some(persisted) = ctx.history.lock().get(recording_id)? {
-                rec.attempt_count = rec.attempt_count.max(persisted.attempt_count);
-            }
             rec.status = RecordingStatus::Failed;
             rec.last_error_message = Some(err.user_message());
             rec.last_error_code = Some(err.code().to_string());
-            rec.updated_at = chrono::Utc::now();
-            ctx.history.lock().update(&rec)?;
-            ctx.emit_history(app);
-            release_retry_session(ctx.inner(), app, recording_id, Some(err.clone()));
-            Err(err)
+            Some(err)
+        }
+    };
+    rec.updated_at = chrono::Utc::now();
+    let committed = finalize_history_retry(
+        &ctx,
+        rec,
+        &original_recording,
+        staged_processed.as_deref(),
+        &rx,
+        failure == Some(AppError::Cancelled),
+        |err| crate::notify::show_error(app, err),
+    )
+    .await;
+    ctx.emit_history(app);
+    let error = committed.as_ref().err().cloned().or(failure);
+    release_retry_session(ctx.inner(), app, recording_id, error.clone());
+    match (committed, error) {
+        (Ok(recording), None) => Ok(recording),
+        (_, Some(err)) => Err(err),
+        (Err(err), None) => Err(err),
+    }
+}
+
+async fn finalize_history_retry(
+    ctx: &AppContext,
+    mut recording: crate::history::repository::Recording,
+    original: &crate::history::repository::Recording,
+    staged_processed: Option<&Path>,
+    cancelled: &tokio::sync::watch::Receiver<bool>,
+    provider_cancelled: bool,
+    mut on_storage_error: impl FnMut(&AppError),
+) -> Result<crate::history::repository::Recording, AppError> {
+    let mut notified = false;
+    let mut delay = Duration::from_millis(100);
+    loop {
+        let cancelled_now;
+        let committed = {
+            // Serialize commit with Cancel without retaining locks while
+            // sleeping. The caller retains retry_cancel/in_flight until durable.
+            let _cancel_gate = ctx.retry_cancel.lock();
+            cancelled_now = provider_cancelled || *cancelled.borrow();
+            if cancelled_now {
+                restore_cancelled_retry(ctx, &recording.id, original, staged_processed)
+                    .map(|_| None)
+            } else {
+                let history = ctx.history.lock();
+                history.get(&recording.id).and_then(|current| {
+                    let Some(current) = current else {
+                        return Ok(None);
+                    };
+                    recording.attempt_count = recording.attempt_count.max(current.attempt_count);
+                    history
+                        .update(&recording)
+                        .map(|updated| updated.then_some(recording.clone()))
+                })
+            }
+        };
+        match committed {
+            Ok(Some(recording)) => return Ok(recording),
+            Ok(None) => {
+                if let Some(path) = staged_processed {
+                    remove_capture_artifacts(path);
+                }
+                return Err(if cancelled_now {
+                    AppError::Cancelled
+                } else {
+                    AppError::StorageFailed("recording was removed before retry completed".into())
+                });
+            }
+            Err(err) => {
+                if !notified {
+                    tracing::error!(error = %err, recording_id = recording.id, "history retry finalization retained for recovery");
+                    on_storage_error(&err);
+                    notified = true;
+                }
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(Duration::from_secs(1));
+            }
         }
     }
 }
@@ -3461,6 +3684,10 @@ fn persist_capture_result(
     Ok((rec, failure))
 }
 
+fn capture_reached_api_limit(result: &crate::audio::capture::CaptureResult) -> bool {
+    result.limit_reached && result.capture_error.is_none()
+}
+
 fn apply_capture_result_metadata(
     recording: &mut crate::history::repository::Recording,
     result: &crate::audio::capture::CaptureResult,
@@ -3538,8 +3765,10 @@ fn persist_interrupted_capture(
     );
     rec.last_error_message = Some(if let Some(err) = capture_error.as_ref() {
         err.user_message()
-    } else if result.truncated {
+    } else if capture_reached_api_limit(result) {
         "Recording reached the maximum size before shutdown".into()
+    } else if result.truncated {
+        "Recording truncated before shutdown".into()
     } else {
         AppError::Interrupted.user_message()
     });
@@ -3613,6 +3842,463 @@ mod tests {
     use rusqlite::Connection;
 
     #[test]
+    fn initial_history_insert_failure_releases_start_ownership_before_hud_publication() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        ctx.transition(SessionEvent::StartRequested).unwrap();
+        let (tx, _) = tokio::sync::watch::channel(false);
+        *ctx.cancel_tx.lock() = Some(tx);
+        *ctx.captured_target.lock() = Some(CapturedTarget {
+            hwnd: 10,
+            root: 10,
+            pid: 20,
+            tid: 30,
+            generation: 1,
+        });
+        let fault = Connection::open(ctx.data_dir.join("history.sqlite")).unwrap();
+        fault.execute_batch("CREATE TRIGGER reject_start BEFORE INSERT ON recordings BEGIN SELECT RAISE(ABORT, 'initial insert failed'); END;").unwrap();
+        let rec = new_recording("vendor/model".into());
+        assert!(matches!(
+            persist_capture_start(&ctx, &rec),
+            Err(AppError::StorageFailed(_))
+        ));
+        assert!(matches!(*ctx.state.lock(), SessionState::Failed { .. }));
+        assert!(ctx.cancel_tx.lock().is_none());
+        assert!(ctx.captured_target.lock().is_none());
+        assert!(ctx.session_recording_id.lock().is_none());
+        assert!(!ctx.capture_starting.load(Ordering::SeqCst));
+        assert_eq!(ctx.pending_native_capture_starts.load(Ordering::SeqCst), 0);
+        assert!(ctx.history.lock().get(&rec.id).unwrap().is_none());
+        assert_eq!(
+            std::fs::read_dir(audio_dir(&ctx.data_dir)).unwrap().count(),
+            0
+        );
+        fault.execute_batch("DROP TRIGGER reject_start;").unwrap();
+        ctx.transition(SessionEvent::StartRequested).unwrap();
+        persist_capture_start(&ctx, &rec).unwrap();
+        assert_eq!(
+            ctx.session_recording_id.lock().as_deref(),
+            Some(rec.id.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn history_retry_reservation_recovers_terminal_storage_fault_without_another_api_call() {
+        for terminal in 0..3 {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = Arc::new(AppContext::initialize(dir.path().to_path_buf()).unwrap());
+            let mut original = new_recording("vendor/original".into());
+            original.status = RecordingStatus::Completed;
+            original.transcript = Some("previous result".into());
+            ctx.history.lock().insert(&original).unwrap();
+            let mut pending = original.clone();
+            pending.model = "vendor/retry".into();
+            persist_retry_processing(&ctx, &mut pending).unwrap();
+            pending.status = if terminal == 1 {
+                RecordingStatus::Failed
+            } else {
+                RecordingStatus::Completed
+            };
+            pending.transcript = Some("already paid result".into());
+            let staged =
+                audio_dir(&ctx.data_dir).join(format!("{}.processed-new.wav", original.id));
+            std::fs::write(&staged, b"staged retry audio").unwrap();
+            pending.processed_audio_path =
+                Some(staged.file_name().unwrap().to_string_lossy().into_owned());
+            let fault = Connection::open(ctx.data_dir.join("history.sqlite")).unwrap();
+            fault.execute_batch("CREATE TRIGGER reject_retry_terminal BEFORE UPDATE ON recordings WHEN NEW.status <> 'processing' BEGIN SELECT RAISE(ABORT, 'temporary terminal write failure'); END;").unwrap();
+            let id = original.id.clone();
+            begin_transcription(&ctx, &id).unwrap();
+            let (tx, rx) = tokio::sync::watch::channel(false);
+            ctx.retry_cancel.lock().insert(id.clone(), tx);
+            let notified = Arc::new(AtomicBool::new(false));
+            let notified_for_worker = Arc::clone(&notified);
+            let worker_ctx = Arc::clone(&ctx);
+            let worker_id = id.clone();
+            let worker_staged = staged.clone();
+            let task = tokio::spawn(async move {
+                run_reserved_history_retry(
+                    &worker_ctx,
+                    &worker_id,
+                    finalize_history_retry(
+                        &worker_ctx,
+                        pending,
+                        &original,
+                        Some(&worker_staged),
+                        &rx,
+                        false,
+                        move |_| {
+                            notified_for_worker.store(true, Ordering::SeqCst);
+                        },
+                    ),
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while !notified.load(Ordering::SeqCst) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!task.is_finished());
+            assert!(ctx.in_flight.lock().contains(&id));
+            assert!(ctx.retry_cancel.lock().contains_key(&id));
+            assert_eq!(
+                ctx.history.lock().get(&id).unwrap().unwrap().status,
+                RecordingStatus::Processing
+            );
+            assert!(staged.is_file());
+            if terminal == 2 {
+                assert!(signal_retry_cancel(&ctx.retry_cancel, &id));
+            }
+            fault
+                .execute_batch("DROP TRIGGER reject_retry_terminal;")
+                .unwrap();
+            let result = tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap();
+            let saved = ctx.history.lock().get(&id).unwrap().unwrap();
+            if terminal == 2 {
+                assert_eq!(result, Err(AppError::Cancelled));
+                assert_eq!(saved.status, RecordingStatus::Completed);
+                assert_eq!(saved.transcript.as_deref(), Some("previous result"));
+                assert!(!staged.exists());
+            } else {
+                assert!(result.is_ok());
+                assert_eq!(saved.transcript.as_deref(), Some("already paid result"));
+                assert_eq!(
+                    saved.status,
+                    if terminal == 1 {
+                        RecordingStatus::Failed
+                    } else {
+                        RecordingStatus::Completed
+                    }
+                );
+                assert!(staged.is_file());
+            }
+            assert!(!ctx.in_flight.lock().contains(&id));
+            assert!(!ctx.retry_cancel.lock().contains_key(&id));
+        }
+    }
+
+    #[test]
+    fn shutdown_cancellation_boundary_signals_live_and_retry_and_waits_for_their_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let (live_tx, live_rx) = tokio::sync::watch::channel(false);
+        let (retry_tx, retry_rx) = tokio::sync::watch::channel(false);
+        *ctx.cancel_tx.lock() = Some(live_tx);
+        ctx.retry_cancel.lock().insert("retry".into(), retry_tx);
+        begin_transcription(&ctx, "retry").unwrap();
+        request_transcription_cancel_for_shutdown(&ctx);
+        assert!(*live_rx.borrow());
+        assert!(*retry_rx.borrow());
+        assert!(!shutdown_session_exit_ready(&ctx));
+        ctx.in_flight.lock().remove("retry");
+        assert!(shutdown_session_exit_ready(&ctx));
+    }
+
+    #[tokio::test]
+    async fn shutdown_between_retry_reservation_and_registration_prevents_new_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        begin_transcription(&ctx, "reserved").unwrap();
+        {
+            let _admission = crate::app::operations::lock_admission(&ctx);
+            ctx.shutdown_requested.store(true, Ordering::SeqCst);
+            request_transcription_cancel_for_shutdown(&ctx);
+        }
+        let mut work_started = false;
+        let result = run_reserved_history_retry(&ctx, "reserved", async {
+            let _rx = register_history_retry(&ctx, "reserved")?;
+            work_started = true;
+            Ok(())
+        })
+        .await;
+        assert_eq!(result, Err(AppError::Cancelled));
+        assert!(!work_started);
+        assert!(ctx.retry_cancel.lock().is_empty());
+        assert!(ctx.in_flight.lock().is_empty());
+        ctx.shutdown_requested.store(false, Ordering::SeqCst);
+        begin_transcription(&ctx, "registered").unwrap();
+        let rx = register_history_retry(&ctx, "registered").unwrap();
+        {
+            let _admission = crate::app::operations::lock_admission(&ctx);
+            ctx.shutdown_requested.store(true, Ordering::SeqCst);
+            request_transcription_cancel_for_shutdown(&ctx);
+        }
+        assert!(
+            *rx.borrow(),
+            "watchers registered before shutdown must also be cancelled"
+        );
+    }
+
+    #[test]
+    fn capture_limit_is_distinct_from_queue_loss_and_device_failure() {
+        let mut result = crate::audio::capture::CaptureResult {
+            path: PathBuf::from("test.wav"),
+            duration_ms: 1000,
+            sample_rate: SAMPLE_RATE,
+            samples: Vec::new(),
+            truncated: true,
+            limit_reached: false,
+            capture_error: None,
+        };
+        assert!(!capture_reached_api_limit(&result));
+        result.duration_ms = crate::audio::capture::max_duration_ms();
+        // Queue loss immediately before the cap can have the same rounded
+        // millisecond duration. Only the writer's exact counter is authoritative.
+        assert!(!capture_reached_api_limit(&result));
+        result.limit_reached = true;
+        assert!(capture_reached_api_limit(&result));
+        result.capture_error = Some("device disconnected".into());
+        assert!(!capture_reached_api_limit(&result));
+        result.capture_error = None;
+        result.truncated = false;
+        result.limit_reached = false;
+        assert!(!capture_reached_api_limit(&result));
+    }
+
+    #[test]
+    fn attempt_storage_failure_preserves_paid_text_and_recovers_cost_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let rec = new_recording("vendor/model".into());
+        ctx.history.lock().insert(&rec).unwrap();
+        let fault = Connection::open(ctx.data_dir.join("history.sqlite")).unwrap();
+        fault.execute_batch("CREATE TRIGGER reject_paid_attempt BEFORE INSERT ON transcription_attempts BEGIN SELECT RAISE(ABORT, 'journal unavailable'); END;").unwrap();
+        let error = persist_attempt(
+            &ctx,
+            &rec.id,
+            &rec.model,
+            1,
+            "success",
+            Some(200),
+            25,
+            None,
+            Some(0.125),
+        )
+        .unwrap_err();
+        let mut notified = false;
+        let success = preserve_transcription_result(
+            Ok(crate::transcription::openrouter::TranscriptionSuccess {
+                text: "paid text".into(),
+                usage_json: None,
+                cost: Some(0.125),
+                generation_id: None,
+                latency_ms: 25,
+                attempt: 1,
+                model: rec.model.clone(),
+            }),
+            Some(error),
+            |_| {
+                notified = true;
+            },
+        )
+        .unwrap();
+        assert_eq!(success.text, "paid text");
+        assert!(notified);
+        assert_eq!(ctx.pending_attempts.lock().len(), 1);
+        flush_pending_attempts(&ctx);
+        assert_eq!(ctx.pending_attempts.lock().len(), 1);
+        fault
+            .execute_batch("DROP TRIGGER reject_paid_attempt;")
+            .unwrap();
+        flush_pending_attempts(&ctx);
+        flush_pending_attempts(&ctx);
+        assert!(ctx.pending_attempts.lock().is_empty());
+        assert_eq!(ctx.history.lock().list_attempts(&rec.id).unwrap().len(), 1);
+        let stats = ctx
+            .history
+            .lock()
+            .get_usage_statistics(
+                rec.created_at,
+                chrono::Utc::now() + chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!(stats.api_requests, 1);
+        assert_eq!(stats.reported_cost_usd, 0.125);
+    }
+
+    #[test]
+    fn deferred_usage_capacity_reserves_all_configured_attempts_before_api_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let rec = new_recording("vendor/model".into());
+        ctx.history.lock().insert(&rec).unwrap();
+        let fault = Connection::open(ctx.data_dir.join("history.sqlite")).unwrap();
+        fault.execute_batch("CREATE TRIGGER reject_capacity_attempt BEFORE INSERT ON transcription_attempts BEGIN SELECT RAISE(ABORT, 'queue capacity'); END;").unwrap();
+        for attempt in 1..=MAX_PENDING_ATTEMPTS {
+            assert!(persist_attempt(
+                &ctx,
+                &rec.id,
+                &rec.model,
+                attempt as u32,
+                "error",
+                Some(503),
+                1,
+                None,
+                None
+            )
+            .is_err());
+        }
+        assert_eq!(ctx.pending_attempts.lock().len(), MAX_PENDING_ATTEMPTS);
+        assert!(matches!(
+            begin_transcription(&ctx, "new-api"),
+            Err(AppError::StorageFailed(_))
+        ));
+        assert!(!ctx.in_flight.lock().contains("new-api"));
+        fault
+            .execute_batch("DROP TRIGGER reject_capacity_attempt;")
+            .unwrap();
+        flush_pending_attempts(&ctx);
+        assert_eq!(ctx.pending_attempts.lock().len(), MAX_PENDING_ATTEMPTS - 8);
+        begin_transcription(&ctx, "new-api").unwrap();
+        assert!(ctx.in_flight.lock().contains("new-api"));
+    }
+
+    #[test]
+    fn usage_reservation_covers_retry_settings_changed_after_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let rec = new_recording("vendor/model".into());
+        ctx.history.lock().insert(&rec).unwrap();
+        let fault = Connection::open(ctx.data_dir.join("history.sqlite")).unwrap();
+        fault.execute_batch("CREATE TRIGGER reject_settings_race BEFORE INSERT ON transcription_attempts BEGIN SELECT RAISE(ABORT, 'capacity'); END;").unwrap();
+        for attempt in 1..=(MAX_PENDING_ATTEMPTS - 5) {
+            assert!(persist_attempt(
+                &ctx,
+                &rec.id,
+                &rec.model,
+                attempt as u32,
+                "error",
+                Some(503),
+                1,
+                None,
+                None
+            )
+            .is_err());
+        }
+        ctx.settings.lock().retry.automatic_retries = false;
+        assert!(
+            matches!(
+                begin_transcription(&ctx, "next"),
+                Err(AppError::StorageFailed(_))
+            ),
+            "one current attempt must not reserve less than a later validated retry snapshot"
+        );
+        assert!(!ctx.in_flight.lock().contains("next"));
+        ctx.settings.lock().retry.additional_retries =
+            crate::transcription::retry::MAX_ADDITIONAL_RETRIES;
+        ctx.settings.lock().retry.automatic_retries = true;
+        assert!(begin_transcription(&ctx, "next").is_err());
+    }
+
+    #[test]
+    fn deferred_usage_attempt_cannot_restore_deleted_or_cancelled_metrics() {
+        for cancelled in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+            let rec = new_recording("vendor/model".into());
+            ctx.history.lock().insert(&rec).unwrap();
+            let fault = Connection::open(ctx.data_dir.join("history.sqlite")).unwrap();
+            fault.execute_batch("CREATE TRIGGER reject_deferred_attempt BEFORE INSERT ON transcription_attempts BEGIN SELECT RAISE(ABORT, 'pending accounting'); END;").unwrap();
+            assert!(persist_attempt(
+                &ctx,
+                &rec.id,
+                &rec.model,
+                1,
+                "success",
+                Some(200),
+                1,
+                None,
+                Some(0.1)
+            )
+            .is_err());
+            fault
+                .execute_batch("DROP TRIGGER reject_deferred_attempt;")
+                .unwrap();
+            if cancelled {
+                discard_cancelled_recording(&ctx, &rec.id);
+            } else {
+                delete_recording_and_usage(&ctx.history.lock(), &audio_dir(&ctx.data_dir), &rec)
+                    .unwrap();
+            }
+            flush_pending_attempts(&ctx);
+            assert!(ctx.pending_attempts.lock().is_empty());
+            assert!(ctx
+                .history
+                .lock()
+                .list_attempts(&rec.id)
+                .unwrap()
+                .is_empty());
+            let stats = ctx
+                .history
+                .lock()
+                .get_usage_statistics(
+                    rec.created_at,
+                    chrono::Utc::now() + chrono::Duration::seconds(1),
+                )
+                .unwrap();
+            assert_eq!(stats.api_requests, 0);
+            assert_eq!(stats.reported_cost_usd, 0.0);
+        }
+    }
+
+    #[test]
+    fn usage_maintenance_expires_metadata_without_opening_statistics_or_expiring_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        ctx.settings.lock().retention = "forever".into();
+        let now = chrono::Utc::now();
+        let mut old = new_recording("vendor/model".into());
+        old.created_at = now - chrono::Duration::days(91);
+        ctx.history.lock().insert(&old).unwrap();
+        let fresh = new_recording("vendor/model".into());
+        ctx.history.lock().insert(&fresh).unwrap();
+        let db = Connection::open(ctx.data_dir.join("history.sqlite")).unwrap();
+        let count = || {
+            db.query_row("SELECT COUNT(*) FROM usage_dictations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        assert_eq!(count(), 2);
+        maintain_usage_statistics(&ctx, now).unwrap();
+        assert_eq!(count(), 1);
+        assert!(ctx.history.lock().get(&old.id).unwrap().is_some());
+        assert!(ctx.history.lock().get(&fresh.id).unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn hostile_wav_retry_releases_reservation_without_resampling_or_modifying_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let rec = new_recording("vendor/model".into());
+        ctx.history.lock().insert(&rec).unwrap();
+        let source = audio_dir(&ctx.data_dir).join("malformed.wav");
+        let dest = audio_dir(&ctx.data_dir).join("processed.wav");
+        write_pcm16_wav(&source, SAMPLE_RATE, &[0.25; 480]).unwrap();
+        let mut bytes = std::fs::read(&source).unwrap();
+        bytes[24..28].copy_from_slice(&1_u32.to_le_bytes());
+        bytes[28..32].copy_from_slice(&2_u32.to_le_bytes());
+        std::fs::write(&source, &bytes).unwrap();
+        begin_transcription(&ctx, &rec.id).unwrap();
+        let result = run_reserved_history_retry(&ctx, &rec.id, async {
+            reprocess_original_audio(&source, &dest, crate::dsp::pipeline::DspPreset::stt_fast())
+        })
+        .await;
+        assert!(
+            matches!(result, Err(AppError::StorageFailed(ref message)) if message.contains("mono PCM16"))
+        );
+        assert!(!ctx.in_flight.lock().contains(&rec.id));
+        assert!(!dest.exists());
+        assert_eq!(std::fs::read(&source).unwrap(), bytes);
+    }
+
+    #[test]
     fn meter_stop_timeout_keeps_system_busy_until_native_capture_exits() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Arc::new(AppContext::initialize(dir.path().to_path_buf()).unwrap());
@@ -3629,6 +4315,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: vec![0.1; 8],
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -3667,6 +4354,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: vec![0.1; 8],
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -3722,6 +4410,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: vec![0.1; 8],
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -3959,6 +4648,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: vec![0.1; 8],
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -4008,6 +4698,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: vec![0.1; 16],
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -4057,6 +4748,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: Vec::new(),
                 truncated: true,
+                limit_reached: false,
                 capture_error: None,
             }),
         );
@@ -4094,6 +4786,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: Vec::new(),
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             },
         );
@@ -4129,6 +4822,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: Vec::new(),
                 truncated: true,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -4448,6 +5142,7 @@ mod tests {
                 sample_rate: 16_000,
                 samples: vec![0.1; 160],
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -4461,12 +5156,28 @@ mod tests {
             )
             .unwrap();
 
-        let capture = take_capture_for_stop(&ctx).unwrap().unwrap();
+        let start_target = CapturedTarget::from_hwnd(NativeHwnd { value: 101 }, 101, 10, 11, 7);
+        let stop_target = CapturedTarget::from_hwnd(NativeHwnd { value: 202 }, 202, 20, 21, 7);
+        *ctx.captured_target.lock() = Some(start_target);
+        let capture = take_capture_for_stop(&ctx, StopOrigin::Explicit, |generation| {
+            assert_eq!(generation, 7);
+            Some(stop_target)
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(*ctx.captured_target.lock(), Some(stop_target));
         assert_eq!(*ctx.state.lock(), SessionState::StoppingRecording);
         assert!(ctx.capture_stopping.load(Ordering::SeqCst));
         for _ in 0..3 {
-            assert!(take_capture_for_stop(&ctx).unwrap().is_none());
+            assert!(
+                take_capture_for_stop(&ctx, StopOrigin::Explicit, |_| panic!(
+                    "duplicate stop must not select another window"
+                ))
+                .unwrap()
+                .is_none()
+            );
         }
+        assert_eq!(*ctx.captured_target.lock(), Some(stop_target));
         assert_eq!(*ctx.state.lock(), SessionState::StoppingRecording);
         assert_eq!(ctx.session_generation.load(Ordering::SeqCst), 7);
         assert_eq!(
@@ -4490,6 +5201,95 @@ mod tests {
         assert_eq!(after.dictations, before.dictations);
         assert_eq!(after.api_requests, before.api_requests);
         assert_eq!(after.reported_cost_usd, before.reported_cost_usd);
+    }
+
+    fn stop_target_fixture(path: &Path) -> AppContext {
+        let ctx = AppContext::initialize(path.to_path_buf()).unwrap();
+        let mut rec = new_recording("vendor/stop-test".into());
+        rec.status = RecordingStatus::Processing;
+        let audio = audio_dir(path).join(format!("{}.raw.wav", rec.id));
+        rec.raw_audio_path = Some(audio.file_name().unwrap().to_string_lossy().into_owned());
+        crate::audio::capture::write_pcm16_wav(&audio, 16_000, &[0.1; 160]).unwrap();
+        ctx.history.lock().insert(&rec).unwrap();
+        *ctx.session_recording_id.lock() = Some(rec.id);
+        *ctx.state.lock() = SessionState::Recording;
+        ctx.session_generation.store(7, Ordering::SeqCst);
+        let worker_audio = audio.clone();
+        let worker = thread::spawn(move || {
+            Ok(crate::audio::capture::CaptureResult {
+                path: worker_audio,
+                duration_ms: 10,
+                sample_rate: 16_000,
+                samples: vec![0.1; 160],
+                truncated: false,
+                limit_reached: false,
+                capture_error: None,
+            })
+        });
+        *ctx.capture.lock() = Some(CaptureSession::from_test_worker(worker, audio));
+        ctx
+    }
+
+    #[test]
+    fn automatic_stop_and_stop_without_external_window_keep_start_target() {
+        for origin in [StopOrigin::Automatic, StopOrigin::Explicit] {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = stop_target_fixture(dir.path());
+            let start = CapturedTarget::from_hwnd(NativeHwnd { value: 101 }, 101, 10, 11, 7);
+            *ctx.captured_target.lock() = Some(start);
+            let calls = std::cell::Cell::new(0);
+            let capture = take_capture_for_stop(&ctx, origin, |_| {
+                calls.set(calls.get() + 1);
+                assert_eq!(
+                    origin,
+                    StopOrigin::Explicit,
+                    "automatic stop must not capture foreground"
+                );
+                None // HUD/main/no valid external window
+            })
+            .unwrap()
+            .unwrap();
+            assert_eq!(calls.get(), usize::from(origin == StopOrigin::Explicit));
+            assert_eq!(*ctx.captured_target.lock(), Some(start));
+            capture.stop().unwrap();
+        }
+    }
+
+    #[test]
+    fn stop_target_selection_finishes_before_cancel_can_replace_session_ownership() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(stop_target_fixture(dir.path()));
+        let stop = CapturedTarget::from_hwnd(NativeHwnd { value: 202 }, 202, 20, 21, 7);
+        let next = CapturedTarget::from_hwnd(NativeHwnd { value: 303 }, 303, 30, 31, 8);
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let stop_ctx = Arc::clone(&ctx);
+        let stopping = thread::spawn(move || {
+            take_capture_for_stop(&stop_ctx, StopOrigin::Explicit, |generation| {
+                assert_eq!(generation, 7);
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                Some(stop)
+            })
+            .unwrap()
+            .unwrap()
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        assert!(ctx.session_lifecycle.try_lock().is_none());
+        let cancel_ctx = Arc::clone(&ctx);
+        let cancelling = thread::spawn(move || {
+            let _lifecycle = cancel_ctx.session_lifecycle.lock();
+            assert_eq!(*cancel_ctx.captured_target.lock(), Some(stop));
+            clear_captured_target(&cancel_ctx);
+            cancel_ctx.session_generation.fetch_add(1, Ordering::SeqCst);
+            *cancel_ctx.captured_target.lock() = Some(next);
+        });
+        release_tx.send(()).unwrap();
+        let capture = stopping.join().unwrap();
+        cancelling.join().unwrap();
+        capture.stop().unwrap();
+        assert_eq!(*ctx.captured_target.lock(), Some(next));
+        assert_eq!(ctx.session_generation.load(Ordering::SeqCst), 8);
     }
 
     #[test]
@@ -4844,6 +5644,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             samples: Vec::new(),
             truncated: false,
+            limit_reached: false,
             capture_error: None,
         };
 
@@ -4873,6 +5674,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             samples: Vec::new(),
             truncated: false,
+            limit_reached: false,
             capture_error: Some("input device disconnected".into()),
         };
 
@@ -4983,6 +5785,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             samples: Vec::new(),
             truncated: true,
+            limit_reached: false,
             capture_error: None,
         };
         discard_stale_capture_completion(&ctx, Some(&rec.id), &result);
@@ -5152,6 +5955,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: Vec::new(),
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             },
         );
@@ -5523,6 +6327,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             samples: vec![],
             truncated: false,
+            limit_reached: false,
             capture_error: None,
         };
         let fault = rusqlite::Connection::open(data.join("history.sqlite")).unwrap();
@@ -5564,6 +6369,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             samples: vec![],
             truncated: false,
+            limit_reached: false,
             capture_error: None,
         };
         let fault = rusqlite::Connection::open(dir.path().join("history.sqlite")).unwrap();
@@ -5594,6 +6400,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             samples: vec![],
             truncated: false,
+            limit_reached: false,
             capture_error: None,
         };
         assert!(persist_capture_result(&history, "deleted", &result).is_err());
@@ -5934,6 +6741,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             samples: Vec::new(),
             truncated: false,
+            limit_reached: false,
             capture_error: Some("device disconnected".into()),
         };
 

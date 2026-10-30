@@ -101,16 +101,21 @@ beforeEach(() => {
 
 describe("StatisticsPane", () => {
   it("shows locale-formatted aggregates, partial model costs and accessible daily values", async () => {
-    vi.mocked(api.usageStatistics).mockResolvedValue(sample);
+    const requests = 1_234;
+    vi.mocked(api.usageStatistics).mockResolvedValue({
+      ...sample,
+      apiRequests: requests,
+      daily: sample.daily.map((point) => ({ ...point, apiRequests: requests })),
+    });
     const copy = messagesFor("ru");
     render(<StatisticsPane copy={copy} />);
 
     expect(await screen.findByText("vendor/model-a")).toBeInTheDocument();
-    const formattedDictations = new Intl.NumberFormat(copy.dateLocale).format(1_234);
+    const formattedRequests = new Intl.NumberFormat(copy.dateLocale).format(requests);
     const normalizeLocaleNumber = (value: string) => value.replace(/\s/gu, "");
     expect(
       screen.getAllByText(
-        (text) => normalizeLocaleNumber(text) === normalizeLocaleNumber(formattedDictations),
+        (text) => normalizeLocaleNumber(text) === normalizeLocaleNumber(formattedRequests),
       ),
     ).toHaveLength(2);
     const formattedCost = new Intl.NumberFormat(copy.dateLocale, {
@@ -129,7 +134,11 @@ describe("StatisticsPane", () => {
       .getAllByText(copy.statisticsRequests)
       .find((node) => node.tagName === "P")
       ?.closest('[data-slot="card"]') as HTMLElement;
-    expect(within(requestsSummary).getByText("3")).toBeInTheDocument();
+    expect(
+      within(requestsSummary).getByText(
+        (text) => normalizeLocaleNumber(text) === normalizeLocaleNumber(formattedRequests),
+      ),
+    ).toBeInTheDocument();
     const audioSummary = screen
       .getByText(copy.statisticsAudio)
       .closest('[data-slot="card"]') as HTMLElement;
@@ -139,20 +148,20 @@ describe("StatisticsPane", () => {
     expect(screen.getByText(copy.statisticsIncomplete.replace("{count}", "3"))).toBeInTheDocument();
     expect(screen.getByText("Попыток без подтвержденной стоимости: 1")).toBeInTheDocument();
     expect(screen.getByText("Попыток без подтвержденной стоимости: 2")).toBeInTheDocument();
-    expect(screen.getByText("Ось Y: Диктовок в день")).toBeInTheDocument();
+    expect(screen.getByText("Ось Y: API-запросов в день")).toBeInTheDocument();
     expect(screen.getByRole("img").querySelector('[data-chart-component="Bar"]')).toHaveAttribute(
       "data-chart-data-key",
-      "dictations",
+      "apiRequests",
     );
 
     fireEvent.click(screen.getByText(copy.statisticsChartData));
-    const dailyTable = screen.getByRole("table", { name: /Диктовки/ });
+    const dailyTable = screen.getByRole("table", { name: /API-запросы/ });
     expect(
       within(dailyTable).getByRole("columnheader", { name: copy.statisticsChartDate }),
     ).toBeInTheDocument();
     expect(
       within(dailyTable).getByText(
-        (text) => normalizeLocaleNumber(text) === normalizeLocaleNumber(formattedDictations),
+        (text) => normalizeLocaleNumber(text) === normalizeLocaleNumber(formattedRequests),
       ),
     ).toBeInTheDocument();
 
@@ -173,7 +182,38 @@ describe("StatisticsPane", () => {
       "reportedCostUsd",
     );
     expect(screen.getByRole("table", { name: /Расход/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: copy.statisticsMetricRequests }));
+    expect(screen.getByRole("img").querySelector('[data-chart-component="Bar"]')).toHaveAttribute(
+      "data-chart-data-key",
+      "apiRequests",
+    );
   });
+
+  it.each(["ru", "en"] as const)(
+    "shows only request counts across the %s dashboard",
+    async (locale) => {
+      vi.mocked(api.usageStatistics).mockResolvedValue(sample);
+      const copy = messagesFor(locale);
+      render(<StatisticsPane copy={copy} />);
+      expect(await screen.findByText("vendor/model-a")).toBeInTheDocument();
+      expect(screen.queryByText("Dictations")).not.toBeInTheDocument();
+      expect(screen.queryByText("Диктовки")).not.toBeInTheDocument();
+      const metrics = screen.getByRole("group", { name: copy.statisticsChartMetric });
+      expect(within(metrics).getAllByRole("button")).toHaveLength(2);
+      expect(
+        within(metrics).getByRole("button", { name: copy.statisticsMetricRequests }),
+      ).toHaveAttribute("aria-pressed", "true");
+      const models = screen.getByText("vendor/model-a").closest("table")!;
+      expect(within(models).getAllByRole("columnheader")).toHaveLength(3);
+      expect(
+        within(models).getByRole("columnheader", { name: copy.statisticsRequests }),
+      ).toBeInTheDocument();
+      const summary = screen
+        .getByText(copy.statisticsAudio)
+        .closest('[data-slot="card"]')!.parentElement!;
+      expect(summary.querySelectorAll('[data-slot="card"]')).toHaveLength(3);
+    },
+  );
 
   it("sends exact local-day bounds for presets and custom date ranges", async () => {
     vi.mocked(api.usageStatistics).mockResolvedValue(sample);
@@ -228,6 +268,53 @@ describe("StatisticsPane", () => {
     expect(screen.getByText(/Choose a range up to 90 days/)).toBeInTheDocument();
   });
 
+  it.each(["From", "To"])(
+    "handles clearing the %s date without requesting an invalid range",
+    async (label) => {
+      vi.mocked(api.usageStatistics).mockResolvedValue(sample);
+      const copy = messagesFor("en");
+      render(<StatisticsPane copy={copy} />);
+      await waitFor(() => expect(api.usageStatistics).toHaveBeenCalledTimes(1));
+      fireEvent.click(screen.getByRole("button", { name: "Custom range" }));
+      await waitFor(() =>
+        expect(screen.getByRole("region", { name: copy.statisticsTitle })).toHaveAttribute(
+          "aria-busy",
+          "false",
+        ),
+      );
+      const previousCalls = vi.mocked(api.usageStatistics).mock.calls.length;
+      const input = screen.getByLabelText(label) as HTMLInputElement;
+      const previousValue = input.value;
+      fireEvent.change(input, { target: { value: "" } });
+      expect(input).toHaveValue(previousValue);
+      expect(screen.queryAllByText(copy.statisticsChooseValidRange)).toHaveLength(0);
+      expect(api.usageStatistics).toHaveBeenCalledTimes(previousCalls);
+    },
+  );
+
+  it.each([7, 30, 90])("loads the %i-day preset after an invalid custom range", async (days) => {
+    vi.mocked(api.usageStatistics).mockResolvedValue(sample);
+    render(<StatisticsPane copy={messagesFor("en")} />);
+    await waitFor(() => expect(api.usageStatistics).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole("button", { name: "Custom range" }));
+    fireEvent.change(screen.getByLabelText("To"), {
+      target: { value: inputDate(localDateOffset(-40)) },
+    });
+    expect(
+      screen.getAllByText(messagesFor("en").statisticsChooseValidRange).length,
+    ).toBeGreaterThan(0);
+    const previousCalls = vi.mocked(api.usageStatistics).mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: `${days} days` }));
+    await waitFor(() => expect(api.usageStatistics).toHaveBeenCalledTimes(previousCalls + 1));
+    expect(api.usageStatistics).toHaveBeenLastCalledWith(
+      localDateOffset(-(days - 1)).toISOString(),
+      localDateOffset(1).toISOString(),
+    );
+    await waitFor(() =>
+      expect(screen.queryAllByText(messagesFor("en").statisticsChooseValidRange)).toHaveLength(0),
+    );
+  });
+
   it("keeps the current dashboard in place while a newly selected timeframe loads", async () => {
     const nextPeriod = deferred<typeof sample>();
     vi.mocked(api.usageStatistics)
@@ -269,7 +356,7 @@ describe("StatisticsPane", () => {
     expect(screen.getByText(initialRange)).toBeInTheDocument();
 
     await act(async () => {
-      nextPeriod.resolve({ ...sample, dictations: 222 });
+      nextPeriod.resolve({ ...sample, apiRequests: 222 });
       await nextPeriod.promise;
     });
 
@@ -349,7 +436,7 @@ describe("StatisticsPane", () => {
     refresh();
     await waitFor(() => expect(api.usageStatistics).toHaveBeenCalledTimes(2));
 
-    refreshed.resolve({ ...sample, dictations: 222 });
+    refreshed.resolve({ ...sample, apiRequests: 222 });
     expect(await screen.findByText("222", { selector: "p" })).toBeInTheDocument();
     await act(async () => {
       initial.resolve(sample);
@@ -399,7 +486,7 @@ describe("StatisticsPane", () => {
     ).toBeInTheDocument();
     expect(screen.queryByText("Success rate")).not.toBeInTheDocument();
     fireEvent.click(screen.getByText("Show daily values"));
-    expect(screen.getByRole("table", { name: /Dictations/ })).toBeInTheDocument();
+    expect(screen.getByRole("table", { name: /API requests/ })).toBeInTheDocument();
 
     vi.mocked(api.usageStatistics).mockRejectedValueOnce(new Error("statistics unavailable"));
     fireEvent.click(screen.getByRole("button", { name: "7 days" }));
@@ -429,13 +516,13 @@ describe("StatisticsPane", () => {
 
     expect(await screen.findByText("vendor/model-a")).toBeInTheDocument();
     expect(screen.getByText(initialRange)).toBeInTheDocument();
-    const dictationSummary = screen
-      .getAllByText(copy.statisticsDictations)
+    const requestsSummary = screen
+      .getAllByText(copy.statisticsRequests)
       .find((node) => node.tagName === "P")
       ?.closest('[data-slot="card"]') as HTMLElement;
     expect(
-      within(dictationSummary).getByText(
-        new Intl.NumberFormat(copy.dateLocale).format(sample.dictations),
+      within(requestsSummary).getByText(
+        new Intl.NumberFormat(copy.dateLocale).format(sample.apiRequests),
       ),
     ).toBeInTheDocument();
 
@@ -450,8 +537,8 @@ describe("StatisticsPane", () => {
     expect(screen.getByText("vendor/model-a")).toBeInTheDocument();
     expect(screen.getByText(initialRange)).toBeInTheDocument();
     expect(
-      within(dictationSummary).getByText(
-        new Intl.NumberFormat(copy.dateLocale).format(sample.dictations),
+      within(requestsSummary).getByText(
+        new Intl.NumberFormat(copy.dateLocale).format(sample.apiRequests),
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("region", { name: copy.statisticsTitle })).toHaveAttribute(

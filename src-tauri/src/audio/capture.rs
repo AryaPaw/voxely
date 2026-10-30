@@ -18,7 +18,7 @@ use crate::dsp::metrics::{SAMPLE_RATE, STT_SAMPLE_RATE};
 use crate::error::AppError;
 use crate::transcription::limits::MAX_MULTIPART_AUDIO_FILE_BYTES;
 
-const QUEUE_CAP: usize = 48_000 * 2;
+const QUEUE_SECONDS: usize = 10;
 const WAV_HEADER_BYTES: u64 = 44;
 const WAV_HEADER_LEN: usize = 44;
 const PCM16_BYTES_PER_SAMPLE: u64 = 2;
@@ -157,6 +157,8 @@ pub struct CaptureResult {
     pub sample_rate: u32,
     pub samples: Vec<f32>,
     pub truncated: bool,
+    /// The writer reached the exact normalized frame budget, independently of queue loss.
+    pub limit_reached: bool,
     pub capture_error: Option<String>,
 }
 
@@ -483,7 +485,7 @@ fn start_stream_inner(
     let config: StreamConfig = supported.clone().into();
     let channels = config.channels as usize;
     let input_rate = config.sample_rate.0;
-    let (mut producer, consumer) = RingBuffer::<f32>::new(QUEUE_CAP);
+    let (mut producer, consumer) = RingBuffer::<f32>::new(capture_queue_capacity(input_rate));
     let overflow = Arc::new(AtomicU32::new(0));
     let overflow_cb = overflow.clone();
     let meter_cb = meter.clone();
@@ -585,14 +587,48 @@ fn run_monitor(mut built: BuiltCapture, stop: Arc<AtomicBool>) -> Result<Capture
         sample_rate: SAMPLE_RATE,
         samples: Vec::new(),
         truncated: false,
+        limit_reached: false,
         capture_error: built.stream_error.lock().clone(),
     })
 }
 
 fn run_capture(
-    mut built: BuiltCapture,
+    built: BuiltCapture,
     dest: PathBuf,
     stop: Arc<AtomicBool>,
+) -> Result<CaptureResult, AppError> {
+    let BuiltCapture {
+        stream,
+        consumer,
+        input_rate,
+        overflow,
+        stream_error,
+    } = built;
+    run_capture_writer(
+        consumer,
+        input_rate,
+        dest,
+        stop,
+        overflow,
+        stream_error,
+        move || {
+            drop(stream);
+        },
+    )
+}
+
+fn capture_queue_capacity(input_rate: u32) -> usize {
+    input_rate as usize * QUEUE_SECONDS
+}
+
+fn run_capture_writer(
+    mut consumer: rtrb::Consumer<f32>,
+    input_rate: u32,
+    dest: PathBuf,
+    stop: Arc<AtomicBool>,
+    overflow: Arc<AtomicU32>,
+    stream_error: Arc<Mutex<Option<String>>>,
+    close_stream: impl FnOnce(),
 ) -> Result<CaptureResult, AppError> {
     let spec = WavSpec {
         channels: 1,
@@ -607,18 +643,19 @@ fn run_capture(
     let mut writer =
         WavWriter::create(&tmp, spec).map_err(|e| AppError::StorageFailed(e.to_string()))?;
     let mut leftover = Vec::new();
-    let mut resampler = LinearStreamResampler::new(built.input_rate, SAMPLE_RATE);
+    let mut resampler = LinearStreamResampler::new(input_rate, SAMPLE_RATE);
     let mut written = 0u64;
     let mut truncated = false;
     while !stop.load(Ordering::SeqCst) {
-        drain_consumer(&mut built.consumer, &mut leftover)?;
-        if built.stream_error.lock().is_some() {
+        drain_consumer(&mut consumer, &mut leftover)?;
+        if stream_error.lock().is_some() {
             break;
         }
-        if built.overflow.load(Ordering::Relaxed) > 0 {
+        if overflow.load(Ordering::Relaxed) > 0 && !truncated {
+            // A scheduling stall must not turn into an unsolicited stop. Keep
+            // later speech and report the gap when the user finishes recording.
+            tracing::warn!(input_rate, "capture queue overflow; recording continues");
             truncated = true;
-            stop.store(true, Ordering::SeqCst);
-            break;
         }
         if flush_pcm_chunk(&mut leftover, &mut resampler, &mut writer, &mut written)? {
             truncated = true;
@@ -627,10 +664,11 @@ fn run_capture(
         }
         thread::sleep(CAPTURE_POLL);
     }
-    drop(built.stream);
+    close_stream();
     thread::sleep(Duration::from_millis(20));
-    drain_consumer(&mut built.consumer, &mut leftover)?;
-    if built.overflow.load(Ordering::Relaxed) > 0 {
+    drain_consumer(&mut consumer, &mut leftover)?;
+    let dropped_frames = overflow.load(Ordering::Relaxed);
+    if dropped_frames > 0 {
         truncated = true;
     }
     if flush_pcm_chunk(&mut leftover, &mut resampler, &mut writer, &mut written)? {
@@ -653,13 +691,22 @@ fn run_capture(
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
     std::fs::rename(&tmp, &dest).map_err(|e| AppError::StorageFailed(e.to_string()))?;
     let duration_ms = (written * 1000) / u64::from(SAMPLE_RATE);
+    tracing::info!(
+        duration_ms,
+        dropped_frames,
+        input_rate,
+        limit_reached = written >= MAX_PCM16_FRAMES,
+        stream_failed = stream_error.lock().is_some(),
+        "capture finalized"
+    );
     Ok(CaptureResult {
         path: dest,
         duration_ms,
         sample_rate: SAMPLE_RATE,
         samples: Vec::new(),
         truncated,
-        capture_error: built.stream_error.lock().clone(),
+        limit_reached: written >= MAX_PCM16_FRAMES,
+        capture_error: stream_error.lock().clone(),
     })
 }
 
@@ -729,14 +776,8 @@ fn read_u32_header_field(header: &[u8; WAV_HEADER_LEN], offset: usize) -> Option
 }
 
 pub fn capture_wav_duration_ms(path: &Path) -> Result<u64, AppError> {
-    let reader =
-        hound::WavReader::open(path).map_err(|err| AppError::StorageFailed(err.to_string()))?;
+    let reader = open_validated_pcm16_wav(path)?;
     let sample_rate = u64::from(reader.spec().sample_rate);
-    if sample_rate == 0 {
-        return Err(AppError::StorageFailed(
-            "capture WAV has zero sample rate".into(),
-        ));
-    }
     Ok(u64::from(reader.duration()).saturating_mul(1000) / sample_rate)
 }
 
@@ -812,10 +853,12 @@ fn push_frames(
     } else {
         (sum / mono.len() as f32).sqrt()
     };
-    let mut sample = meter.lock();
-    sample.rms = rms;
-    sample.peak = peak;
-    push_meter(&mut sample, peak.max(rms * 1.6), mono.len() as u32, hop);
+    // Meter rendering must never block the native audio callback.
+    if let Some(mut sample) = meter.try_lock() {
+        sample.rms = rms;
+        sample.peak = peak;
+        push_meter(&mut sample, peak.max(rms * 1.6), mono.len() as u32, hop);
+    }
 }
 
 fn push_meter(sample: &mut MeterSample, amplitude: f32, frames: u32, hop: u32) {
@@ -863,13 +906,67 @@ pub fn read_pcm16_wav(path: &Path) -> Result<Vec<f32>, AppError> {
 }
 
 pub fn read_pcm16_wav_with_rate(path: &Path) -> Result<(Vec<f32>, u32), AppError> {
-    let mut reader =
-        hound::WavReader::open(path).map_err(|e| AppError::StorageFailed(e.to_string()))?;
+    let mut reader = open_validated_pcm16_wav(path)?;
     let rate = reader.spec().sample_rate;
-    let samples: Result<Vec<i16>, _> = reader.samples::<i16>().collect();
-    let samples = samples.map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    Ok((i16_to_f32(&samples), rate))
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(reader.len() as usize)
+        .map_err(|err| AppError::StorageFailed(format!("cannot allocate WAV samples: {err}")))?;
+    for sample in reader.samples::<i16>() {
+        samples.push(
+            f32::from(sample.map_err(|err| AppError::StorageFailed(err.to_string()))?) / 32768.0,
+        );
+    }
+    Ok((samples, rate))
 }
+
+fn open_validated_pcm16_wav(
+    path: &Path,
+) -> Result<hound::WavReader<std::io::BufReader<std::fs::File>>, AppError> {
+    let file = std::fs::File::open(path).map_err(|err| AppError::StorageFailed(err.to_string()))?;
+    let file_len = file
+        .metadata()
+        .map_err(|err| AppError::StorageFailed(err.to_string()))?
+        .len();
+    if file_len > MAX_WAV_BYTES {
+        return Err(AppError::StorageFailed(
+            "WAV exceeds the capture file limit".into(),
+        ));
+    }
+    let reader = hound::WavReader::new(std::io::BufReader::new(file))
+        .map_err(|err| AppError::StorageFailed(err.to_string()))?;
+    let spec = reader.spec();
+    if spec.channels != 1
+        || spec.bits_per_sample != 16
+        || spec.sample_format != hound::SampleFormat::Int
+        || ![STT_SAMPLE_RATE, SAMPLE_RATE].contains(&spec.sample_rate)
+    {
+        return Err(AppError::StorageFailed(
+            "WAV must be mono PCM16 at 16000 or 48000 Hz".into(),
+        ));
+    }
+    let frames = u64::from(reader.len());
+    let mut source = reader.into_inner();
+    let data_offset = source
+        .stream_position()
+        .map_err(|err| AppError::StorageFailed(err.to_string()))?;
+    let max_frames =
+        MAX_STT_PCM16_FRAMES * u64::from(spec.sample_rate) / u64::from(STT_SAMPLE_RATE);
+    if frames > max_frames
+        || frames.saturating_mul(PCM16_BYTES_PER_SAMPLE) > file_len.saturating_sub(data_offset)
+    {
+        return Err(AppError::StorageFailed(
+            "WAV has an oversized or truncated sample payload".into(),
+        ));
+    }
+    source
+        .seek(SeekFrom::Start(0))
+        .map_err(|err| AppError::StorageFailed(err.to_string()))?;
+    hound::WavReader::new(source).map_err(|err| AppError::StorageFailed(err.to_string()))
+}
+
+#[cfg(test)]
+mod native_stress_tests;
 
 #[cfg(test)]
 mod tests {
@@ -889,6 +986,26 @@ mod tests {
         for (a, b) in decoded.iter().zip(data.iter()) {
             assert!((a - b).abs() < 0.01);
         }
+    }
+
+    #[test]
+    fn extended_wav_header_cannot_hide_truncated_data_payload() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("extra-chunk.wav");
+        write_pcm16_wav(&path, SAMPLE_RATE, &[0.1; 480]).unwrap();
+        let mut bytes = std::fs::read(&path).unwrap();
+        let mut junk = b"JUNK".to_vec();
+        junk.extend_from_slice(&16_u32.to_le_bytes());
+        junk.extend_from_slice(&[0; 16]);
+        bytes.splice(36..36, junk);
+        let riff_size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+        assert_eq!(capture_wav_duration_ms(&path).unwrap(), 10);
+        bytes.truncate(bytes.len() - 2);
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(capture_wav_duration_ms(&path).is_err());
+        assert!(read_pcm16_wav(&path).is_err());
     }
 
     #[test]
@@ -1015,6 +1132,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: Vec::new(),
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -1060,6 +1178,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: Vec::new(),
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -1112,6 +1231,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: vec![0.1; 8],
                 truncated: false,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -1151,6 +1271,7 @@ mod tests {
             sample_rate: SAMPLE_RATE,
             samples: vec![0.0; 8],
             truncated: false,
+            limit_reached: false,
             capture_error: None,
         };
         assert!(validate_capture_result(&base).is_ok());
@@ -1161,6 +1282,7 @@ mod tests {
             sample_rate: base.sample_rate,
             samples: base.samples.clone(),
             truncated: base.truncated,
+            limit_reached: base.limit_reached,
             capture_error: Some("input device disconnected".into()),
         };
         assert_eq!(
@@ -1189,6 +1311,7 @@ mod tests {
                 sample_rate: SAMPLE_RATE,
                 samples: Vec::new(),
                 truncated: true,
+                limit_reached: false,
                 capture_error: None,
             })
         });
@@ -1247,6 +1370,109 @@ mod tests {
         assert_eq!(samples.len(), 48);
         assert_eq!(rate, SAMPLE_RATE);
         assert!(samples.iter().all(|sample| (*sample - 0.25).abs() < 0.001));
+    }
+
+    #[test]
+    fn capture_queue_reserves_ten_seconds_at_the_device_rate() {
+        for rate in [16_000, 44_100, 48_000, 96_000, 192_000] {
+            assert_eq!(capture_queue_capacity(rate), rate as usize * 10);
+        }
+    }
+
+    #[test]
+    fn overflow_keeps_recording_and_preserves_speech_until_explicit_stop() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("continued.wav");
+        let (mut producer, consumer) = RingBuffer::<f32>::new(32);
+        let meter = Arc::new(Mutex::new(MeterSample::silent()));
+        let overflow = Arc::new(AtomicU32::new(0));
+        push_frames(&mut producer, &[0.25; 48], 1, &meter, &overflow, 48);
+        assert_eq!(overflow.load(Ordering::Relaxed), 16);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let (closed_tx, closed_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            run_capture_writer(
+                consumer,
+                SAMPLE_RATE,
+                path,
+                worker_stop,
+                overflow,
+                Arc::new(Mutex::new(None)),
+                move || {
+                    let _ = closed_tx.send(());
+                },
+            )
+        });
+        let mut later_frames = 0;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        for _ in 0..16 {
+            loop {
+                if producer.push(-0.5).is_ok() {
+                    later_frames += 1;
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+        let stopped_itself = closed_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        stop.store(true, Ordering::SeqCst);
+        let result = worker.join().unwrap().unwrap();
+        assert!(
+            !stopped_itself,
+            "overflow must not close the recording stream"
+        );
+        assert_eq!(later_frames, 16);
+        assert!(
+            result.truncated,
+            "dropped audio must remain visible in metadata"
+        );
+        assert!(
+            !result.limit_reached,
+            "queue loss must not be reported as the API size limit"
+        );
+        assert!(result.capture_error.is_none());
+        let (samples, _) = read_pcm16_wav_with_rate(&result.path).unwrap();
+        assert_eq!(samples.len(), 48);
+        assert!(samples[..32]
+            .iter()
+            .all(|sample| (*sample - 0.25).abs() < 0.001));
+        assert!(samples[32..]
+            .iter()
+            .all(|sample| (*sample + 0.5).abs() < 0.001));
+    }
+
+    #[test]
+    fn busy_meter_does_not_block_the_audio_callback() {
+        let (mut producer, mut consumer) = RingBuffer::<f32>::new(4);
+        let meter = Arc::new(Mutex::new(MeterSample::silent()));
+        let guard = meter.lock();
+        let callback_meter = meter.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            push_frames(
+                &mut producer,
+                &[0.25; 4],
+                1,
+                &callback_meter,
+                &Arc::new(AtomicU32::new(0)),
+                48,
+            );
+            let _ = done_tx.send(());
+        });
+        let finished_while_locked = done_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+        drop(guard);
+        worker.join().unwrap();
+        assert!(
+            finished_while_locked,
+            "UI meter ownership must not stall audio capture"
+        );
+        let mut samples = Vec::new();
+        drain_consumer(&mut consumer, &mut samples).unwrap();
+        assert_eq!(samples, [0.25; 4]);
     }
 
     #[test]
@@ -1316,5 +1542,72 @@ mod tests {
         for (actual, expected) in samples.iter().zip([-1.0, -0.5, 0.5, 1.0]) {
             assert!((*actual - expected).abs() < 0.001);
         }
+    }
+
+    #[test]
+    fn wav_readers_reject_invalid_metadata_before_allocating_or_resampling() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("invalid.wav");
+        write_pcm16_wav(&path, SAMPLE_RATE, &[0.1; 480]).unwrap();
+        let valid = std::fs::read(&path).unwrap();
+        for (offset, replacement) in [
+            (24usize, 1u32.to_le_bytes().to_vec()),
+            (24, 0u32.to_le_bytes().to_vec()),
+            (24, 44_100u32.to_le_bytes().to_vec()),
+            (22, 2u16.to_le_bytes().to_vec()),
+            (34, 8u16.to_le_bytes().to_vec()),
+            (40, (u32::MAX - 1).to_le_bytes().to_vec()),
+        ] {
+            let mut bytes = valid.clone();
+            bytes[offset..offset + replacement.len()].copy_from_slice(&replacement);
+            // Keep redundant fields consistent so hound accepts the header and
+            // these cases exercise our contract, not its structural validation.
+            let rate = u32::from_le_bytes(bytes[24..28].try_into().unwrap());
+            let channels = u16::from_le_bytes(bytes[22..24].try_into().unwrap());
+            let bits = u16::from_le_bytes(bytes[34..36].try_into().unwrap());
+            let align = channels * (bits / 8);
+            bytes[28..32].copy_from_slice(&(rate * u32::from(align)).to_le_bytes());
+            bytes[32..34].copy_from_slice(&align.to_le_bytes());
+            std::fs::write(&path, bytes).unwrap();
+            assert!(read_pcm16_wav_with_rate(&path).is_err(), "offset {offset}");
+            assert!(capture_wav_duration_ms(&path).is_err(), "offset {offset}");
+        }
+        std::fs::write(&path, &valid[..valid.len() - 2]).unwrap();
+        assert!(read_pcm16_wav_with_rate(&path).is_err());
+        assert!(capture_wav_duration_ms(&path).is_err());
+
+        let mut bytes = valid.clone();
+        bytes[24..28].copy_from_slice(&STT_SAMPLE_RATE.to_le_bytes());
+        bytes[28..32].copy_from_slice(&(STT_SAMPLE_RATE * 2).to_le_bytes());
+        let too_many = MAX_STT_PCM16_FRAMES + 1;
+        bytes[40..44].copy_from_slice(&((too_many * 2) as u32).to_le_bytes());
+        std::fs::write(&path, bytes).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(WAV_HEADER_BYTES + too_many * 2)
+            .unwrap();
+        assert!(read_pcm16_wav_with_rate(&path).is_err());
+        assert!(capture_wav_duration_ms(&path).is_err());
+    }
+
+    #[test]
+    fn wav_readers_reject_sparse_oversized_files_without_loading_payload() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("oversized.wav");
+        write_pcm16_wav(&path, SAMPLE_RATE, &[0.0]).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(MAX_WAV_BYTES + 2)
+            .unwrap();
+        assert!(read_pcm16_wav_with_rate(&path).is_err());
+        assert!(capture_wav_duration_ms(&path).is_err());
+
+        write_pcm16_wav(&path, STT_SAMPLE_RATE, &[0.1; 160]).unwrap();
+        assert_eq!(read_pcm16_wav_with_rate(&path).unwrap().0.len(), 160);
+        assert_eq!(capture_wav_duration_ms(&path).unwrap(), 10);
     }
 }

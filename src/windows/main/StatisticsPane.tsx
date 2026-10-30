@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
-  Activity,
   AudioLines,
   ChartNoAxesCombined,
   Coins,
   LoaderCircle,
   RotateCcw,
+  type LucideIcon,
 } from "lucide-react";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import { PageHeader } from "../../components/settings/PageHeader";
@@ -19,7 +19,7 @@ import { formatInvokeError, type Messages } from "../../lib/i18n";
 import { HISTORY_CHANGED } from "../../lib/history-sync";
 
 type Period = "7" | "30" | "90" | "custom";
-type Metric = "dictations" | "requests" | "cost";
+type Metric = "requests" | "cost";
 type StatisticsRange = {
   firstDay: string;
   lastDay: string;
@@ -88,19 +88,16 @@ function formatDuration(milliseconds: number, copy: Messages, locale: string) {
 }
 
 function metricLabel(metric: Metric, copy: Messages) {
-  if (metric === "dictations") return copy.statisticsMetricDictations;
   if (metric === "requests") return copy.statisticsMetricRequests;
   return copy.statisticsMetricCost;
 }
 
 function metricUnit(metric: Metric, copy: Messages) {
-  if (metric === "dictations") return copy.statisticsChartUnitDictations;
   if (metric === "requests") return copy.statisticsChartUnitRequests;
   return copy.statisticsChartUnitCost;
 }
 
 function chartValue(metric: Metric, point: UsageStatistics["daily"][number]) {
-  if (metric === "dictations") return point.dictations;
   if (metric === "requests") return point.apiRequests;
   return point.reportedCostUsd;
 }
@@ -114,12 +111,13 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
   const [period, setPeriod] = useState<Period>("30");
   const [from, setFrom] = useState(shiftDay(today, -29));
   const [to, setTo] = useState(today);
-  const [metric, setMetric] = useState<Metric>("dictations");
+  const [metric, setMetric] = useState<Metric>("requests");
   const [snapshot, setSnapshot] = useState<StatisticsSnapshot | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const dayCount = period === "custom" ? inclusiveDaysBetween(from, to) : Number(period);
-  const customRangeValid = dayCount > 0 && dayCount <= 90 && from <= to && to <= today;
+  const customRangeValid =
+    period !== "custom" || (dayCount > 0 && dayCount <= 90 && from <= to && to <= today);
 
   const range = useMemo(() => {
     const days = period === "custom" ? 0 : Number(period);
@@ -305,12 +303,7 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
         </div>
       ) : data ? (
         <>
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-            <Summary
-              icon={Activity}
-              label={copy.statisticsDictations}
-              value={formatNumber(data.dictations, copy.dateLocale)}
-            />
+          <div className="grid gap-3 sm:grid-cols-3">
             <Summary
               icon={RotateCcw}
               label={copy.statisticsRequests}
@@ -357,7 +350,7 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
                 role="group"
                 aria-label={copy.statisticsChartMetric}
               >
-                {(["dictations", "requests", "cost"] as Metric[]).map((item) => (
+                {(["requests", "cost"] as Metric[]).map((item) => (
                   <Button
                     key={item}
                     type="button"
@@ -419,13 +412,7 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
                       }
                     />
                     <Bar
-                      dataKey={
-                        metric === "dictations"
-                          ? "dictations"
-                          : metric === "requests"
-                            ? "apiRequests"
-                            : "reportedCostUsd"
-                      }
+                      dataKey={metric === "requests" ? "apiRequests" : "reportedCostUsd"}
                       fill="var(--color-value)"
                       radius={[5, 5, 0, 0]}
                       maxBarSize={30}
@@ -484,13 +471,10 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
             </CardHeader>
             {data.models.length ? (
               <CardContent className="overflow-x-auto px-0">
-                <table className="w-full min-w-[38rem] border-collapse text-left text-sm">
+                <table className="w-full min-w-[30rem] border-collapse text-left text-sm">
                   <thead className="bg-muted/40 text-xs text-muted-foreground">
                     <tr>
                       <th className="px-5 py-3 font-medium sm:px-6">{copy.statisticsModel}</th>
-                      <th className="px-4 py-3 text-right font-medium">
-                        {copy.statisticsModelDictations}
-                      </th>
                       <th className="px-4 py-3 text-right font-medium">
                         {copy.statisticsModelRequests}
                       </th>
@@ -509,9 +493,6 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
                         >
                           {item.model}
                         </th>
-                        <td className="px-4 py-3.5 text-right tabular-nums">
-                          {formatNumber(item.dictations, copy.dateLocale)}
-                        </td>
                         <td className="px-4 py-3.5 text-right tabular-nums">
                           {formatNumber(item.apiRequests, copy.dateLocale)}
                         </td>
@@ -549,7 +530,7 @@ function Summary({
   value,
   hint,
 }: {
-  icon: typeof Activity;
+  icon: LucideIcon;
   label: string;
   value: string;
   hint?: string;

@@ -1,4 +1,5 @@
 import { toast } from "sonner";
+import { useState } from "react";
 import { api, type AppSettings } from "../../../lib/api";
 import { formatInvokeError, statusToast, type Messages } from "../../../lib/i18n";
 import { reportError } from "../../../lib/system-notify";
@@ -31,6 +32,29 @@ export function AdvancedSettings({
   onChange: (patch: Partial<AppSettings>) => void;
   onSettingsReplaced: (settings: AppSettings, wipeApiKey: boolean) => void;
 }) {
+  const [busy, setBusy] = useState(false);
+  const [pendingImport, setPendingImport] = useState<string | null>(null);
+
+  async function transfer(action: "export" | "pick" | "import") {
+    if (busy) return;
+    setBusy(true);
+    try {
+      if (action === "export") {
+        if (await api.exportSettingsFile()) toast.success(copy.settingsExported);
+      } else if (action === "pick") {
+        setPendingImport(await api.readSettingsFile());
+      } else if (pendingImport !== null) {
+        const next = await api.importSettings(pendingImport);
+        onSettingsReplaced(next, false);
+        setPendingImport(null);
+        toast.success(copy.settingsImported);
+      }
+    } catch (error) {
+      reportError(statusToast("error", copy, formatInvokeError(error, copy)));
+    } finally {
+      setBusy(false);
+    }
+  }
   async function reset(wipeApiKey: boolean) {
     try {
       const next = await api.resetSettings(wipeApiKey);
@@ -113,6 +137,42 @@ export function AdvancedSettings({
           </AlertDialogContent>
         </AlertDialog>
       </div>
+      <section
+        className="mt-6 max-w-lg border-t border-border pt-4"
+        aria-labelledby="settings-transfer-heading"
+      >
+        <h2 id="settings-transfer-heading" className="text-sm font-medium">
+          {copy.settingsTransfer}
+        </h2>
+        <p className="my-2 text-xs text-muted-foreground">{copy.settingsTransferHint}</p>
+        <div className="flex gap-2">
+          <Button variant="outline" disabled={busy} onClick={() => void transfer("export")}>
+            {copy.exportSettings}
+          </Button>
+          <Button variant="outline" disabled={busy} onClick={() => void transfer("pick")}>
+            {copy.importSettings}
+          </Button>
+        </div>
+      </section>
+      <AlertDialog
+        open={pendingImport !== null}
+        onOpenChange={(open) => {
+          if (!open && !busy) setPendingImport(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{copy.importSettingsConfirm}</AlertDialogTitle>
+            <AlertDialogDescription>{copy.importSettingsHint}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>{copy.cancel}</AlertDialogCancel>
+            <Button disabled={busy} onClick={() => void transfer("import")}>
+              {copy.importSettings}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

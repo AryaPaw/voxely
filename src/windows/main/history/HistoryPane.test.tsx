@@ -99,6 +99,63 @@ describe("HistoryPane", () => {
     }
   });
 
+  it.each(["switch", "unmount"])("ignores an old play rejection after %s", async (action) => {
+    let rejectPlay!: (reason: unknown) => void;
+    const play = vi.spyOn(HTMLAudioElement.prototype, "play").mockImplementationOnce(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectPlay = reject;
+        }),
+    );
+    const create = vi.fn(() => "blob:next-preview");
+    const revoke = vi.fn();
+    vi.stubGlobal(
+      "URL",
+      class extends URL {
+        static createObjectURL = create;
+        static revokeObjectURL = revoke;
+      },
+    );
+    vi.mocked(invoke).mockImplementation(async (cmd: string) => {
+      if (cmd === "recording_audio_url") return "full.wav";
+      if (cmd === "recording_api_audio") return new ArrayBuffer(44);
+      return undefined;
+    });
+    const { container, unmount } = render(
+      <HistoryCard
+        item={recording()}
+        copy={messagesFor("en")}
+        detailsOpen={false}
+        onToggleDetails={() => undefined}
+        onRefresh={async () => undefined}
+      />,
+    );
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Listen" }));
+      await waitFor(() => expect(play).toHaveBeenCalledTimes(1));
+      if (action === "switch") {
+        fireEvent.mouseDown(screen.getByRole("tab", { name: "For API" }), {
+          button: 0,
+          ctrlKey: false,
+        });
+        await waitFor(() =>
+          expect(container.querySelector("audio")).toHaveAttribute("src", "blob:next-preview"),
+        );
+      } else {
+        unmount();
+      }
+      await act(async () =>
+        rejectPlay(new DOMException("Interrupted by a source change", "AbortError")),
+      );
+      expect(reportError).not.toHaveBeenCalled();
+      if (action === "switch") expect(screen.getByRole("button", { name: "Listen" })).toBeEnabled();
+    } finally {
+      unmount();
+      play.mockRestore();
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("switches between retained audio and disposable API preview and releases its URL", async () => {
     const create = vi.fn(() => "blob:api-preview");
     const revoke = vi.fn();
