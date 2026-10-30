@@ -1,6 +1,7 @@
 # Shared WinGet helpers. Version SSOT is package.json.
 
 Set-StrictMode -Version Latest
+. (Join-Path $PSScriptRoot "winget-github.ps1")
 
 function Get-VoxelyRepoRoot {
     param([string]$Start = $PSScriptRoot)
@@ -69,18 +70,46 @@ function Assert-VoxelyGithubRelease {
 
 function Install-VoxelyWingetCreate {
     $path = Get-VoxelyWingetCreatePath
+    $release = Get-VoxelyWingetCreateRelease
     $dir = Split-Path $path -Parent
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir | Out-Null
     }
-    if (-not (Test-Path $path)) {
-        Write-Host "Downloading wingetcreate.exe"
-        curl.exe -L --fail -o $path "https://aka.ms/wingetcreate/latest"
-    }
-    if (-not (Test-Path $path) -or ((Get-Item $path).Length -lt 1KB)) {
-        throw "Failed to download wingetcreate.exe"
+    if (Test-VoxelyToolHash -Path $path -Sha256 $release.Sha256) { return $path }
+    $temporary = Join-Path $dir "wingetcreate-$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        Write-Host "Downloading wingetcreate $($release.Version)"
+        Invoke-VoxelyToolDownload -Url $release.Url -Path $temporary
+        if (-not (Test-VoxelyToolHash -Path $temporary -Sha256 $release.Sha256)) {
+            throw "wingetcreate download failed SHA256 validation. The existing cache was not replaced."
+        }
+        # The temporary file and destination are on the same volume.
+        [IO.File]::Move($temporary, $path, $true)
+    } finally {
+        if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Force }
     }
     return $path
+}
+
+function Get-VoxelyWingetCreateRelease {
+    # Official microsoft/winget-create v1.12.13.0 asset digest, verified 2026-10-26.
+    return @{
+        Version = "1.12.13.0"
+        Url = "https://github.com/microsoft/winget-create/releases/download/v1.12.13.0/wingetcreate.exe"
+        Sha256 = "24042bd37915805615e6cf969ac57c6439124c3fe85823327f5f3fb24bd9ffea"
+    }
+}
+
+function Test-VoxelyToolHash {
+    param([Parameter(Mandatory)][string]$Path, [Parameter(Mandatory)][string]$Sha256)
+    return (Test-Path -LiteralPath $Path -PathType Leaf) -and
+        ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash -eq $Sha256)
+}
+
+function Invoke-VoxelyToolDownload {
+    param([Parameter(Mandatory)][string]$Url, [Parameter(Mandatory)][string]$Path)
+    & curl.exe --location --fail --silent --show-error --connect-timeout 15 --max-time 120 --retry 2 --retry-max-time 180 --output $Path $Url
+    if ($LASTEXITCODE -ne 0) { throw "wingetcreate download failed (curl exit $LASTEXITCODE)." }
 }
 
 function Get-VoxelyPeMachine {

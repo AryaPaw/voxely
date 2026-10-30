@@ -27,7 +27,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: winget-${{ inputs.version }}
+  # All versions update the same fork master branch.
+  group: winget-submit
   cancel-in-progress: false
 
 jobs:
@@ -37,16 +38,10 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       WINGET_CREATE_GITHUB_TOKEN: ${{ secrets.WINGET_CREATE_GITHUB_TOKEN }}
+      WINGET_VERSION: ${{ inputs.version }}
+      WINGET_SUBMIT: ${{ inputs.submit }}
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - name: Inspect installer
+      - name: Prepare or submit WinGet update
         shell: pwsh
-        run: ./scripts/winget-prepare.ps1 -Mode inspect -Version "${{ inputs.version }}"
-      - name: Update WinGet manifest
-        if: ${{ github.event_name == 'workflow_call' || inputs.submit }}
-        shell: pwsh
-        run: ./scripts/winget-prepare.ps1 -Mode update -Version "${{ inputs.version }}" -Submit
-      - name: Generate local update only
-        if: ${{ github.event_name == 'workflow_dispatch' && !inputs.submit }}
-        shell: pwsh
-        run: ./scripts/winget-prepare.ps1 -Mode update -Version "${{ inputs.version }}"
+        run: ./scripts/winget-prepare.ps1 -Mode update -Version $env:WINGET_VERSION -Submit:($env:WINGET_SUBMIT -eq 'true')

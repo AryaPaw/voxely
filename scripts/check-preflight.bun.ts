@@ -25,6 +25,18 @@ describe("verification preflight", () => {
     expect(winget.jobs.submit.env.WINGET_CREATE_GITHUB_TOKEN).toBe(
       "${{ secrets.WINGET_CREATE_GITHUB_TOKEN }}",
     );
+    expect(winget.concurrency).toEqual({
+      group: "winget-submit",
+      "cancel-in-progress": false,
+    });
+    expect(winget.jobs.submit.env.WINGET_VERSION).toBe("${{ inputs.version }}");
+    expect(winget.jobs.submit.env.WINGET_SUBMIT).toBe("${{ inputs.submit }}");
+    const runs = winget.jobs.submit.steps.filter((step: any) => step.run);
+    expect(runs).toHaveLength(1);
+    expect(runs[0].run).toBe(
+      "./scripts/winget-prepare.ps1 -Mode update -Version $env:WINGET_VERSION -Submit:($env:WINGET_SUBMIT -eq 'true')",
+    );
+    expect(runs[0].if).toBeUndefined();
   });
   test("rejects compiler/runtime version drift", () => {
     expect(() => checkVersion("Rust", "1.99.0", "1.98.1")).toThrow("expected 1.98.1");

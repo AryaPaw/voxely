@@ -22,3 +22,5 @@ $arg = Get-VoxelyWingetCreateUrlArg -Version "0.2.12"
 if ($arg -ne "$url|x64|user") { throw "override must be |x64|user, got $arg" }
 
 Write-Host "winget-lib tests passed (version $version)"
+& (Join-Path $PSScriptRoot "winget-github.test.ps1")
+& (Join-Path $PSScriptRoot "winget-tool.test.ps1")

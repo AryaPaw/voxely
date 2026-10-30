@@ -16,6 +16,8 @@ $root = Get-VoxelyRepoRoot
 & (Join-Path $PSScriptRoot "check-version.ps1")
 $ssot = Get-VoxelyPackageVersion -Root $root
 if (-not $Version) { $Version = $ssot }
+if ($Version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be X.Y.Z." }
+if ($Submit -and $Mode -ne "update") { throw "-Submit is only supported with -Mode update." }
 if ($Version -ne $ssot) {
     Write-Warning "Requested $Version but package.json is $ssot"
 }
@@ -30,6 +32,7 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 $local = Join-Path $work (Get-VoxelyNsisInstallerName -Version $Version)
 Write-Host "Downloading installer for inspect"
 gh release download "v$Version" --repo AryaPaw/voxely --pattern (Get-VoxelyNsisInstallerName -Version $Version) --dir $work --clobber
+if ($LASTEXITCODE -ne 0) { throw "Installer download failed; refusing to inspect a stale local file." }
 $vi = [System.Diagnostics.FileVersionInfo]::GetVersionInfo($local)
 $hash = (Get-FileHash $local -Algorithm SHA256).Hash
 $machine = Get-VoxelyPeMachine -Path $local
@@ -41,6 +44,14 @@ if ($vi.ProductVersion -and $vi.ProductVersion -ne $Version) {
     throw "Installer ProductVersion $($vi.ProductVersion) does not match $Version"
 }
 if (-not $nsis) { throw "Installer is not Nullsoft/NSIS" }
+if ($Submit) {
+    $submission = Initialize-VoxelyWingetSubmission -Version $Version
+    if ($submission.Status -ne "ready") {
+        Assert-VoxelyWingetManifestHash -Repo $submission.ManifestRepo -Ref $submission.ManifestRef -Version $Version -Sha256 $hash
+        Write-Host "WinGet $Version already has matching status $($submission.Status): $($submission.Url). No duplicate submitted."
+        exit 0
+    }
+}
 
 $urlArg = Get-VoxelyWingetCreateUrlArg -Version $Version
 Write-Host "wingetcreate URL arg: $urlArg"
