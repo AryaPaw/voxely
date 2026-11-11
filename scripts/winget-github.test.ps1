@@ -8,6 +8,7 @@ $env:WINGET_CREATE_GITHUB_TOKEN = "fixture-pat"
 $env:GH_TOKEN = "fixture-read-only-release-token"
 $script:responses = [Collections.Generic.Queue[object]]::new()
 $script:calls = [Collections.Generic.List[object]]::new()
+$script:delays = [Collections.Generic.List[int]]::new()
 $script:checks = 0
 $script:target = "a" * 40
 $script:old = "b" * 40
@@ -45,6 +46,12 @@ function Invoke-WebRequest {
 function Start-Case {
     Assert-True ($script:responses.Count -eq 0) "Previous case did not consume its API responses"
     $script:calls.Clear()
+    $script:delays.Clear()
+}
+
+function Start-Sleep {
+    param([int]$Seconds)
+    $script:delays.Add($Seconds)
 }
 
 function Add-NewSubmission([string]$Scopes = "public_repo") {
@@ -80,13 +87,16 @@ $entries=@(Get-VoxelyWingetEntries -Directory $fixtureRoot -Version $version -Sh
 $files=@($entries|ForEach-Object {@{filename=$_.Path;status='added';sha=$_.Sha}})
 $lookup="$up/pulls?state=all&base=master&head=$([Uri]::EscapeDataString("fixture-user:$branch"))&per_page=2"
 $pr=@{number=42;state='open';head=@{sha=$headSha;ref=$branch;repo=@{full_name='fixture-user/winget-pkgs'}};base=@{ref='master';repo=@{full_name='microsoft/winget-pkgs'}};changed_files=3;html_url='https://github.com/microsoft/winget-pkgs/pull/42'}
-function Add-Branch([bool]$Existing=$false,[int]$RefStatus=201,$Diff=$files) {
+function Add-Branch([bool]$Existing=$false,[int]$RefStatus=201,$Diff=$files,[int]$MissingReads=0,[int]$ReadStatus=200) {
     if($Existing){Add-Response $ref @{object=@{sha=$headSha}}}else{
         Add-Response $ref @{} 404
         Add-Response "$fork/git/trees" @{sha=$treeSha} -Method POST
         Add-Response "$fork/git/commits" @{sha=$headSha} -Method POST
         Add-Response "$fork/git/refs" @{object=@{sha=$headSha}} $RefStatus POST
-        Add-Response $ref @{object=@{sha=$headSha}}
+        for($read=0;$read -lt $MissingReads;$read++){Add-Response $ref @{} 404}
+        if($MissingReads -ge 7){return}
+        Add-Response $ref @{object=@{sha=$headSha}} $ReadStatus
+        if($ReadStatus -ne 200){return}
     }
     Add-Response "$up/compare/$script:target...$headSha" @{files=@($Diff)}
 }
@@ -191,6 +201,21 @@ try {
     foreach($status in @(409,422)){
         Start-Case; Add-Branch -RefStatus $status; Add-Pull -Conflict $true
         Assert-True ((Submit-Fixture) -eq $pr.html_url) 'Concurrent ref/PR recovery failed'
+    }
+    foreach($status in @(201,409,422)){
+        Start-Case; Add-Branch -RefStatus $status -MissingReads 3; Add-Pull
+        Assert-True ((Submit-Fixture) -eq $pr.html_url) 'Delayed branch visibility must recover'
+        Assert-True (($script:delays -join ',') -ceq '1,2,4') 'Branch visibility retries must use bounded exponential backoff'
+        Assert-True (@($script:calls|Where-Object {$_.Method -eq 'POST' -and $_.Path -eq "$fork/git/refs"}).Count -eq 1) 'Delayed visibility recreated the ref'
+    }
+    Start-Case; Add-Branch -MissingReads 7
+    Expect-Failure {Submit-Fixture} 'not visible after bounded retries'
+    Assert-True (($script:delays -join ',') -ceq '1,2,4,8,16,32') 'Missing branch retries must stop after seven reads'
+    Assert-True (@($script:calls|Where-Object {$_.Method -eq 'POST' -and $_.Path -eq "$up/pulls"}).Count -eq 0) 'Invisible branch reached PR creation'
+    foreach($status in @(401,403,500)){
+        Start-Case; Add-Branch -ReadStatus $status
+        Expect-Failure {Submit-Fixture} "HTTP $status"
+        Assert-True ($script:delays.Count -eq 0) 'Permission/server errors must not be retried as propagation delays'
     }
     foreach($kind in @('extra','modified','hash','path')){
         Start-Case; $bad=@($files|ForEach-Object {$_.Clone()})

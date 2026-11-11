@@ -215,7 +215,16 @@ function Publish-VoxelyWingetBranch {
             # A timed-out or concurrent attempt may already have created this branch.
             # Read and verify it below; never overwrite it.
         }
-        $existing = Invoke-VoxelyWingetApi -Path $refPath
+        # A successful ref creation can precede its visibility to subsequent GETs.
+        # Retry reads only: never repeat writes or treat permission errors as absence.
+        for ($read = 0; $read -lt 7; $read++) {
+            $existing = Invoke-VoxelyWingetApi -Path $refPath -AllowNotFound
+            if ($null -ne $existing) { break }
+            if ($read -lt 6) { Start-Sleep -Seconds ([int][Math]::Pow(2, $read)) }
+        }
+        if ($null -eq $existing) {
+            throw "WinGet branch $branch is not visible after bounded retries. Retry submission to inspect existing state; no ref was overwritten."
+        }
     }
     $head = $existing.Data.object.sha
     Assert-VoxelyWingetSha $head
