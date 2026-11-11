@@ -52,7 +52,7 @@ function settings(): AppSettings {
       maxRetryDelayMs: 8000,
       totalOperationTimeoutMs: 720000,
     },
-    textReplacements: { enabled: false, rules: [] },
+    textReplacements: { enabled: false, groups: [] },
     activePresetId: "stt-optimized",
     presets: [],
     firstRunComplete: false,
@@ -114,7 +114,11 @@ describe("HistorySettings", () => {
     fireEvent.click(screen.getByRole("switch", { name: messagesFor("en").limitUnlimited }));
     expect(screen.getByLabelText(messagesFor("en").storageLimit)).toBeDisabled();
     expect(preview).toHaveBeenCalledWith(expect.objectContaining({ storageLimit: "unlimited" }));
-    fireEvent.click(await screen.findByRole("button", { name: messagesFor("en").retentionApply }));
+    const applyButton = await screen.findByRole("button", {
+      name: messagesFor("en").retentionApply,
+    });
+    await waitFor(() => expect(applyButton).toBeEnabled());
+    fireEvent.click(applyButton);
     fireEvent.click(
       within(await screen.findByRole("alertdialog")).getByRole("button", {
         name: messagesFor("en").retentionCancel,

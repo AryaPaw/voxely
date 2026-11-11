@@ -36,6 +36,7 @@ export default defineConfig({
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
     coverage: {
+      reportsDirectory: "coverage/frontend",
       provider: "v8",
       reporter: ["text", "lcov"],
       thresholds: {

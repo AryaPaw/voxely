@@ -9,10 +9,12 @@ export default defineConfig({
   plugins: [
     {
       name: "readme-shot-overlay-wallpaper",
-      transformIndexHtml(html) {
-        return html.replace(
-          "<head>",
-          `<head>
+      transformIndexHtml: {
+        order: "pre",
+        handler(html) {
+          return html.replace(
+            "<head>",
+            `<head>
     <style>
       html.shot-overlay,
       html.shot-overlay body,
@@ -36,7 +38,8 @@ export default defineConfig({
         document.documentElement.classList.add("shot-overlay");
       }
     </script>`,
-        );
+          );
+        },
       },
     },
     react(),

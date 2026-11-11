@@ -27,7 +27,7 @@ function Read-Registry([string]$Json) {
     if ($value.schemaVersion -ne 1) { throw 'Unsupported registry schema version' }
     if ($value.groups -isnot [array] -or $value.groups.Count -eq 0) { throw 'Critical groups must be a nonempty array' }
     # Risk domains are the runner's contract; exact test IDs live only in the registry.
-    $requiredDomains = @('capture-cancel', 'persistence-recovery', 'generation-insertion', 'retry', 'usage-history', 'retention', 'shutdown', 'insertion-delivery', 'compare', 'settings-transfer', 'network')
+    $requiredDomains = @('capture-cancel', 'persistence-recovery', 'generation-insertion', 'retry', 'usage-history', 'retention', 'shutdown', 'insertion-delivery', 'compare', 'settings-transfer', 'desktop-lifecycle', 'network')
     $domains = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     $ids = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($group in $value.groups) {

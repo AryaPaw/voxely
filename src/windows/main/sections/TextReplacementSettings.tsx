@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   DndContext,
   KeyboardSensor,
@@ -6,7 +6,6 @@ import {
   closestCenter,
   useSensor,
   useSensors,
-  type DragEndEvent,
 } from "@dnd-kit/core";
 import {
   SortableContext,
@@ -16,8 +15,16 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { CaseSensitive, GripVertical, Plus, Trash2 } from "lucide-react";
-import type { AppSettings, TextReplacementRule } from "../../../lib/api";
+import {
+  CaseSensitive,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  GripVertical,
+  Plus,
+  Trash2,
+} from "lucide-react";
+import type { AppSettings, ReplacementGroup, TextReplacementRule } from "../../../lib/api";
 import type { Messages } from "../../../lib/i18n";
 import russianFormalRules from "../../../lib/text-replacement-presets.json";
 import { Button } from "../../../components/ui/button";
@@ -25,7 +32,22 @@ import { Input } from "../../../components/ui/input";
 import { Switch } from "../../../components/ui/switch";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../components/ui/tooltip";
 
+import { PageHeader } from "../../../components/settings/PageHeader";
+import { SECTION_ICONS } from "../sectionNav";
+import {
+  AlertDialog,
+  AlertDialogTrigger,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogCancel,
+  AlertDialogAction,
+} from "../../../components/ui/alert-dialog";
+
 const RULE_LIMIT = 100;
+const GROUP_LIMIT = 20;
 
 export function TextReplacementSettings({
   settings,
@@ -36,131 +58,337 @@ export function TextReplacementSettings({
   copy: Messages;
   onChange: (patch: Partial<AppSettings>) => void;
 }) {
-  const textSettings = settings.textReplacements;
-  // UI identities survive edits and moves without changing the persisted rule schema
-  const [ruleIds, setRuleIds] = useState<string[]>(() =>
-    textSettings.rules.map(() => crypto.randomUUID()),
-  );
-  if (ruleIds.length !== textSettings.rules.length) {
-    setRuleIds(textSettings.rules.map((_, index) => ruleIds[index] ?? crypto.randomUUID()));
-  }
+  const value = settings.textReplacements;
+  const groups = value.groups;
+  const customGroupCount = groups.filter((group) => group.presetId === null).length;
+  const count = groups.reduce((sum, group) => sum + (group.rules?.length ?? 0), 0);
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
   );
-  const knownRules = new Set(textSettings.rules.map((rule) => rule.from.toLowerCase()));
-  const presetAdditions = russianFormalRules.filter(
-    (rule) => !knownRules.has(rule.from.toLowerCase()),
+  function update(next: ReplacementGroup[]) {
+    onChange({ textReplacements: { ...value, groups: next } });
+  }
+  function addGroup() {
+    if (customGroupCount >= GROUP_LIMIT) return;
+    update([
+      ...groups,
+      {
+        id: crypto.randomUUID(),
+        name: copy.replacementCustomName,
+        enabled: true,
+        presetId: null,
+        rules: [],
+      },
+    ]);
+  }
+  return (
+    <div>
+      <PageHeader icon={SECTION_ICONS.filters} title={copy.textReplacementsTitle} />
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <label className="flex items-center gap-2 text-sm">
+          <Switch
+            checked={value.enabled}
+            onCheckedChange={(enabled) => onChange({ textReplacements: { ...value, enabled } })}
+            aria-label={copy.textReplacementsEnabled}
+          />
+          {copy.textReplacementsEnabled}
+        </label>
+        <Button size="sm" onClick={addGroup} disabled={customGroupCount >= GROUP_LIMIT}>
+          <Plus />
+          {copy.replacementAddGroup}
+        </Button>
+      </div>
+      <DndContext
+        accessibility={{
+          screenReaderInstructions: { draggable: copy.replacementGroupInstructions },
+          announcements: {
+            onDragStart: ({ active }) =>
+              copy.replacementGroupPicked.replace(
+                "{index}",
+                String(groups.findIndex((group) => group.id === active.id) + 1),
+              ),
+            onDragOver: ({ over }) =>
+              over
+                ? copy.replacementGroupPosition.replace(
+                    "{index}",
+                    String(groups.findIndex((group) => group.id === over.id) + 1),
+                  )
+                : undefined,
+            onDragEnd: ({ over }) =>
+              over ? copy.replacementGroupDone : copy.replacementGroupCancelled,
+            onDragCancel: () => copy.replacementGroupCancelled,
+          },
+        }}
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={({ active, over }) => {
+          if (!over || active.id === over.id) return;
+          const from = groups.findIndex((group) => group.id === active.id);
+          const to = groups.findIndex((group) => group.id === over.id);
+          if (from >= 0 && to >= 0) update(arrayMove(groups, from, to));
+        }}
+      >
+        <SortableContext
+          items={groups.map((group) => group.id)}
+          strategy={verticalListSortingStrategy}
+        >
+          <div className="space-y-3">
+            {groups.map((group) => (
+              <ReplacementGroupCard
+                key={group.id}
+                group={group}
+                copy={copy}
+                canAdd={count < RULE_LIMIT}
+                canCopy={
+                  customGroupCount < GROUP_LIMIT && count + russianFormalRules.length <= RULE_LIMIT
+                }
+                onChange={(next) =>
+                  update(groups.map((item) => (item.id === group.id ? next : item)))
+                }
+                onRemove={() => update(groups.filter((item) => item.id !== group.id))}
+                onCopy={() => {
+                  const clone: ReplacementGroup = {
+                    id: crypto.randomUUID(),
+                    name: `${copy.textReplacementRussianPreset} (${copy.replacementCopySuffix})`,
+                    enabled: true,
+                    presetId: null,
+                    rules: russianFormalRules.map((rule) => ({ ...rule })),
+                  };
+                  const next = groups.flatMap((item) =>
+                    item.id === group.id ? [{ ...item, enabled: false }, clone] : [item],
+                  );
+                  onChange({ textReplacements: { enabled: true, groups: next } });
+                }}
+              />
+            ))}
+          </div>
+        </SortableContext>
+      </DndContext>
+      <Button
+        className="mt-4"
+        variant="outline"
+        size="sm"
+        onClick={addGroup}
+        disabled={customGroupCount >= GROUP_LIMIT}
+      >
+        <Plus />
+        {copy.replacementAddGroup}
+      </Button>
+    </div>
   );
+}
 
-  function update(next: Partial<typeof textSettings>) {
-    onChange({ textReplacements: { ...textSettings, ...next } });
-  }
-
-  function updateRule(index: number, patch: Partial<TextReplacementRule>) {
-    update({
-      rules: textSettings.rules.map((rule, i) => (i === index ? { ...rule, ...patch } : rule)),
-    });
-  }
-
-  function addRule() {
-    if (textSettings.rules.length >= RULE_LIMIT) return;
-    update({ rules: [...textSettings.rules, { from: "", to: "", caseSensitive: false }] });
-  }
-
-  function onDragEnd({ active, over }: DragEndEvent) {
-    if (!over || active.id === over.id) return;
-    const from = ruleIds.indexOf(String(active.id));
-    const to = ruleIds.indexOf(String(over.id));
-    if (from < 0 || to < 0) return;
-    setRuleIds(arrayMove(ruleIds, from, to));
-    update({ rules: arrayMove(textSettings.rules, from, to) });
-  }
-
+function ReplacementGroupCard({
+  group,
+  copy,
+  canAdd,
+  canCopy,
+  onChange,
+  onRemove,
+  onCopy,
+}: {
+  group: ReplacementGroup;
+  copy: Messages;
+  canAdd: boolean;
+  canCopy: boolean;
+  onChange: (group: ReplacementGroup) => void;
+  onRemove: () => void;
+  onCopy: () => void;
+}) {
+  const system = group.presetId !== null;
+  const [open, setOpen] = useState(!system);
+  const displayName = system
+    ? copy.textReplacementRussianPreset
+    : group.name === "Custom" && group.id.startsWith("legacy-")
+      ? copy.replacementCustomName
+      : group.name;
+  const [name, setName] = useState(displayName);
+  useEffect(() => setName(displayName), [displayName]);
+  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+    id: group.id,
+  });
   return (
     <section
-      aria-labelledby="text-replacements-heading"
-      className="overflow-hidden rounded-xl border border-border bg-card"
+      ref={setNodeRef}
+      aria-label={displayName}
+      style={{ transform: CSS.Transform.toString(transform), transition }}
+      className={`overflow-hidden rounded-xl border border-border bg-card ${isDragging ? "relative z-10 shadow-lg" : ""}`}
     >
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3">
-        <div className="flex items-center gap-2.5">
-          <Switch
-            id="text-replacements-enabled"
-            aria-label={copy.textReplacementsEnabled}
-            checked={textSettings.enabled}
-            onCheckedChange={(enabled) => update({ enabled })}
+      <div className="flex flex-wrap items-center gap-2 p-3">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          className="touch-none cursor-grab"
+          aria-label={copy.replacementDragGroup.replace("{name}", displayName)}
+          {...attributes}
+          {...listeners}
+        >
+          <GripVertical />
+        </Button>
+        <Switch
+          aria-label={copy.replacementToggleGroup.replace("{name}", displayName)}
+          checked={group.enabled}
+          onCheckedChange={(enabled) => onChange({ ...group, enabled })}
+        />
+        {system ? (
+          <span className="min-w-0 flex-1 text-sm font-medium">{displayName}</span>
+        ) : (
+          <Input
+            className="min-w-28 flex-1"
+            aria-label={copy.replacementGroupName}
+            maxLength={80}
+            value={name}
+            onChange={(event) => setName(event.target.value)}
+            onBlur={() => {
+              const next = name.trim();
+              if (next && next !== displayName) onChange({ ...group, name: next });
+              else setName(displayName);
+            }}
           />
-          <h2 id="text-replacements-heading" className="text-sm font-medium">
-            <label htmlFor="text-replacements-enabled" className="cursor-pointer">
-              {copy.textReplacementsTitle}
-            </label>
-          </h2>
-          <span className="text-xs tabular-nums text-muted-foreground">
-            {textSettings.rules.length} / {RULE_LIMIT}
-          </span>
-        </div>
-        <div className="flex items-center gap-2">
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                aria-label={copy.textReplacementRussianPreset}
-                disabled={
-                  presetAdditions.length === 0 ||
-                  textSettings.rules.length + presetAdditions.length > RULE_LIMIT
-                }
-                onClick={() =>
-                  update({ enabled: true, rules: [...textSettings.rules, ...presetAdditions] })
-                }
-              >
-                {copy.textReplacementRussianPreset}
-              </Button>
-            </TooltipTrigger>
-            <TooltipContent>{copy.textReplacementPresetHint}</TooltipContent>
-          </Tooltip>
+        )}
+        <span className="text-xs text-muted-foreground">
+          {system ? copy.replacementSystem : copy.replacementCustom}
+        </span>
+        <span className="text-xs tabular-nums text-muted-foreground">
+          {system ? russianFormalRules.length : (group.rules?.length ?? 0)}
+        </span>
+        {system ? (
           <Button
-            type="button"
-            size="sm"
-            disabled={textSettings.rules.length >= RULE_LIMIT}
-            onClick={addRule}
+            variant="ghost"
+            size="icon-sm"
+            aria-label={copy.replacementCopy}
+            title={copy.replacementCopy}
+            disabled={!canCopy}
+            onClick={onCopy}
           >
-            <Plus />
-            {copy.textReplacementAddRule}
+            <Copy />
           </Button>
-        </div>
+        ) : (
+          <AlertDialog>
+            <AlertDialogTrigger asChild>
+              <Button variant="ghost" size="icon-sm" aria-label={copy.replacementDeleteGroup}>
+                <Trash2 />
+              </Button>
+            </AlertDialogTrigger>
+            <AlertDialogContent>
+              <AlertDialogHeader>
+                <AlertDialogTitle>
+                  {copy.replacementDeleteConfirm.replace("{name}", displayName)}
+                </AlertDialogTitle>
+                <AlertDialogDescription>{copy.replacementDeleteHint}</AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogCancel>{copy.cancel}</AlertDialogCancel>
+                <AlertDialogAction variant="destructive" onClick={onRemove}>
+                  {copy.delete}
+                </AlertDialogAction>
+              </AlertDialogFooter>
+            </AlertDialogContent>
+          </AlertDialog>
+        )}
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          aria-expanded={open}
+          aria-label={open ? copy.replacementHideRules : copy.replacementShowRules}
+          onClick={() => setOpen(!open)}
+        >
+          {open ? <ChevronUp /> : <ChevronDown />}
+        </Button>
       </div>
-      {textSettings.rules.length === 0 ? (
-        <p className="px-4 py-8 text-center text-sm text-muted-foreground">
-          {copy.textReplacementEmpty}
-        </p>
-      ) : (
+      {open ? (
+        <div className="border-t border-border p-3">
+          {system ? (
+            <>
+              <p className="mb-3 text-xs text-muted-foreground">{copy.replacementSystemHint}</p>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                {russianFormalRules.map((rule) => (
+                  <div key={rule.from} className="contents">
+                    <dt>{rule.from}</dt>
+                    <dd>{rule.to}</dd>
+                  </div>
+                ))}
+              </dl>
+            </>
+          ) : (
+            <CustomRules
+              rules={group.rules ?? []}
+              copy={copy}
+              canAdd={canAdd}
+              onChange={(rules) => onChange({ ...group, rules })}
+            />
+          )}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function CustomRules({
+  rules,
+  copy,
+  canAdd,
+  onChange,
+}: {
+  rules: TextReplacementRule[];
+  copy: Messages;
+  canAdd: boolean;
+  onChange: (rules: TextReplacementRule[]) => void;
+}) {
+  const [ids, setIds] = useState<string[]>(() => rules.map(() => crypto.randomUUID()));
+  if (ids.length !== rules.length)
+    setIds(rules.map((_, index) => ids[index] ?? crypto.randomUUID()));
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
+    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+  );
+  function add() {
+    if (canAdd) onChange([...rules, { from: "", to: "", caseSensitive: false }]);
+  }
+  const addButton = (
+    <Button type="button" variant="outline" size="sm" disabled={!canAdd} onClick={add}>
+      <Plus />
+      {copy.textReplacementAddRule}
+    </Button>
+  );
+  return (
+    <>
+      <div className="mb-3">{addButton}</div>
+      {rules.length ? (
         <>
           <div
             aria-hidden="true"
-            className="grid grid-cols-[1.75rem_minmax(0,1fr)_minmax(0,1fr)_1.75rem_1.75rem] gap-2 px-3 pb-1 pt-3 text-xs text-muted-foreground"
+            className="grid grid-cols-[1.75rem_minmax(0,1fr)_minmax(0,1fr)_1.75rem_1.75rem] gap-2 px-1 pb-2 text-xs text-muted-foreground"
           >
-            <span /> <span>{copy.textReplacementFindLabel}</span>
+            <span />
+            <span>{copy.textReplacementFindLabel}</span>
             <span>{copy.textReplacementReplaceLabel}</span>
           </div>
           <DndContext
             sensors={sensors}
             collisionDetection={closestCenter}
-            onDragEnd={onDragEnd}
+            onDragEnd={({ active, over }) => {
+              if (!over || active.id === over.id) return;
+              const from = ids.indexOf(String(active.id)),
+                to = ids.indexOf(String(over.id));
+              if (from < 0 || to < 0) return;
+              setIds(arrayMove(ids, from, to));
+              onChange(arrayMove(rules, from, to));
+            }}
             accessibility={{
               screenReaderInstructions: { draggable: copy.textReplacementDragInstructions },
               announcements: {
                 onDragStart: ({ active }) =>
                   copy.textReplacementDragPicked.replace(
                     "{index}",
-                    String(ruleIds.indexOf(String(active.id)) + 1),
+                    String(ids.indexOf(String(active.id)) + 1),
                   ),
                 onDragOver: ({ over }) =>
                   over
                     ? copy.textReplacementDragPosition.replace(
                         "{index}",
-                        String(ruleIds.indexOf(String(over.id)) + 1),
+                        String(ids.indexOf(String(over.id)) + 1),
                       )
                     : undefined,
                 onDragEnd: ({ over }) =>
@@ -169,43 +397,33 @@ export function TextReplacementSettings({
               },
             }}
           >
-            <SortableContext items={ruleIds} strategy={verticalListSortingStrategy}>
-              <ol className="space-y-1 px-2 pb-2">
-                {textSettings.rules.map((rule, index) => (
+            <SortableContext items={ids} strategy={verticalListSortingStrategy}>
+              <ol className="space-y-1">
+                {rules.map((rule, index) => (
                   <ReplacementRow
-                    key={ruleIds[index]}
-                    id={ruleIds[index]}
+                    key={ids[index]}
+                    id={ids[index]}
                     rule={rule}
                     index={index}
                     copy={copy}
-                    onChange={(patch) => updateRule(index, patch)}
+                    onChange={(patch) =>
+                      onChange(rules.map((item, i) => (i === index ? { ...item, ...patch } : item)))
+                    }
                     onRemove={() => {
-                      setRuleIds(ruleIds.filter((_, i) => i !== index));
-                      update({ rules: textSettings.rules.filter((_, i) => i !== index) });
+                      setIds(ids.filter((_, i) => i !== index));
+                      onChange(rules.filter((_, i) => i !== index));
                     }}
                   />
                 ))}
               </ol>
             </SortableContext>
           </DndContext>
-          <div className="px-4 pb-3">
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={textSettings.rules.length >= RULE_LIMIT}
-              onClick={addRule}
-            >
-              <Plus />
-              {copy.textReplacementAddRule}
-            </Button>
-          </div>
+          <div className="mt-3">{addButton}</div>
         </>
+      ) : (
+        <p className="py-3 text-sm text-muted-foreground">{copy.textReplacementEmpty}</p>
       )}
-      <p className="border-t border-border px-4 py-2 text-xs text-muted-foreground">
-        {copy.textReplacementsIntro}
-      </p>
-    </section>
+    </>
   );
 }
 
@@ -275,7 +493,7 @@ function ReplacementRow({
             type="button"
             variant={rule.caseSensitive ? "secondary" : "ghost"}
             size="icon-sm"
-            className={rule.caseSensitive ? "text-primary" : "text-muted-foreground"}
+            className={rule.caseSensitive ? "text-primary-text" : "text-muted-foreground"}
             aria-label={`${copy.textReplacementCaseSensitive}, ${index + 1}`}
             aria-pressed={rule.caseSensitive}
             onClick={() => onChange({ caseSensitive: !rule.caseSensitive })}

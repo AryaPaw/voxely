@@ -84,7 +84,7 @@ export function OverlayWave({ active }: { active: boolean }) {
         reducedMotion.current,
       );
       barsRef.current = next;
-      const fill = getComputedStyle(canvas).getPropertyValue("color").trim() || "#88c8e0";
+      const fill = getComputedStyle(canvas).color;
       drawOverlayWave(ctx, width, height, next, fill);
       frame = window.requestAnimationFrame(draw);
     };

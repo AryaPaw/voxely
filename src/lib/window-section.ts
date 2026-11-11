@@ -24,6 +24,7 @@ function isSection(value: string): value is Section {
 export function sectionFromSearch(search: string, localBuild = false): Section {
   const query = search.startsWith("?") ? search.slice(1) : search;
   const value = new URLSearchParams(query).get("section");
+  if (value === "appearance") return "general";
   if (value === "debug" && !localBuild) {
     return "history";
   }

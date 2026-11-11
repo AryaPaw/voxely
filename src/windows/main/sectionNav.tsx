@@ -6,15 +6,15 @@ import {
   HardDrive,
   History,
   Info,
-  Keyboard,
+  Settings2,
   Languages,
   Mic,
   Palette,
-  SlidersHorizontal,
+  ReplaceAll,
   Wrench,
 } from "lucide-react";
 import { Button } from "../../components/ui/button";
-import { appDisplayName, type Messages } from "../../lib/i18n";
+import type { Messages } from "../../lib/i18n";
 
 export type Section =
   | "history"
@@ -34,9 +34,9 @@ export const SECTION_ICONS: Record<Section, LucideIcon> = {
   history: History,
   statistics: ChartNoAxesCombined,
   compare: Columns2,
-  general: Keyboard,
+  general: Settings2,
   audio: Mic,
-  filters: SlidersHorizontal,
+  filters: ReplaceAll,
   transcription: Languages,
   historySettings: HardDrive,
   appearance: Palette,
@@ -58,7 +58,7 @@ export function sectionLabel(copy: Messages, id: Section): string {
     case "audio":
       return copy.navAudio;
     case "filters":
-      return copy.navFilters;
+      return copy.textReplacementsTitle;
     case "transcription":
       return copy.navTranscription;
     case "historySettings":
@@ -78,61 +78,52 @@ export function sectionLabel(copy: Messages, id: Section): string {
   }
 }
 
-const SETTINGS_ITEMS: Section[] = [
-  "general",
-  "audio",
-  "filters",
-  "transcription",
-  "historySettings",
-  "appearance",
-  "advanced",
-  "debug",
-  "about",
+const SETTINGS_GROUPS: { label: keyof Messages; ids: Section[] }[] = [
+  { label: "navDictationGroup", ids: ["audio", "transcription", "filters"] },
+  { label: "navApplicationGroup", ids: ["general", "historySettings", "advanced"] },
 ];
 
 export function settingsNavItems(localBuild: boolean): Section[] {
-  return SETTINGS_ITEMS.filter((id) => id !== "debug" || localBuild);
+  return [
+    ...SETTINGS_GROUPS.flatMap((group) => group.ids),
+    ...(localBuild ? ["debug" as const] : []),
+    "about",
+  ];
 }
 
 export function SectionNav({
   current,
   copy,
   localBuild,
-  version,
   onSelect,
 }: {
   current: Section;
   copy: Messages;
   localBuild: boolean;
-  version: string;
   onSelect: (section: Section) => void;
 }) {
   return (
-    <nav className="flex h-full w-16 flex-col border-r border-border bg-panel p-2 sm:w-56 sm:p-3">
-      <div className="mb-4 flex items-center gap-2 px-1">
-        <img src="/favicon.png" alt="" className="h-9 w-9 rounded-lg sm:h-10 sm:w-10" />
-        <div className="hidden min-w-0 sm:block">
-          <div className="text-sm font-semibold tracking-tight">{appDisplayName(copy)}</div>
-        </div>
-      </div>
+    <nav className="section-nav" aria-label={copy.settings}>
       <div className="min-h-0 flex-1 overflow-y-auto">
-        <SectionButton id="history" current={current} copy={copy} onSelect={onSelect} />
-        <SectionButton id="statistics" current={current} copy={copy} onSelect={onSelect} />
-        <SectionButton id="compare" current={current} copy={copy} onSelect={onSelect} />
-        <div className="mt-4 mb-1 hidden px-2 text-[11px] uppercase tracking-wide text-muted-foreground sm:block">
-          {copy.settings}
+        <div className="nav-workspace">
+          <SectionButton id="history" current={current} copy={copy} onSelect={onSelect} />
+          <SectionButton id="statistics" current={current} copy={copy} onSelect={onSelect} />
+          <SectionButton id="compare" current={current} copy={copy} onSelect={onSelect} />
         </div>
-        {settingsNavItems(localBuild).map((id) => (
-          <SectionButton key={id} id={id} current={current} copy={copy} onSelect={onSelect} />
+        {SETTINGS_GROUPS.map((group) => (
+          <section className="nav-group" key={group.label} aria-label={copy[group.label]}>
+            <h2>{copy[group.label]}</h2>
+            {group.ids.map((id) => (
+              <SectionButton key={id} id={id} current={current} copy={copy} onSelect={onSelect} />
+            ))}
+          </section>
         ))}
       </div>
-      <div className="mt-3 px-1 text-center text-[11px] tabular-nums text-muted-foreground sm:text-left">
-        {version ? (
-          <span>
-            {version}
-            {localBuild ? ` (${copy.navLocalBuild})` : ""}
-          </span>
+      <div className="nav-footer">
+        {localBuild ? (
+          <SectionButton id="debug" current={current} copy={copy} onSelect={onSelect} />
         ) : null}
+        <SectionButton id="about" current={current} copy={copy} onSelect={onSelect} />
       </div>
     </nav>
   );
@@ -153,8 +144,8 @@ function SectionButton({
   return (
     <Button
       type="button"
-      variant={current === id ? "secondary" : "ghost"}
-      className="w-full justify-center sm:justify-start"
+      variant="ghost"
+      className="section-nav-button"
       aria-label={sectionLabel(copy, id)}
       aria-current={current === id ? "page" : undefined}
       onClick={() => onSelect(id)}

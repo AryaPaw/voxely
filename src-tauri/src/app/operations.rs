@@ -113,6 +113,7 @@ pub fn protected_audio_names(ctx: &AppContext) -> HashSet<String> {
     names.insert("filter-preview.wav.tmp".into());
     names.insert("filter-preview-original.wav".into());
     names.insert("filter-preview-original.wav.tmp".into());
+    names.extend(ctx.filter_previews.lock().protected_names());
     if ctx
         .filter_recording
         .load(std::sync::atomic::Ordering::SeqCst)

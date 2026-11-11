@@ -288,6 +288,11 @@ impl CaptureSession {
         self.meter.lock().clone()
     }
 
+    /// Presentation must never wait for the capture callback's meter lock.
+    pub fn try_meter(&self) -> Option<MeterSample> {
+        self.meter.try_lock().map(|meter| meter.clone())
+    }
+
     pub fn is_finished(&self) -> bool {
         self.thread.as_ref().is_none_or(JoinHandle::is_finished)
     }

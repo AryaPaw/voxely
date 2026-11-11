@@ -40,10 +40,22 @@ function Get-VoxelyCacheBytes {
 }
 
 function Assert-VoxelyCacheIdle {
-    param([Parameter(Mandatory)]$Cache)
+    param([Parameter(Mandatory)]$Cache, [switch]$WaitForBuilders, [ValidateRange(0, 900)][int]$TimeoutSeconds = 900)
     # Conservative across repositories: unknown compiler ownership never authorizes deletion.
-    $builders = @(Get-Process -Name cargo,rustc,rustdoc,cargo-llvm-cov,link,lld-link,cl -ErrorAction SilentlyContinue)
-    if ($builders.Count) { throw "Build cache is busy: $((@($builders | ForEach-Object ProcessName | Select-Object -Unique)) -join ', ')." }
+    $wait = [Diagnostics.Stopwatch]::StartNew()
+    $announced = $false
+    while ($true) {
+        $builders = @(Get-Process -Name cargo,rustc,rustdoc,cargo-llvm-cov,link,lld-link,cl -ErrorAction SilentlyContinue)
+        if (-not $builders.Count) { break }
+        if (-not $WaitForBuilders -or $wait.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            throw "Build cache is busy: $((@($builders | ForEach-Object ProcessName | Select-Object -Unique)) -join ', ')."
+        }
+        if (-not $announced) {
+            Write-Host "Waiting for compilers before safe Cargo cache cleanup (up to $TimeoutSeconds seconds)."
+            $announced = $true
+        }
+        Start-Sleep -Milliseconds 250
+    }
     foreach ($process in @(Get-Process -Name voxely,voxely_lib* -ErrorAction SilentlyContinue)) {
         try { $processPath = $process.Path } catch { throw 'Cannot establish running Voxely executable ownership; cache cleanup refused.' }
         if (-not $processPath) { throw 'Cannot establish running Voxely executable ownership; cache cleanup refused.' }
@@ -161,7 +173,10 @@ function Invoke-VoxelyBuildCache {
         & $Action $cache
     } catch { $failure = $_ }
     finally {
-        try { Repair-VoxelyBuildCache -Cache $cache -Full:$Full }
+        try {
+            if ($null -eq $failure) { Assert-VoxelyCacheIdle -Cache $cache -WaitForBuilders }
+            Repair-VoxelyBuildCache -Cache $cache -Full:$Full
+        }
         catch {
             if ($null -ne $failure) { Write-Warning "Post-build cache cleanup failed: $($_.Exception.Message)" }
             else { $failure = $_ }

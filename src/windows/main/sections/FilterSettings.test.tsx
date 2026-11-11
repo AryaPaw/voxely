@@ -1,6 +1,6 @@
 import { useState, type ReactElement } from "react";
 import { TooltipProvider } from "../../../components/ui/tooltip";
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AppSettings, DspPreset, DspPreview } from "../../../lib/api";
 import { api } from "../../../lib/api";
@@ -105,7 +105,13 @@ function settings(): AppSettings {
       maxRetryDelayMs: 8000,
       totalOperationTimeoutMs: 720000,
     },
-    textReplacements: { enabled: false, rules: [] },
+    textReplacements: {
+      enabled: false,
+      groups: [
+        { id: "custom", name: "My rules", enabled: true, presetId: null, rules: [] },
+        { id: "system-russian-formal", name: "", enabled: false, presetId: "russian-formal" },
+      ],
+    },
     activePresetId: "stt-fast",
     presets: [preset()],
     firstRunComplete: true,
@@ -250,12 +256,24 @@ describe("FilterSettings", () => {
     await waitFor(() => expect(sampleButton).toBeEnabled());
   });
 
-  it("localizes a missing preview sample and does not expose playback controls", async () => {
-    vi.spyOn(api, "previewDsp").mockRejectedValue("no filter sample");
+  it("shows a normal empty state when there is no preview sample", async () => {
+    const preview = vi.spyOn(api, "previewDsp").mockResolvedValue(null);
     const copy = messagesFor("en");
     renderAudio(<FilterSettings settings={settings()} copy={copy} onChange={vi.fn()} />);
-    expect(await screen.findByRole("alert")).toHaveTextContent(copy.noFilterSample);
+    await waitFor(() => expect(preview).toHaveBeenCalled());
+    expect(screen.getByText(copy.noFilterSample)).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: copy.playOriginal })).not.toBeInTheDocument();
+  });
+
+  it("retains real serialized preview storage failures", async () => {
+    vi.spyOn(api, "previewDsp").mockRejectedValue({
+      code: "StorageFailed",
+      detail: "permission denied",
+    });
+    const copy = messagesFor("en");
+    renderAudio(<FilterSettings settings={settings()} copy={copy} onChange={vi.fn()} />);
+    expect(await screen.findByRole("alert")).toHaveTextContent(copy.errStorage);
   });
 
   it("handles rejected playback and resets both players when stopped", async () => {
@@ -343,9 +361,74 @@ describe("FilterSettings", () => {
 });
 
 describe("compact replacement editor", () => {
+  it("creates, renames, toggles and confirms deletion of independent custom groups", async () => {
+    const changed = vi.fn();
+    render(<ReplacementHarness onChange={changed} />);
+    fireEvent.click(screen.getAllByRole("button", { name: "Create group" })[0]);
+    const names = screen.getAllByRole("textbox", { name: "Group name" });
+    fireEvent.change(names[1], { target: { value: "Terms" } });
+    fireEvent.blur(names[1]);
+    expect(screen.getByRole("region", { name: "Terms" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: "Enable group Terms" }));
+    expect(screen.getByRole("switch", { name: "Enable group Terms" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
+    const terms = screen.getByRole("region", { name: "Terms" });
+    fireEvent.click(within(terms).getByRole("button", { name: "Delete group" }));
+    const dialog = await screen.findByRole("alertdialog");
+    expect(terms).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Delete" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("region", { name: "Terms" })).not.toBeInTheDocument(),
+    );
+    expect(changed.mock.lastCall![0].textReplacements.groups).toHaveLength(2);
+  });
+
+  it.each(["commit", "cancel"] as const)(
+    "reorders groups with keyboard and %s without partial saves",
+    async (action) => {
+      const initial = settings();
+      const changed = vi.fn();
+      const originalRect = HTMLElement.prototype.getBoundingClientRect;
+      vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+        this: HTMLElement,
+      ) {
+        if (this.tagName !== "SECTION" || !this.getAttribute("aria-label"))
+          return originalRect.call(this);
+        const index = Array.from(this.parentElement!.children).indexOf(this);
+        return new DOMRect(0, 100 + index * 100, 600, 80);
+      });
+      render(<ReplacementHarness initial={initial} onChange={changed} />);
+      const handle = screen.getByRole("button", { name: "Move group My rules" });
+      handle.focus();
+      fireEvent.keyDown(handle, { key: " ", code: "Space" });
+      await waitFor(() => expect(handle).toHaveAttribute("aria-pressed", "true"));
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      });
+      fireEvent.keyDown(document, { key: "ArrowDown", code: "ArrowDown" });
+      await screen.findByText("Group position 2.");
+      expect(changed).not.toHaveBeenCalled();
+      fireEvent.keyDown(
+        document,
+        action === "commit" ? { key: " ", code: "Space" } : { key: "Escape", code: "Escape" },
+      );
+      await waitFor(() => expect(handle).not.toHaveAttribute("aria-pressed", "true"));
+      if (action === "commit") {
+        expect(changed).toHaveBeenCalledOnce();
+        expect(
+          changed.mock.lastCall![0].textReplacements.groups.map(
+            (group: { id: string }) => group.id,
+          ),
+        ).toEqual(["system-russian-formal", "custom"]);
+      } else expect(changed).not.toHaveBeenCalled();
+    },
+  );
+
   it("adds a rule from beneath the list and respects the shared limit", () => {
     const initial = settings();
-    initial.textReplacements.rules = Array.from({ length: 99 }, (_, i) => ({
+    initial.textReplacements.groups[0].rules! = Array.from({ length: 99 }, (_, i) => ({
       from: `word${i}`,
       to: "replacement",
       caseSensitive: false,
@@ -364,7 +447,7 @@ describe("compact replacement editor", () => {
   });
   function sortableRules() {
     const initial = settings();
-    initial.textReplacements.rules = [
+    initial.textReplacements.groups[0].rules! = [
       { from: "alpha", to: "A", caseSensitive: false },
       { from: "beta", to: "B", caseSensitive: true },
       { from: "gamma", to: "C", caseSensitive: false },
@@ -401,7 +484,11 @@ describe("compact replacement editor", () => {
     const firstInput = screen.getByRole("textbox", { name: "Find 1" });
     const handle = await pickUpFirstRule();
     fireEvent.keyDown(document, { key: "ArrowDown", code: "ArrowDown" });
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("2"));
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("region", { name: "My rules" })).getByRole("status"),
+      ).toHaveTextContent("2"),
+    );
     fireEvent.keyDown(document, { key: " ", code: "Space" });
     await waitFor(() =>
       expect(screen.getByRole("textbox", { name: "Find 1" })).toHaveValue("beta"),
@@ -410,10 +497,16 @@ describe("compact replacement editor", () => {
     expect(onChange).toHaveBeenLastCalledWith({
       textReplacements: {
         ...initial.textReplacements,
-        rules: [
-          initial.textReplacements.rules[1],
-          initial.textReplacements.rules[0],
-          initial.textReplacements.rules[2],
+        groups: [
+          {
+            ...initial.textReplacements.groups[0],
+            rules: [
+              initial.textReplacements.groups[0].rules![1],
+              initial.textReplacements.groups[0].rules![0],
+              initial.textReplacements.groups[0].rules![2],
+            ],
+          },
+          initial.textReplacements.groups[1],
         ],
       },
     });
@@ -439,7 +532,11 @@ describe("compact replacement editor", () => {
     const firstInput = screen.getByRole("textbox", { name: "Find 1" });
     const handle = await pickUpFirstRule();
     fireEvent.keyDown(document, { key: "ArrowDown", code: "ArrowDown" });
-    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("2"));
+    await waitFor(() =>
+      expect(
+        within(screen.getByRole("region", { name: "My rules" })).getByRole("status"),
+      ).toHaveTextContent("2"),
+    );
     fireEvent.keyDown(document, { key: "Escape", code: "Escape" });
     await waitFor(() => expect(handle).not.toHaveAttribute("aria-pressed", "true"));
     expect(onChange).not.toHaveBeenCalled();
@@ -447,9 +544,9 @@ describe("compact replacement editor", () => {
     expect(firstInput).toHaveValue("alpha");
     expect(screen.getByRole("textbox", { name: "Find 2" })).toHaveValue("beta");
     expect(screen.getByRole("textbox", { name: "Find 3" })).toHaveValue("gamma");
-    expect(screen.getByRole("status")).toHaveTextContent(
-      messagesFor("en").textReplacementDragCancelled,
-    );
+    expect(
+      within(screen.getByRole("region", { name: "My rules" })).getByRole("status"),
+    ).toHaveTextContent(messagesFor("en").textReplacementDragCancelled);
   });
 
   it("opens word rules without starting audio preview", () => {
@@ -463,27 +560,27 @@ describe("compact replacement editor", () => {
     expect(preview).not.toHaveBeenCalled();
   });
 
-  it("adds only missing preset rules and keeps custom replacements", () => {
+  it("copies a system preset without altering custom rules and disables the source", () => {
     const initial = settings();
-    initial.textReplacements.rules = [{ from: "вы", to: "CUSTOM", caseSensitive: false }];
-    render(<ReplacementHarness initial={initial} />);
-    fireEvent.click(
-      screen.getByRole("button", { name: messagesFor("en").textReplacementRussianPreset }),
-    );
-    expect(screen.getAllByRole("listitem")).toHaveLength(16);
-    expect(screen.getByRole("textbox", { name: "Replace with 1" })).toHaveValue("CUSTOM");
+    initial.textReplacements.groups[0].rules = [{ from: "вы", to: "CUSTOM", caseSensitive: false }];
+    initial.textReplacements.groups[1].enabled = true;
+    const changed = vi.fn();
+    render(<ReplacementHarness initial={initial} onChange={changed} />);
+    fireEvent.click(screen.getByRole("button", { name: messagesFor("en").replacementCopy }));
+    const groups = changed.mock.lastCall![0].textReplacements.groups;
+    expect(groups[0].rules[0].to).toBe("CUSTOM");
+    expect(groups[1].enabled).toBe(false);
+    expect(groups[2].presetId).toBeNull();
+    expect(groups[2].rules).toHaveLength(16);
     expect(screen.getByRole("switch", { name: "Enable word replacement" })).toHaveAttribute(
       "aria-checked",
       "true",
     );
-    expect(
-      screen.getByRole("button", { name: messagesFor("en").textReplacementRussianPreset }),
-    ).toBeDisabled();
   });
 
   it("preserves input identity and focus through saved-object edits and deletion of a preceding rule", () => {
     const initial = settings();
-    initial.textReplacements.rules = [
+    initial.textReplacements.groups[0].rules! = [
       { from: "alpha", to: "A", caseSensitive: false },
       { from: "beta", to: "B", caseSensitive: false },
     ];

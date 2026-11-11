@@ -1,6 +1,6 @@
 # Launch the daily driver independently of the invoking terminal's Windows Job.
 # Microsoft: https://learn.microsoft.com/windows/win32/procthread/job-objects
-param()
+param([switch]$NativeHud)
 
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'windows-independent-process.ps1')
@@ -18,7 +18,9 @@ if ($running.Count -gt 0) {
 
 # WMI launches outside the caller's job; BREAKAWAY also excludes the WMI host's job.
 # Never silently fall back to Start-Process: that restores the lifetime coupling.
-$appProcessId = Start-IndependentWindowsProcess -CommandLine ('"' + $exe + '"') -WorkingDirectory $root
+$commandLine = '"' + $exe + '"'
+if ($NativeHud) { $commandLine += ' --native-hud' }
+$appProcessId = Start-IndependentWindowsProcess -CommandLine $commandLine -WorkingDirectory $root
 
 $deadline = [DateTime]::UtcNow.AddSeconds(15)
 do {
@@ -27,7 +29,8 @@ do {
         throw 'Started process path does not match the local executable.'
     }
     Assert-IndependentWindowsProcess $appProcess
-    $expectedTitle = $appProcess.MainWindowTitle -in @('Voxely (local)', 'Voxely (локальная версия)')
+    $identity = Get-Content -LiteralPath (Join-Path $root 'src/lib/app-identity.json') -Raw | ConvertFrom-Json
+    $expectedTitle = $appProcess.MainWindowTitle -eq $identity.localBuildName
     if ($expectedTitle -and [Voxely.LocalLaunch.ProcessJob]::IsWindowVisible($appProcess.MainWindowHandle)) {
         $observerEvidence = & (Join-Path $PSScriptRoot 'start-exit-monitor.ps1') -TargetProcessId $appProcess.Id
         [pscustomobject]@{

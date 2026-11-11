@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -29,11 +29,11 @@ import { Button } from "../../components/ui/button";
 import { FirstRunDisclosure } from "./FirstRunDisclosure";
 import { HistoryPane } from "./history/HistoryPane";
 import { SectionNav, type Section } from "./sectionNav";
+import { AppFrame } from "./AppFrame";
 import { AboutSettings } from "./sections/AboutSettings";
 import { AdvancedSettings } from "./sections/AdvancedSettings";
-import { AppearanceSettings } from "./sections/AppearanceSettings";
+import { TextReplacementSettings } from "./sections/TextReplacementSettings";
 import { AudioSettings } from "./sections/AudioSettings";
-import { FilterSettings } from "./sections/FilterSettings";
 import { GeneralSettings } from "./sections/GeneralSettings";
 import { HistorySettings } from "./sections/HistorySettings";
 import { TranscriptionSettings } from "./sections/TranscriptionSettings";
@@ -68,12 +68,6 @@ export function MainApp() {
   historyQueryRef.current = historySearchQuery(query);
   const settingsRef = useRef<AppSettings | null>(null);
   settingsRef.current = settings;
-
-  function copyForUi() {
-    return messagesFor(
-      resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto", navigator.language),
-    );
-  }
 
   const refreshHistory = useCallback(
     async (reset = true, search = queryRef.current, preserveLoadedPages = false) => {
@@ -189,12 +183,14 @@ export function MainApp() {
     try {
       const nextSettings = await api.settings();
       setSettings(nextSettings);
-      applyTheme(nextSettings.theme);
+      applyTheme(nextSettings.theme, nextSettings.accentColor);
       applyUiLocale(resolveUiLocale(nextSettings.uiLanguage ?? "auto", navigator.language));
       setLoadError("");
+      void getVersion()
+        .then(setVersion)
+        .catch(() => undefined);
       try {
-        const [runtime, nextVersion] = await Promise.all([api.runtimeInfo(), getVersion()]);
-        setVersion(nextVersion);
+        const runtime = await api.runtimeInfo();
         setLocalBuild(runtime.localBuild);
         setSettingsRecovered(Boolean(runtime.settingsRecovered));
         if (runtime.localBuild) {
@@ -308,38 +304,54 @@ export function MainApp() {
     if (!settings) {
       return;
     }
-    applyTheme(settings.theme);
+    applyTheme(settings.theme, settings.accentColor);
     applyUiLocale(resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language));
-    return watchSystemTheme(settings.theme);
+    return watchSystemTheme(settings.theme, settings.accentColor);
   }, [settings]);
 
   const filtered = history;
+  const copy = messagesFor(resolveUiLocale(settings?.uiLanguage ?? "auto", navigator.language));
+
+  function renderFrame(content: ReactNode) {
+    return (
+      <>
+        <AppFrame
+          copy={copy}
+          version={version}
+          localBuild={localBuild}
+          onAbout={() => setSection("about")}
+        >
+          {content}
+        </AppFrame>
+        <Toaster theme={resolvedTheme(settings?.theme ?? "system")} />
+      </>
+    );
+  }
 
   if (loadError && !settings) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-3 text-sm">
+    return renderFrame(
+      <div className="flex h-full min-w-0 flex-1 flex-col items-center justify-center gap-3 text-sm">
         <p>{loadError}</p>
-        <Button onClick={() => void loadSettings()}>{copyForUi().retryAction}</Button>
-      </div>
+        <Button onClick={() => void loadSettings()}>{copy.retryAction}</Button>
+      </div>,
     );
   }
 
   if (!settings) {
-    return (
-      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        {copyForUi().loading}
-      </div>
+    return renderFrame(
+      <div className="flex h-full min-w-0 flex-1 items-center justify-center text-sm text-muted-foreground">
+        {copy.loading}
+      </div>,
     );
   }
 
-  const copy = messagesFor(resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language));
   const currentSettings = settings;
 
   async function persist(next: AppSettings) {
     const seq = nextWriteSeq(currentSettings.writeSeq ?? 0);
     const outgoing = { ...next, writeSeq: seq };
     setSettings(outgoing);
-    applyTheme(outgoing.theme);
+    applyTheme(outgoing.theme, outgoing.accentColor);
     try {
       const saved = await api.saveSettings(outgoing);
       setSettings((prev) => acceptSavedSettings(prev, saved));
@@ -368,184 +380,167 @@ export function MainApp() {
     }
   }
 
-  return (
+  return renderFrame(
     <>
-      <div className="flex h-full">
-        <SectionNav
-          current={section}
-          copy={copy}
-          localBuild={localBuild}
-          version={version}
-          onSelect={setSection}
-        />
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          {!settings.firstRunComplete ? (
-            <FirstRunDisclosure
+      <SectionNav current={section} copy={copy} localBuild={localBuild} onSelect={setSection} />
+      <main className="app-content">
+        {!settings.firstRunComplete ? (
+          <FirstRunDisclosure
+            copy={copy}
+            onAcknowledge={acknowledgeFirstRunDisclosure}
+            onOpenStorage={() => setSection("historySettings")}
+          />
+        ) : null}
+        {section === "history" ? (
+          <HistoryPane
+            items={filtered}
+            query={query}
+            hasMore={historyHasMore}
+            historyError={historyError}
+            isLoadingMore={loadingMore}
+            recovered={settingsRecovered}
+            keyConfigured={keyConfigured}
+            hotkey={settings.hotkey}
+            onQuery={setQuery}
+            onClearQuery={() => setQuery("")}
+            onLoadMore={() => void refreshHistory(false, queryRef.current)}
+            onRefresh={() => refreshHistory(true, queryRef.current, true)}
+            onOpenKey={() => setSection("transcription")}
+            onOpenSettings={() => setSection("general")}
+            copy={copy}
+          />
+        ) : section === "statistics" ? (
+          <div className="min-h-0 flex-1 overflow-auto p-6">
+            <Suspense
+              fallback={
+                <div
+                  className="mx-auto max-w-6xl py-6 text-sm text-muted-foreground"
+                  aria-live="polite"
+                >
+                  {copy.statisticsLoading}
+                </div>
+              }
+            >
+              <StatisticsPane copy={copy} />
+            </Suspense>
+          </div>
+        ) : section === "compare" && settings ? (
+          <div className="min-h-0 flex-1 overflow-auto p-6">
+            <ComparePane
+              settings={settings}
               copy={copy}
-              onAcknowledge={acknowledgeFirstRunDisclosure}
-              onOpenStorage={() => setSection("historySettings")}
-            />
-          ) : null}
-          {section === "history" ? (
-            <HistoryPane
-              items={filtered}
-              query={query}
-              hasMore={historyHasMore}
-              historyError={historyError}
-              isLoadingMore={loadingMore}
-              recovered={settingsRecovered}
               keyConfigured={keyConfigured}
-              hotkey={settings.hotkey}
-              onQuery={setQuery}
-              onClearQuery={() => setQuery("")}
-              onLoadMore={() => void refreshHistory(false, queryRef.current)}
-              onRefresh={() => refreshHistory(true, queryRef.current, true)}
+              onChange={(patch) => void persist({ ...settings, ...patch })}
               onOpenKey={() => setSection("transcription")}
-              onOpenSettings={() => setSection("general")}
-              copy={copy}
             />
-          ) : section === "statistics" ? (
-            <div className="min-h-0 flex-1 overflow-auto p-6">
-              <Suspense
-                fallback={
-                  <div
-                    className="mx-auto max-w-6xl py-6 text-sm text-muted-foreground"
-                    aria-live="polite"
-                  >
-                    {copy.statisticsLoading}
-                  </div>
-                }
-              >
-                <StatisticsPane copy={copy} />
-              </Suspense>
-            </div>
-          ) : section === "compare" && settings ? (
-            <div className="min-h-0 flex-1 overflow-auto p-6">
-              <ComparePane
+          </div>
+        ) : (
+          <div className="min-h-0 flex-1 overflow-auto p-6">
+            {section === "general" || section === "appearance" ? (
+              <GeneralSettings
+                settings={settings}
+                copy={copy}
+                onChange={(patch) => void persist({ ...settings, ...patch })}
+              />
+            ) : null}
+            {section === "audio" ? (
+              <AudioSettings
+                onOpenHistory={() => setSection("history")}
+                settings={settings}
+                copy={copy}
+                onChange={(patch) => void persist({ ...settings, ...patch })}
+              />
+            ) : null}
+            {section === "filters" ? (
+              <TextReplacementSettings
+                settings={settings}
+                copy={copy}
+                onChange={(patch) => void persist({ ...settings, ...patch })}
+              />
+            ) : null}
+            {section === "transcription" ? (
+              <TranscriptionSettings
                 settings={settings}
                 copy={copy}
                 keyConfigured={keyConfigured}
+                onConfigured={setKeyConfigured}
                 onChange={(patch) => void persist({ ...settings, ...patch })}
-                onOpenKey={() => setSection("transcription")}
               />
-            </div>
-          ) : (
-            <div className="min-h-0 flex-1 overflow-auto p-6">
-              {section === "general" ? (
-                <GeneralSettings
-                  settings={settings}
-                  copy={copy}
-                  onChange={(patch) => void persist({ ...settings, ...patch })}
-                />
-              ) : null}
-              {section === "audio" ? (
-                <AudioSettings
-                  settings={settings}
-                  copy={copy}
-                  onChange={(patch) => void persist({ ...settings, ...patch })}
-                />
-              ) : null}
-              {section === "filters" ? (
-                <FilterSettings
-                  settings={settings}
-                  copy={copy}
-                  onChange={(patch) => void persist({ ...settings, ...patch })}
-                />
-              ) : null}
-              {section === "transcription" ? (
-                <TranscriptionSettings
-                  settings={settings}
-                  copy={copy}
-                  keyConfigured={keyConfigured}
-                  onConfigured={setKeyConfigured}
-                  onChange={(patch) => void persist({ ...settings, ...patch })}
-                />
-              ) : null}
-              {section === "historySettings" ? (
-                <HistorySettings
-                  settings={settings}
-                  copy={copy}
-                  onChange={(patch) => void persist({ ...settings, ...patch })}
-                  onDeleteAll={async () => {
-                    try {
-                      const result = await api.deleteAll();
-                      await refreshHistory(true, queryRef.current, true);
-                      if (result.failed.length > 0) {
-                        toast.warning(
-                          copy.historyDeletePartial
-                            .replace("{deleted}", String(result.deleted.length))
-                            .replace("{failed}", String(result.failed.length)),
-                        );
-                      } else {
-                        toast.success(
-                          copy.historyDeleteComplete.replace(
-                            "{count}",
-                            String(result.deleted.length),
-                          ),
-                        );
-                      }
-                    } catch (error) {
-                      reportError(formatInvokeError(error, copy));
+            ) : null}
+            {section === "historySettings" ? (
+              <HistorySettings
+                onSettingsReplaced={(next, wipeApiKey) => {
+                  setSettings((prev) => acceptSavedSettings(prev, next));
+                  if (wipeApiKey) setKeyConfigured(false);
+                }}
+                settings={settings}
+                copy={copy}
+                onChange={(patch) => void persist({ ...settings, ...patch })}
+                onDeleteAll={async () => {
+                  try {
+                    const result = await api.deleteAll();
+                    await refreshHistory(true, queryRef.current, true);
+                    if (result.failed.length > 0) {
+                      toast.warning(
+                        copy.historyDeletePartial
+                          .replace("{deleted}", String(result.deleted.length))
+                          .replace("{failed}", String(result.failed.length)),
+                      );
+                    } else {
+                      toast.success(
+                        copy.historyDeleteComplete.replace(
+                          "{count}",
+                          String(result.deleted.length),
+                        ),
+                      );
                     }
-                  }}
-                  onPreviewRetention={(nextSettings) => api.previewRetentionSettings(nextSettings)}
-                  onApplyRetention={async (nextSettings, expectedPreview) => {
-                    try {
-                      const outgoing = {
-                        ...nextSettings,
-                        writeSeq: nextWriteSeq(currentSettings.writeSeq ?? 0),
-                      };
-                      const result = await api.applyRetentionSettings(outgoing, expectedPreview);
-                      setSettings((prev) => acceptSavedSettings(prev, result.settings));
-                      setSettingsRecovered(false);
-                      await refreshHistory(true, queryRef.current, true);
-                      if (result.failed.length > 0) {
-                        toast.warning(
-                          copy.retentionApplyPartial
-                            .replace("{deleted}", String(result.deleted.length))
-                            .replace("{failed}", String(result.failed.length)),
-                        );
-                      } else {
-                        toast.success(
-                          copy.retentionApplied.replace("{count}", String(result.deleted.length)),
-                        );
-                      }
-                      return result;
-                    } catch (error) {
-                      reportError(formatInvokeError(error, copy));
-                      throw error;
+                  } catch (error) {
+                    reportError(formatInvokeError(error, copy));
+                  }
+                }}
+                onPreviewRetention={(nextSettings) => api.previewRetentionSettings(nextSettings)}
+                onApplyRetention={async (nextSettings, expectedPreview) => {
+                  try {
+                    const outgoing = {
+                      ...nextSettings,
+                      writeSeq: nextWriteSeq(currentSettings.writeSeq ?? 0),
+                    };
+                    const result = await api.applyRetentionSettings(outgoing, expectedPreview);
+                    setSettings((prev) => acceptSavedSettings(prev, result.settings));
+                    setSettingsRecovered(false);
+                    await refreshHistory(true, queryRef.current, true);
+                    if (result.failed.length > 0) {
+                      toast.warning(
+                        copy.retentionApplyPartial
+                          .replace("{deleted}", String(result.deleted.length))
+                          .replace("{failed}", String(result.failed.length)),
+                      );
+                    } else {
+                      toast.success(
+                        copy.retentionApplied.replace("{count}", String(result.deleted.length)),
+                      );
                     }
-                  }}
-                />
-              ) : null}
-              {section === "appearance" ? (
-                <AppearanceSettings
-                  settings={settings}
-                  copy={copy}
-                  onChange={(patch) => void persist({ ...settings, ...patch })}
-                />
-              ) : null}
-              {section === "advanced" ? (
-                <AdvancedSettings
-                  settings={settings}
-                  copy={copy}
-                  onChange={(patch) => void persist({ ...settings, ...patch })}
-                  onSettingsReplaced={(next, wipeApiKey) => {
-                    setSettings((prev) => acceptSavedSettings(prev, next));
-                    if (wipeApiKey) {
-                      setKeyConfigured(false);
-                    }
-                  }}
-                />
-              ) : null}
-              {section === "debug" && localBuild ? <DebugSettings copy={copy} /> : null}
-              {section === "about" ? <AboutSettings copy={copy} /> : null}
-            </div>
-          )}
-        </main>
-      </div>
-      <Toaster theme={resolvedTheme(settings.theme)} />
-    </>
+                    return result;
+                  } catch (error) {
+                    reportError(formatInvokeError(error, copy));
+                    throw error;
+                  }
+                }}
+              />
+            ) : null}
+            {section === "advanced" ? (
+              <AdvancedSettings
+                settings={settings}
+                copy={copy}
+                onChange={(patch) => void persist({ ...settings, ...patch })}
+              />
+            ) : null}
+            {section === "debug" && localBuild ? <DebugSettings copy={copy} /> : null}
+            {section === "about" ? <AboutSettings copy={copy} /> : null}
+          </div>
+        )}
+      </main>
+    </>,
   );
 }
 

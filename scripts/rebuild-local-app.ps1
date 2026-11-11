@@ -1,5 +1,5 @@
 # Rebuild and start the local daily-driver exe. Not a GitHub Release, tag, or installer.
-param([switch]$SelfTest, [switch]$StopRunning)
+param([switch]$SelfTest, [switch]$StopRunning, [switch]$NativeHud)
 
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
@@ -35,11 +35,11 @@ $env:VOXELY_LOCAL_BUILD = "1"
 Set-Location $root
 . (Join-Path $PSScriptRoot 'rust-build-cache.ps1')
 Invoke-VoxelyBuildCache -Action {
-    bunx tauri build --no-bundle
+    bun x --bun tauri build --no-bundle
     if ($LASTEXITCODE -ne 0) { throw "local Tauri build failed with exit code $LASTEXITCODE" }
 }
 if (-not (Test-Path $exe)) {
     throw "local app exe missing: $exe"
 }
 
-& (Join-Path $PSScriptRoot 'start-local-app.ps1')
+& (Join-Path $PSScriptRoot 'start-local-app.ps1') -NativeHud:$NativeHud

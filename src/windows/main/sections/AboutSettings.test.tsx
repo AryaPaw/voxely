@@ -88,17 +88,17 @@ describe("AboutSettings", () => {
     expect(open).toHaveBeenCalledWith("issues");
     expect(open).toHaveBeenCalledWith();
   });
-  it("shows runtime version, author, GitHub and manual update", async () => {
+  it("shows runtime version and source link without a duplicate author credit", async () => {
     const { container } = render(<AboutSettings copy={messagesFor("en")} />);
-    expect(await screen.findByText("0.1.0")).toBeInTheDocument();
+    expect(await screen.findByText("v0.1.0")).toBeInTheDocument();
     expect(container.querySelector('img[src="/favicon.png"]')).toHaveClass(
-      "size-20",
+      "size-14",
       "object-contain",
     );
     expect(screen.getByText(/2026/)).toBeInTheDocument();
     expect(screen.getByText("Voxely")).toBeInTheDocument();
     expect(screen.getByText("Voice dictation into any text field")).toBeInTheDocument();
-    expect(screen.getByText("AryaPaw")).toBeInTheDocument();
+    expect(screen.queryByText("AryaPaw", { exact: true })).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: /source code/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /AryaPaw\/voxely/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /report a problem/i })).toBeInTheDocument();
@@ -123,7 +123,7 @@ describe("AboutSettings", () => {
 
   it("labels the issue action in Russian", async () => {
     render(<AboutSettings copy={messagesFor("ru")} />);
-    expect(await screen.findByText("0.1.0")).toBeInTheDocument();
+    expect(await screen.findByText("v0.1.0")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /сообщить о проблеме/i })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /исходный код/i })).toBeInTheDocument();
   });

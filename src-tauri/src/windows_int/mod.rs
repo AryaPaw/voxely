@@ -10,6 +10,12 @@ pub mod escape_hook {
     pub fn uninstall() {}
 }
 pub mod insert_engine;
+pub mod main_window;
+#[cfg(windows)]
+pub mod native_hud;
 pub mod overlay;
 pub mod text_injector;
 pub mod window_diagnostics;
+
+#[cfg(all(test, windows))]
+mod manifest_tests;

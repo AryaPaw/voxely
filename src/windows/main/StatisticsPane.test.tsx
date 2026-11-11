@@ -52,6 +52,9 @@ const sample = {
   reportedCostUsd: 0.125,
   unpricedAttempts: 3,
   audioDurationMs: 125_000,
+  trimmedDurationMs: 25_000,
+  measuredAudioDurationMs: 100_000,
+  measuredDictations: 2,
   daily: [{ date: "2026-10-02", dictations: 1_234, apiRequests: 3, reportedCostUsd: 0.125 }],
   models: [
     {
@@ -211,7 +214,7 @@ describe("StatisticsPane", () => {
       const summary = screen
         .getByText(copy.statisticsAudio)
         .closest('[data-slot="card"]')!.parentElement!;
-      expect(summary.querySelectorAll('[data-slot="card"]')).toHaveLength(3);
+      expect(summary.querySelectorAll('[data-slot="card"]')).toHaveLength(4);
     },
   );
 
@@ -545,5 +548,35 @@ describe("StatisticsPane", () => {
       "aria-busy",
       "false",
     );
+  });
+  it("shows measured pause savings without treating older records as zero savings", async () => {
+    vi.spyOn(api, "usageStatistics").mockResolvedValue(sample);
+    const copy = messagesFor("en");
+    render(<StatisticsPane copy={copy} />);
+    expect(await screen.findByText("25 sec. (25.0%)")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        copy.statisticsTrimmedCoverage.replace("{known}", "2").replace("{total}", "1,234"),
+      ),
+    ).toBeInTheDocument();
+  });
+  it("distinguishes unknown measurements from known zero savings", async () => {
+    const query = vi.spyOn(api, "usageStatistics").mockResolvedValue({
+      ...sample,
+      measuredDictations: 0,
+      measuredAudioDurationMs: 0,
+      trimmedDurationMs: 0,
+    });
+    const copy = messagesFor("en");
+    render(<StatisticsPane copy={copy} />);
+    expect(await screen.findByText(copy.statisticsTrimmedUnknown)).toBeInTheDocument();
+    query.mockResolvedValue({
+      ...sample,
+      measuredDictations: 1,
+      measuredAudioDurationMs: 0,
+      trimmedDurationMs: 0,
+    });
+    fireEvent.click(screen.getByRole("button", { name: "7 days" }));
+    expect(await screen.findByText("0 sec. (0.0%)")).toBeInTheDocument();
   });
 });

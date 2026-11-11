@@ -1,3 +1,4 @@
+import { accentPreset } from "./accent";
 import { describe, expect, it } from "vitest";
 import { applyTheme, resolvedTheme, watchSystemTheme } from "./theme";
 
@@ -59,6 +60,35 @@ describe("applyTheme", () => {
       }) as unknown as MediaQueryList;
     const stop = watchSystemTheme("system");
     expect(listeners).toHaveLength(1);
+    listeners[0]();
+    expect(document.documentElement.style.getPropertyValue("--primary")).toBe(
+      accentPreset().light["--primary"],
+    );
     stop();
   });
+});
+
+it("retains the chosen accent when system appearance changes", () => {
+  let dark = false;
+  let changed = () => {};
+  window.matchMedia = () =>
+    ({
+      matches: dark,
+      addEventListener: (_event: string, listener: () => void) => {
+        changed = listener;
+      },
+      removeEventListener: () => undefined,
+    }) as unknown as MediaQueryList;
+  const color = { family: "rose", shade: 500 };
+  applyTheme("system", color);
+  const stop = watchSystemTheme("system", color);
+  expect(document.documentElement.style.getPropertyValue("--primary")).toBe(
+    accentPreset(color).light["--primary"],
+  );
+  dark = true;
+  changed();
+  expect(document.documentElement.style.getPropertyValue("--primary")).toBe(
+    accentPreset(color).dark["--primary"],
+  );
+  stop();
 });

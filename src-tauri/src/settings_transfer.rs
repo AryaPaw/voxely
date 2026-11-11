@@ -87,6 +87,7 @@ pub fn import(text: &str, current: &AppSettings) -> Result<AppSettings, AppError
     next.retention = current.retention.clone();
     next.storage_limit = current.storage_limit.clone();
     next.write_seq = 0;
+    next.migrate_honest_dsp_and_insert();
     next.retry.validate()?;
     next.mic_tune.validate()?;
     validate_settings_graph(&next)?;
@@ -102,6 +103,10 @@ mod tests {
     fn round_trip_preserves_user_settings_and_local_state() {
         let mut source = AppSettings::default();
         source.theme = "light".into();
+        source.accent_color = crate::settings::AccentColor {
+            family: "rose".into(),
+            shade: 600,
+        };
         source.text_replacements.enabled = true;
         source.silence_compression.enabled = false;
         source.silence_compression.max_pause_ms = 1500;
@@ -117,6 +122,7 @@ mod tests {
         current.storage_limit = "10gb".into();
         let result = import(&text, &current).unwrap();
         assert_eq!(result.theme, "light");
+        assert_eq!(result.accent_color, source.accent_color);
         assert_eq!(result.presets, source.presets);
         assert_eq!(result.text_replacements, source.text_replacements);
         assert_eq!(result.silence_compression, source.silence_compression);
@@ -130,6 +136,8 @@ mod tests {
     fn rejects_invalid_files_without_mutating_current() {
         let current = AppSettings::default();
         for text in [
+            r#"{"format":"voxely-settings","version":1,"settings":{"accentColor":{"family":"sky","shade":50}}}"#,
+            r#"{"format":"voxely-settings","version":1,"settings":{"accentColor":{"family":"invalid","shade":500}}}"#,
             "garbage",
             "{}",
             r#"{"format":"voxely-settings","version":2,"settings":{}}"#,
@@ -151,6 +159,7 @@ mod tests {
         let next = import(text, &current).unwrap();
         assert_eq!(next.theme, "light");
         assert_eq!(next.hotkey, current.hotkey);
+        assert_eq!(next.accent_color, current.accent_color);
         assert!(read(std::io::Cursor::new(vec![b'a'; MAX_BYTES + 1])).is_err());
         assert!(read(std::io::Cursor::new(vec![255])).is_err());
         assert_eq!(read(text.as_bytes()).unwrap(), text);

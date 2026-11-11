@@ -27,8 +27,8 @@ describe("messagesFor", () => {
   it("keeps nav and page titles on one registry", () => {
     expect(messagesFor("ru").navHistory).toBe("История");
     expect(messagesFor("en").navHistory).toBe("History");
-    expect(messagesFor("ru").navFilters).toBe(messagesFor("ru").filtersTitle);
-    expect(messagesFor("en").navFilters).toBe(messagesFor("en").filtersTitle);
+    expect(messagesFor("ru").navFilters).toBe(messagesFor("ru").textReplacementsTitle);
+    expect(messagesFor("en").navFilters).toBe(messagesFor("en").textReplacementsTitle);
     expect(messagesFor("ru").navAbout).toBe(messagesFor("ru").aboutTitle);
     expect(messagesFor("en").navAbout).toBe(messagesFor("en").aboutTitle);
     expect(messagesFor("ru").historyTitle).toBe(messagesFor("ru").navHistory);
@@ -65,6 +65,8 @@ describe("messagesFor", () => {
   it("uses the same product name for local and release chrome", () => {
     expect(appDisplayName(messagesFor("en"))).toBe("Voxely");
     expect(appDisplayName(messagesFor("ru"))).toBe("Voxely");
+    expect(appDisplayName(messagesFor("en"), true)).toBe("Voxely (Local build)");
+    expect(appDisplayName(messagesFor("ru"), true)).toBe("Voxely (Local build)");
   });
 
   it("keeps English copy free of Cyrillic except the Russian language name", () => {

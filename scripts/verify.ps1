@@ -7,7 +7,7 @@ Invoke-VoxelyBuildCache -Action {
     $package = Get-Content -LiteralPath (Join-Path $root 'package.json') -Raw | ConvertFrom-Json
     foreach ($command in $package.scripts.'verify:checks'.Split(' && ', [StringSplitOptions]::None)) {
         if ($command -notmatch '^bun run (verify:[\w:-]+)$') { throw "Invalid shared verification command: $command" }
-        & bun run $Matches[1]
+        & bun run --bun $Matches[1]
         if ($LASTEXITCODE -ne 0) { throw "Verification failed: $command (exit $LASTEXITCODE)." }
     }
 }

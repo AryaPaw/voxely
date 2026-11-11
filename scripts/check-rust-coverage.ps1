@@ -105,6 +105,7 @@ Invoke-VoxelyBuildCache -Action {
 param($coverageCache)
 $env:CARGO_TARGET_DIR = $covTarget
 $env:CARGO_INCREMENTAL = "0"
+$coverageFailure = $null
 try {
     New-Item -ItemType Directory -Path $reportDirectory -Force | Out-Null
     & $llvmCov.Source llvm-cov --locked --lib --json --summary-only --output-path $reportPath --ignore-filename-regex "benches|main.rs"
@@ -132,9 +133,17 @@ try {
     $summary | Set-Content -LiteralPath $markdownPath -Encoding UTF8
     if ($env:GITHUB_STEP_SUMMARY) { $summary | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding UTF8 }
     Write-Host "Rust line coverage: $percentage% (diagnostic, no global threshold). Reports: $reportDirectory"
-} finally {
+} catch { $coverageFailure = $_ }
+finally {
     $env:CARGO_TARGET_DIR = $previousTarget
     $env:CARGO_INCREMENTAL = $previousIncremental
-    Remove-VoxelyCacheDirectory -Cache $coverageCache -Path $covTarget
+    try {
+        if ($null -eq $coverageFailure) { Assert-VoxelyCacheIdle -Cache $coverageCache -WaitForBuilders }
+        Remove-VoxelyCacheDirectory -Cache $coverageCache -Path $covTarget
+    } catch {
+        if ($null -ne $coverageFailure) { Write-Warning "Coverage cache cleanup failed: $($_.Exception.Message)" }
+        else { $coverageFailure = $_ }
+    }
 }
+if ($null -ne $coverageFailure) { throw $coverageFailure }
 }

@@ -14,6 +14,14 @@ Run `bun run hooks:install` once per clone. It enables the tracked `.githooks/pr
 
 Git hooks aren't server enforcement and aren't copied automatically into new clones. CI remains mandatory. MSRV compilation, release compilation, installer and native checks remain separate evidence; the preflight doesn't establish that those passed.
 
+## Experimental native HUD
+
+`pwsh -NoProfile -File scripts/rebuild-local-app.ps1 -StopRunning -NativeHud` builds and starts the opt-in Rust/Win32 HUD without an overlay WebView. The main window stays on React. No setting is persisted: starting without `-NativeHud` restores the standard HUD. A failed native window initialization falls back to the standard renderer and logs the error. The experiment uses existing theme tokens and HUD translations; no microphone, API, or persistence code is replaced.
+
+The ignored Windows fixture `native_rust_hud_visibility_alpha_dpi_and_lifetime` creates isolated native windows without microphone/API access or user settings/history. Run it explicitly on an interactive desktop with `cargo test --locked --manifest-path src-tauri/Cargo.toml native_rust_hud_visibility_alpha_dpi_and_lifetime -- --ignored --test-threads=1 --nocapture`. It doesn't establish microphone or insertion acceptance. For daily-driver acceptance, check hover cancellation, Escape, focus, light/dark/system themes and multiple monitor DPI settings.
+
+The prototype doesn't yet expose UI Automation accessibility or report native paint through the WebView `first_frame` timeline. It isn't a default-renderer replacement or evidence of lower memory usage.
+
 ## Acceptance policy
 
 The user approved replacing the global Rust 80% floor on 2026-10-08. A global percentage mixes portable logic, native orchestration and test code; it doesn't establish that cancellation or audio recovery works.
@@ -25,6 +33,8 @@ The user approved replacing the global Rust 80% floor on 2026-10-08. A global pe
 - A green branch CI run confirms automated verification. Native acceptance claims require the corresponding runtime evidence; full microphone/hotkey/HUD/insertion, upgrade and signed updater checks remain separate and must not be inferred from coverage.
 
 Results are generated under `coverage/rust/`: the critical-test result, a bounded failure log, LLVM summary JSON and Markdown. CI uploads `coverage/` on success and failure, retaining artifacts for 14 days. These generated reports are not committed.
+
+Frontend сохраняет отчёты в `coverage/frontend/`. Vitest очищает только этот подкаталог: результаты Rust и критических тестов в соседнем `coverage/rust/` сохраняются при повторном запуске frontend coverage. Регрессия `scripts/coverage-output.test.ts` проверяет, что каталоги не вложены друг в друга.
 
 The default native EDIT tests create only hidden owned windows and validate identity, lifetime, stop-target marker replacement and copy-only fallback through an in-memory clipboard. They never activate a window, send keys or replace the user's clipboard. The opt-in `windows_int::text_injector::native_tests::native_unicode_delivery_to_owned_edit_is_exact_for_cyrillic_and_emoji` test starts in window A, selects B at explicit stop, recreates B's EDIT child and requires exact Unicode delivery to B while A stays empty. It pumps Win32 messages with a bounded deadline. Foreground denial or an empty field fails it; no conditional assertion can turn failed delivery into a pass. Actual end-to-end dictation remains separate evidence.
 
@@ -78,4 +88,14 @@ Explicit maintenance: `pwsh -NoProfile -File scripts/clean-rust-artifacts.ps1`. 
 
 MSRV CI uses `scripts/check-msrv.ps1`: read the minimum version from Cargo.toml, build in `target/msrv-<version>-<GUID>`, remove it in `finally`. Coverage keeps its own isolated GUID target and preserves the generated coverage reports outside target. Both commands use the same lifecycle owner.
 
-Raw `cargo` / `bunx tauri` commands don't acquire the managed lease. Don't start them concurrently with managed builds or cleanup. The idle-process check is conservative but isn't a synchronization protocol for arbitrary external commands. Prefer `bun run verify`, `bun run rebuild:local-app` and the repository helpers.
+Raw `cargo` / `bun x --bun tauri` commands don't acquire the managed lease. Don't start them concurrently with managed builds or cleanup. The idle-process check is conservative but isn't a synchronization protocol for arbitrary external commands. Prefer `bun run --bun verify`, `bun run --bun rebuild:local-app` and the repository helpers.
+
+Если чужой компилятор запускается уже во время проверки, финальная очистка ждёт его завершения до 15 минут, сохраняя lease и временные файлы. Истечение ожидания остаётся ошибкой. Начальная проверка занятости и повторная проверка непосредственно перед удалением не ослаблены; процессы не останавливаются.
+
+## Windows-манифест и основной интерфейс
+
+Основной интерфейс использует Tauri + React. GPUI, его адаптеры и фикстуры удалены. Старые флаги `--native-ui*` и `--cleanup-native-ui-fixture*` отклоняются до инициализации рабочего профиля; они не запускают обычную программу и не меняют настройки, учётные данные или автозапуск. Самостоятельный Win32 HUD с флагом `--native-hud` сохранён.
+
+Единственный Windows-манифест хранится в `src-tauri/windows.manifest.xml` и встраивается штатным ресурсным builder Tauri. Он включает Common Controls v6, PerMonitorV2, asInvoker и прежнюю политику SegmentHeap. Rust test harness явно линкует те же ресурсы. Обычные тесты проверяют встроенный манифест реального exe, активный DPI-контекст, версию загруженного comctl32 и экспорт TaskDialogIndirect без показа диалога.
+
+Из critical registry удалены проверки исчезнувших GPUI экранов, player, fixture cleanup и GPUI checkpoint. Проверки стабильных Tauri capture/cancel/retry, preview leases, сохранения настроек и shutdown сохранены. Группа `desktop-lifecycle` содержит проверки стабильного preview и новых защит запуска/манифеста. Это изменение области продукта, а не снижение порогов или пропуск обязательных тестов.

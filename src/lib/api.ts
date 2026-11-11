@@ -1,3 +1,4 @@
+import type { AccentColor } from "./accent";
 import { invoke } from "@tauri-apps/api/core";
 import { invokeWhenManaged } from "./invoke-ready";
 
@@ -53,6 +54,9 @@ export interface UsageStatistics {
   reportedCostUsd: number;
   unpricedAttempts: number;
   audioDurationMs: number;
+  trimmedDurationMs: number;
+  measuredAudioDurationMs: number;
+  measuredDictations: number;
   daily: Array<{ date: string; dictations: number; apiRequests: number; reportedCostUsd: number }>;
   models: Array<{
     model: string;
@@ -79,9 +83,17 @@ export interface TextReplacementRule {
   caseSensitive: boolean;
 }
 
+export interface ReplacementGroup {
+  id: string;
+  name: string;
+  enabled: boolean;
+  presetId: string | null;
+  rules?: TextReplacementRule[];
+}
+
 export interface TextReplacementSettings {
   enabled: boolean;
-  rules: TextReplacementRule[];
+  groups: ReplacementGroup[];
 }
 
 export type FilterKind =
@@ -159,6 +171,7 @@ export interface AppSettings {
   inputDevice: string;
   keepOriginalRecordings: boolean;
   theme: string;
+  accentColor?: AccentColor;
   language: string;
   model: string;
   customModel: string | null;
@@ -285,7 +298,7 @@ export const api = {
   meter: () => ipc<MeterSample>("get_meter"),
   startInputMeter: (owner: string) => ipc<boolean>("start_input_meter", { owner }),
   stopInputMeter: (owner: string) => ipc<void>("stop_input_meter", { owner }),
-  previewDsp: () => ipc<DspPreview>("preview_dsp"),
+  previewDsp: () => ipc<DspPreview | null>("preview_dsp"),
   startFilterSample: () => ipc<void>("start_filter_sample"),
   stopFilterSample: () => ipc<DspPreview>("stop_filter_sample"),
   checkForUpdates: () => ipc<UpdateOutcome>("check_for_updates"),

@@ -1,6 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import type { AppSettings, RetentionApplyResult, RetentionPreview } from "../../../lib/api";
 import type { Messages } from "../../../lib/i18n";
+import { SettingsGroup } from "../../../components/settings/SettingsGroup";
+import { SettingsReset } from "./SettingsReset";
+import { SettingsTransfer } from "./SettingsTransfer";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { SettingsField } from "../../../components/settings/SettingsField";
 import { SettingsSwitchRow } from "../../../components/settings/SettingsSwitchRow";
@@ -76,10 +79,12 @@ export function HistorySettings({
   onDeleteAll,
   onPreviewRetention,
   onApplyRetention,
+  onSettingsReplaced,
 }: {
   settings: AppSettings;
   copy: Messages;
   onChange: (patch: Partial<AppSettings>) => void;
+  onSettingsReplaced?: (settings: AppSettings, wipeApiKey: boolean) => void;
   onDeleteAll: () => Promise<void>;
   onPreviewRetention: (settings: AppSettings) => Promise<RetentionPreview>;
   onApplyRetention: (
@@ -224,186 +229,201 @@ export function HistorySettings({
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.historySettings} title={copy.navStorage} />
-      <SettingsField label={copy.keepRecordings}>
-        <SimpleSelect
-          aria-label={copy.keepRecordings}
-          value={draft.retention}
-          onValueChange={(retention) => void updateRetentionDraft({ retention })}
-          options={[
-            { value: "1d", label: copy.retain1d },
-            { value: "3d", label: copy.retain3d },
-            { value: "7d", label: copy.retain7d },
-            { value: "30d", label: copy.retain30d },
-            { value: "90d", label: copy.retain90d },
-            { value: "forever", label: copy.retainForever },
-          ]}
-        />
-      </SettingsField>
-      <SettingsField label={copy.storageLimit}>
-        <Input
-          aria-label={copy.storageLimit}
-          type="number"
-          min={1}
-          max={MAX_STORAGE_LIMIT_GB}
-          step={1}
-          value={draft.storageLimitGb}
-          disabled={draft.unlimited}
-          aria-invalid={
+      <SettingsGroup title={copy.settingsRetention}>
+        <SettingsField label={copy.keepRecordings}>
+          <SimpleSelect
+            aria-label={copy.keepRecordings}
+            value={draft.retention}
+            onValueChange={(retention) => void updateRetentionDraft({ retention })}
+            options={[
+              { value: "1d", label: copy.retain1d },
+              { value: "3d", label: copy.retain3d },
+              { value: "7d", label: copy.retain7d },
+              { value: "30d", label: copy.retain30d },
+              { value: "90d", label: copy.retain90d },
+              { value: "forever", label: copy.retainForever },
+            ]}
+          />
+        </SettingsField>
+        <SettingsField
+          label={copy.storageLimit}
+          description={
+            !draft.unlimited && storageLimitSetting(draft) !== null
+              ? draft.legacyStorageLimit
+                ? copy.storageLimitLegacyHint
+                : copy.storageLimitHint
+              : undefined
+          }
+          error={
             !draft.unlimited && !draft.legacyStorageLimit && storageLimitSetting(draft) === null
+              ? copy.storageLimitWholeGigabytes
+              : undefined
           }
-          onChange={(event) =>
-            void updateRetentionDraft(
-              { storageLimitGb: event.currentTarget.value, legacyStorageLimit: null },
-              false,
-            )
-          }
-          onBlur={() => void updateRetentionDraft({ storageLimitGb: draft.storageLimitGb })}
+        >
+          <Input
+            aria-label={copy.storageLimit}
+            type="number"
+            min={1}
+            max={MAX_STORAGE_LIMIT_GB}
+            step={1}
+            value={draft.storageLimitGb}
+            disabled={draft.unlimited}
+            aria-invalid={
+              !draft.unlimited && !draft.legacyStorageLimit && storageLimitSetting(draft) === null
+            }
+            onChange={(event) =>
+              void updateRetentionDraft(
+                { storageLimitGb: event.currentTarget.value, legacyStorageLimit: null },
+                false,
+              )
+            }
+            onBlur={() => void updateRetentionDraft({ storageLimitGb: draft.storageLimitGb })}
+          />
+        </SettingsField>
+        <SettingsSwitchRow
+          label={copy.limitUnlimited}
+          checked={draft.unlimited}
+          onCheckedChange={(unlimited) => void updateRetentionDraft({ unlimited })}
         />
-      </SettingsField>
-      {!draft.unlimited && storageLimitSetting(draft) !== null ? (
-        <p className="-mt-3 mb-4 max-w-lg text-xs text-muted-foreground">
-          {draft.legacyStorageLimit ? copy.storageLimitLegacyHint : copy.storageLimitHint}
-        </p>
-      ) : null}
-      {!draft.unlimited && !draft.legacyStorageLimit && storageLimitSetting(draft) === null ? (
-        <p className="-mt-3 mb-4 max-w-lg text-xs text-destructive" role="alert">
-          {copy.storageLimitWholeGigabytes}
-        </p>
-      ) : null}
-      <SettingsSwitchRow
-        label={copy.limitUnlimited}
-        checked={draft.unlimited}
-        onCheckedChange={(unlimited) => void updateRetentionDraft({ unlimited })}
-      />
-      {retentionChanged ? (
-        <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
-          <h2 className="text-sm font-semibold">{copy.retentionPreviewTitle}</h2>
-          {previewLoading ? (
-            <p className="mt-2 text-sm text-muted-foreground" aria-live="polite">
-              {copy.loading}
-            </p>
-          ) : previewFailed ? (
-            <p className="mt-2 text-sm text-destructive" role="alert">
-              {copy.retentionPreviewFailed}
-            </p>
-          ) : preview ? (
-            <dl className="mt-3 grid gap-x-5 gap-y-2 text-sm sm:grid-cols-2">
-              <PreviewValue
-                label={copy.retentionEntriesToDelete}
-                value={formatCount(preview.entriesToDelete, copy.dateLocale)}
-              />
-              <PreviewValue
-                label={copy.retentionFilesToDelete}
-                value={formatCount(preview.filesToDelete, copy.dateLocale)}
-              />
-              <PreviewValue
-                label={copy.retentionBytesToFree}
-                value={formatBytes(preview.bytesToFree, copy.dateLocale)}
-              />
-              <PreviewValue
-                label={copy.retentionTotalAudio}
-                value={formatBytes(preview.totalAudioBytes, copy.dateLocale)}
-              />
-              <PreviewValue
-                label={copy.retentionProtectedEntries}
-                value={formatCount(preview.protectedEntries, copy.dateLocale)}
-              />
-              <PreviewValue
-                label={copy.retentionProtectedBytes}
-                value={formatBytes(preview.protectedBytes, copy.dateLocale)}
-              />
-            </dl>
-          ) : null}
-          {applyFailed ? (
-            <p className="mt-3 text-sm text-destructive" role="alert">
-              {copy.retentionApplyFailed}
-            </p>
-          ) : null}
-          <AlertDialog
-            open={applyDialogOpen}
-            onOpenChange={(open) => {
-              setApplyDialogOpen(open);
-              if (!open && !applyPendingRef.current) discardRetentionDraft();
-            }}
-          >
+        {retentionChanged ? (
+          <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/5 p-4">
+            <h2 className="text-sm font-semibold">{copy.retentionPreviewTitle}</h2>
+            {previewLoading ? (
+              <p className="mt-2 text-sm text-muted-foreground" aria-live="polite">
+                {copy.loading}
+              </p>
+            ) : previewFailed ? (
+              <p className="mt-2 text-sm text-destructive" role="alert">
+                {copy.retentionPreviewFailed}
+              </p>
+            ) : preview ? (
+              <dl className="mt-3 grid gap-x-5 gap-y-2 text-sm sm:grid-cols-2">
+                <PreviewValue
+                  label={copy.retentionEntriesToDelete}
+                  value={formatCount(preview.entriesToDelete, copy.dateLocale)}
+                />
+                <PreviewValue
+                  label={copy.retentionFilesToDelete}
+                  value={formatCount(preview.filesToDelete, copy.dateLocale)}
+                />
+                <PreviewValue
+                  label={copy.retentionBytesToFree}
+                  value={formatBytes(preview.bytesToFree, copy.dateLocale)}
+                />
+                <PreviewValue
+                  label={copy.retentionTotalAudio}
+                  value={formatBytes(preview.totalAudioBytes, copy.dateLocale)}
+                />
+                <PreviewValue
+                  label={copy.retentionProtectedEntries}
+                  value={formatCount(preview.protectedEntries, copy.dateLocale)}
+                />
+                <PreviewValue
+                  label={copy.retentionProtectedBytes}
+                  value={formatBytes(preview.protectedBytes, copy.dateLocale)}
+                />
+              </dl>
+            ) : null}
+            {applyFailed ? (
+              <p className="mt-3 text-sm text-destructive" role="alert">
+                {copy.retentionApplyFailed}
+              </p>
+            ) : null}
+            <AlertDialog
+              open={applyDialogOpen}
+              onOpenChange={(open) => {
+                setApplyDialogOpen(open);
+                if (!open && !applyPendingRef.current) discardRetentionDraft();
+              }}
+            >
+              <AlertDialogTrigger asChild>
+                <Button
+                  type="button"
+                  className="mt-4"
+                  disabled={
+                    !preview || !isValidRetentionPreview(preview) || previewLoading || applying
+                  }
+                >
+                  {copy.retentionApply}
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>{copy.retentionConfirmTitle}</AlertDialogTitle>
+                  <AlertDialogDescription>{copy.retentionConfirmBody}</AlertDialogDescription>
+                </AlertDialogHeader>
+                {preview ? (
+                  <p className="text-sm text-muted-foreground">
+                    {copy.retentionEntriesToDelete}:{" "}
+                    {formatCount(preview.entriesToDelete, copy.dateLocale)};{" "}
+                    {copy.retentionFilesToDelete.toLowerCase()}:{" "}
+                    {formatCount(preview.filesToDelete, copy.dateLocale)};{" "}
+                    {copy.retentionBytesToFree.toLowerCase()}:{" "}
+                    {formatBytes(preview.bytesToFree, copy.dateLocale)}.
+                  </p>
+                ) : null}
+                {applyFailed ? (
+                  <p className="text-sm text-destructive" role="alert">
+                    {copy.retentionApplyFailed}
+                  </p>
+                ) : null}
+                <AlertDialogFooter>
+                  <AlertDialogCancel>{copy.retentionCancel}</AlertDialogCancel>
+                  <AlertDialogAction
+                    disabled={applying}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      void applyRetentionDraft();
+                    }}
+                  >
+                    {applying ? copy.loading : copy.retentionApply}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          </div>
+        ) : null}
+        <SettingsSwitchRow
+          label={copy.keepOriginals}
+          description={copy.keepOriginalsHint}
+          checked={settings.keepOriginalRecordings}
+          onCheckedChange={(keepOriginalRecordings) => onChange({ keepOriginalRecordings })}
+        />
+      </SettingsGroup>
+      <SettingsTransfer copy={copy} onImported={(next) => onSettingsReplaced?.(next, false)} />
+      <SettingsGroup title={copy.settingsDanger}>
+        <SettingsReset
+          copy={copy}
+          onSettingsReplaced={(next, wipe) => onSettingsReplaced?.(next, wipe)}
+        />
+        <SettingsField
+          label={copy.settingsHistoryData}
+          description={copy.deleteAllCannotUndo}
+          action
+        >
+          <AlertDialog>
             <AlertDialogTrigger asChild>
-              <Button
-                type="button"
-                className="mt-4"
-                disabled={
-                  !preview || !isValidRetentionPreview(preview) || previewLoading || applying
-                }
-              >
-                {copy.retentionApply}
-              </Button>
+              <Button variant="destructive">{copy.deleteAllHistory}</Button>
             </AlertDialogTrigger>
             <AlertDialogContent>
               <AlertDialogHeader>
-                <AlertDialogTitle>{copy.retentionConfirmTitle}</AlertDialogTitle>
-                <AlertDialogDescription>{copy.retentionConfirmBody}</AlertDialogDescription>
+                <AlertDialogTitle>{copy.deleteAllConfirm}</AlertDialogTitle>
+                <AlertDialogDescription>{copy.deleteAllCannotUndo}</AlertDialogDescription>
               </AlertDialogHeader>
-              {preview ? (
-                <p className="text-sm text-muted-foreground">
-                  {copy.retentionEntriesToDelete}:{" "}
-                  {formatCount(preview.entriesToDelete, copy.dateLocale)};{" "}
-                  {copy.retentionFilesToDelete.toLowerCase()}:{" "}
-                  {formatCount(preview.filesToDelete, copy.dateLocale)};{" "}
-                  {copy.retentionBytesToFree.toLowerCase()}:{" "}
-                  {formatBytes(preview.bytesToFree, copy.dateLocale)}.
-                </p>
-              ) : null}
-              {applyFailed ? (
-                <p className="text-sm text-destructive" role="alert">
-                  {copy.retentionApplyFailed}
-                </p>
-              ) : null}
               <AlertDialogFooter>
-                <AlertDialogCancel>{copy.retentionCancel}</AlertDialogCancel>
+                <AlertDialogCancel>{copy.cancel}</AlertDialogCancel>
                 <AlertDialogAction
-                  disabled={applying}
-                  onClick={(event) => {
-                    event.preventDefault();
-                    void applyRetentionDraft();
-                  }}
+                  variant="destructive"
+                  disabled={deleting}
+                  onClick={() => void handleDeleteAll()}
                 >
-                  {applying ? copy.loading : copy.retentionApply}
+                  {deleting ? copy.loading : copy.delete}
                 </AlertDialogAction>
               </AlertDialogFooter>
             </AlertDialogContent>
           </AlertDialog>
-        </div>
-      ) : null}
-      <div>
-        <SettingsSwitchRow
-          label={copy.keepOriginals}
-          checked={settings.keepOriginalRecordings}
-          onCheckedChange={(keepOriginalRecordings) => onChange({ keepOriginalRecordings })}
-        />
-        <p className="-mt-2 mb-4 max-w-lg text-xs text-muted-foreground">
-          {copy.keepOriginalsHint}
-        </p>
-      </div>
-      <AlertDialog>
-        <AlertDialogTrigger asChild>
-          <Button variant="destructive">{copy.deleteAllHistory}</Button>
-        </AlertDialogTrigger>
-        <AlertDialogContent>
-          <AlertDialogHeader>
-            <AlertDialogTitle>{copy.deleteAllConfirm}</AlertDialogTitle>
-            <AlertDialogDescription>{copy.deleteAllCannotUndo}</AlertDialogDescription>
-          </AlertDialogHeader>
-          <AlertDialogFooter>
-            <AlertDialogCancel>{copy.cancel}</AlertDialogCancel>
-            <AlertDialogAction
-              variant="destructive"
-              disabled={deleting}
-              onClick={() => void handleDeleteAll()}
-            >
-              {deleting ? copy.loading : copy.delete}
-            </AlertDialogAction>
-          </AlertDialogFooter>
-        </AlertDialogContent>
-      </AlertDialog>
+        </SettingsField>
+      </SettingsGroup>
     </div>
   );
 }

@@ -1,12 +1,18 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { api, type AppSettings } from "../../../lib/api";
 import { messagesFor } from "../../../lib/i18n";
 import { reportError } from "../../../lib/system-notify";
+import { SettingsTransfer } from "./SettingsTransfer";
+import { SettingsReset } from "./SettingsReset";
 import { AdvancedSettings } from "./AdvancedSettings";
 vi.mock("sonner", () => ({ toast: { success: vi.fn() } }));
 vi.mock("../../../lib/system-notify", () => ({ reportError: vi.fn() }));
+vi.mock("@tauri-apps/api/app", () => ({ getVersion: vi.fn(async () => "0.5.0") }));
+beforeEach(() => {
+  vi.spyOn(api, "runtimeInfo").mockResolvedValue({ localBuild: true, buildDate: "2026-10-30" });
+});
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
@@ -37,7 +43,7 @@ function settings(): AppSettings {
       maxRetryDelayMs: 8000,
       totalOperationTimeoutMs: 720000,
     },
-    textReplacements: { enabled: false, rules: [] },
+    textReplacements: { enabled: false, groups: [] },
     activePresetId: "stt-optimized",
     presets: [],
     firstRunComplete: true,
@@ -48,14 +54,7 @@ function settings(): AppSettings {
 
 describe("AdvancedSettings failure paths", () => {
   function renderTransfer(replaced = vi.fn()) {
-    render(
-      <AdvancedSettings
-        settings={settings()}
-        copy={messagesFor("en")}
-        onChange={vi.fn()}
-        onSettingsReplaced={replaced}
-      />,
-    );
+    render(<SettingsTransfer copy={messagesFor("en")} onImported={replaced} />);
     return replaced;
   }
 
@@ -89,7 +88,7 @@ describe("AdvancedSettings failure paths", () => {
     fireEvent.click(screen.getByRole("button", { name: "Import" }));
     dialog = await screen.findByRole("alertdialog");
     fireEvent.click(within(dialog).getByRole("button", { name: "Import" }));
-    await waitFor(() => expect(replaced).toHaveBeenCalledWith(next, false));
+    await waitFor(() => expect(replaced).toHaveBeenCalledWith(next));
     expect(apply).toHaveBeenCalledWith("selected-json");
     expect(toast.success).toHaveBeenCalledWith(messagesFor("en").settingsImported);
     expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
@@ -131,14 +130,7 @@ describe("AdvancedSettings failure paths", () => {
       const next = settings();
       const reset = vi.spyOn(api, "resetSettings").mockResolvedValue(next);
       const replaced = vi.fn();
-      render(
-        <AdvancedSettings
-          settings={settings()}
-          copy={copy}
-          onChange={vi.fn()}
-          onSettingsReplaced={replaced}
-        />,
-      );
+      render(<SettingsReset copy={copy} onSettingsReplaced={replaced} />);
       const label = wipe ? copy.resetAll : copy.resetSettings;
       fireEvent.click(screen.getByRole("button", { name: label }));
       expect(reset).not.toHaveBeenCalled();
@@ -154,14 +146,7 @@ describe("AdvancedSettings failure paths", () => {
     const copy = messagesFor("en");
     vi.spyOn(api, "resetSettings").mockRejectedValue({ code: "StorageFailed" });
     const replaced = vi.fn();
-    render(
-      <AdvancedSettings
-        settings={settings()}
-        copy={copy}
-        onChange={vi.fn()}
-        onSettingsReplaced={replaced}
-      />,
-    );
+    render(<SettingsReset copy={copy} onSettingsReplaced={replaced} />);
     fireEvent.click(screen.getByRole("button", { name: copy.resetAll }));
     fireEvent.click(
       within(await screen.findByRole("alertdialog")).getByRole("button", { name: copy.resetAll }),
@@ -175,14 +160,7 @@ describe("AdvancedSettings failure paths", () => {
     vi.spyOn(api, kind === "logs" ? "openLogs" : "openSettingsDir").mockRejectedValue(
       new Error("denied"),
     );
-    render(
-      <AdvancedSettings
-        settings={settings()}
-        copy={copy}
-        onChange={vi.fn()}
-        onSettingsReplaced={vi.fn()}
-      />,
-    );
+    render(<AdvancedSettings settings={settings()} copy={copy} onChange={vi.fn()} />);
     fireEvent.click(
       screen.getByRole("button", {
         name: kind === "logs" ? copy.openLogs : copy.openSettingsFolder,
@@ -199,12 +177,10 @@ describe("AdvancedSettings failure paths", () => {
     const reset = vi.spyOn(api, "resetSettings");
     const changed = vi.fn();
     render(
-      <AdvancedSettings
-        settings={settings()}
-        copy={copy}
-        onChange={changed}
-        onSettingsReplaced={vi.fn()}
-      />,
+      <>
+        <AdvancedSettings settings={settings()} copy={copy} onChange={changed} />
+        <SettingsReset copy={copy} onSettingsReplaced={vi.fn()} />
+      </>,
     );
     fireEvent.click(screen.getByRole("switch", { name: copy.debugLogs }));
     expect(changed).toHaveBeenCalledWith({ debugLogging: true });
@@ -213,5 +189,16 @@ describe("AdvancedSettings failure paths", () => {
       within(await screen.findByRole("alertdialog")).getByRole("button", { name: copy.cancel }),
     );
     expect(reset).not.toHaveBeenCalled();
+  });
+  it("shows build information and retries a failed runtime read without dropping the version", async () => {
+    vi.mocked(api.runtimeInfo).mockRejectedValueOnce(new Error("runtime unavailable"));
+    const copy = messagesFor("en");
+    render(<AdvancedSettings settings={settings()} copy={copy} onChange={vi.fn()} />);
+    expect(await screen.findByText("0.5.0")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("runtime unavailable");
+    fireEvent.click(screen.getByRole("button", { name: copy.retryAction }));
+    expect(await screen.findByText("Voxely (Local build)")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: copy.resetAll })).not.toBeInTheDocument();
   });
 });

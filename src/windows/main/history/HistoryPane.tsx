@@ -431,7 +431,7 @@ export function HistoryCard({
                 });
               }}
             >
-              <Square className="h-4 w-4 text-primary" />
+              <Square className="h-4 w-4 text-primary-text" />
             </Button>
           ) : canRetry ? (
             <>
@@ -443,7 +443,7 @@ export function HistoryCard({
                 disabled={busy}
                 onClick={() => void retryTranscription()}
               >
-                <RotateCcw className={`h-4 w-4 text-primary${busy ? " history-spin" : ""}`} />
+                <RotateCcw className={`h-4 w-4 text-primary-text${busy ? " history-spin" : ""}`} />
               </Button>
               {item.rawAudioPath ? (
                 <Button
@@ -454,7 +454,7 @@ export function HistoryCard({
                   disabled={busy}
                   onClick={() => void reprocessOriginal()}
                 >
-                  <SlidersHorizontal className="h-4 w-4 text-primary" />
+                  <SlidersHorizontal className="h-4 w-4 text-primary-text" />
                 </Button>
               ) : null}
             </>
@@ -509,7 +509,7 @@ export function HistoryCard({
                 {" "}
                 <button
                   type="button"
-                  className="text-primary underline-offset-2 hover:underline"
+                  className="text-primary-text underline-offset-2 hover:underline"
                   disabled={busy}
                   onClick={() => void retryTranscription()}
                 >
@@ -581,7 +581,7 @@ export function HistoryCard({
         </button>
         <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-muted">
           <div
-            className="h-full rounded-full bg-primary/70"
+            className="h-full rounded-full bg-primary-text"
             style={{ width: `${progress * 100}%` }}
           />
         </div>

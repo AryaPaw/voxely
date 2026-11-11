@@ -13,10 +13,10 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="mb-5 flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
+    <header className="page-header mb-6 flex flex-wrap items-start justify-between gap-x-6 gap-y-3">
       <div className="flex min-w-0 items-start gap-3">
-        <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-          <Icon className="size-4" aria-hidden="true" />
+        <span className="flex size-7 shrink-0 items-center justify-center text-muted-foreground">
+          <Icon className="size-5" aria-hidden="true" />
         </span>
         <div className="min-w-0">
           <div className="flex min-h-7 items-center">

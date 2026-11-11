@@ -164,3 +164,12 @@ pub(crate) fn install(window: &tauri::WebviewWindow) {
         crate::runtime_diagnostics::Event::NativeWindowHookInstalled { succeeded },
     );
 }
+
+#[cfg(windows)]
+pub(crate) fn install_raw(hwnd: isize) -> bool {
+    let succeeded = unsafe { native::install(windows::Win32::Foundation::HWND(hwnd as *mut _)) };
+    crate::runtime_diagnostics::record(
+        crate::runtime_diagnostics::Event::NativeWindowHookInstalled { succeeded },
+    );
+    succeeded
+}

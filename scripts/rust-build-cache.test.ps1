@@ -5,6 +5,10 @@ $script:actualCacheContext = ${function:Get-VoxelyBuildCache}
 $script:budget = 1MB
 $script:free = 100GB
 $script:busy = $false
+$script:busyChecksRemaining = 0
+$script:busySentinel = $null
+$script:forbidSleep = $false
+$script:sleepCount = 0
 $script:runningApp = $null
 $script:assertions = 0
 function Get-VoxelyBuildCache {
@@ -19,7 +23,18 @@ function Get-Process {
     param([string[]]$Name, [int]$Id, $ErrorAction)
     if ($PSBoundParameters.ContainsKey('Id')) { return Microsoft.PowerShell.Management\Get-Process -Id $Id -ErrorAction Stop }
     if ('cargo' -in $Name -and $script:busy) { return [pscustomobject]@{ProcessName='cargo';Id=123} }
+    if ('cargo' -in $Name -and $script:busyChecksRemaining -gt 0) {
+        Assert-Cache (Test-Path -LiteralPath $script:busySentinel) 'Cleanup must retain artifacts while any compiler is busy'
+        $script:busyChecksRemaining--
+        return [pscustomobject]@{ProcessName='cargo';Id=123}
+    }
     if ('voxely' -in $Name -and $null -ne $script:runningApp) { return $script:runningApp }
+}
+function Start-Sleep {
+    param([int]$Milliseconds)
+    $script:sleepCount++
+    if ($script:forbidSleep) { throw 'Unexpected wait after an existing failure' }
+    Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds $Milliseconds
 }
 function Assert-Cache($Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
@@ -105,7 +120,11 @@ try {
     Invoke-VoxelyBuildCache -RepoRoot $fixture -Action {
         param($cache)
         $script:busy = $true
-        try { Expect-CacheFailure { Repair-VoxelyBuildCache $cache } 'busy' }
+        try {
+            Expect-CacheFailure { Repair-VoxelyBuildCache $cache } 'busy'
+            Expect-CacheFailure { Assert-VoxelyCacheIdle $cache -WaitForBuilders -TimeoutSeconds 0 } 'busy'
+            Assert-Cache (Test-Path -LiteralPath $exe) 'Expired wait must preserve the runtime executable'
+        }
         finally { $script:busy = $false }
         $script:runningApp = [pscustomobject]@{Path=(Join-Path $cache.Target 'debug/voxely.exe');Id=321}
         try { Expect-CacheFailure { Repair-VoxelyBuildCache $cache } 'cache executable is running' }
@@ -115,6 +134,37 @@ try {
         Expect-CacheFailure { Remove-VoxelyCacheDirectory $cache $exe } 'Not an owned'
         Expect-CacheFailure { Remove-VoxelyCacheDirectory $cache (Join-Path $fixture 'outside') } 'Not an owned'
     }
+
+    $fixture = New-CacheFixture
+    $exe = Write-CacheFixture $fixture 'release/voxely.exe'
+    Invoke-VoxelyBuildCache -RepoRoot $fixture -Action {
+        param($cache)
+        $script:busySentinel = Write-CacheFixture $fixture ('llvm-cov-' + ('f' * 32) + '/debug/retain-until-idle.rlib')
+        $script:busyChecksRemaining = 3
+    }
+    Assert-Cache ($script:busyChecksRemaining -eq 0) 'Post-build cleanup must wait for transient compiler activity'
+    Assert-Cache (-not (Test-Path -LiteralPath $script:busySentinel)) 'Post-build cleanup must reclaim owned temporary files after compilers exit'
+    Assert-Cache (Test-Path -LiteralPath $exe) 'Waiting cleanup must preserve the daily driver'
+    $script:busySentinel = $null
+
+    $fixture = New-CacheFixture
+    $null = Write-CacheFixture $fixture 'release/voxely.exe'
+    $script:forbidSleep = $true
+    $script:sleepCount = 0
+    $script:busy = $true
+    try {
+        Expect-CacheFailure { Invoke-VoxelyBuildCache -RepoRoot $fixture -Action { throw 'Rejected action must not start' } } 'Build cache is busy'
+        Assert-Cache ($script:sleepCount -eq 0) 'Initial busy rejection must not enter post-build waiting'
+    } finally { $script:busy = $false }
+    try {
+        Expect-CacheFailure {
+            Invoke-VoxelyBuildCache -RepoRoot $fixture -Action {
+                $script:busy = $true
+                throw 'primary-coverage-timeout'
+            }
+        } 'primary-coverage-timeout'
+        Assert-Cache ($script:sleepCount -eq 0) 'A failed action must not restart the cleanup wait'
+    } finally { $script:busy = $false; $script:forbidSleep = $false }
 
     $fixture = New-CacheFixture
     $protectedData = Write-CacheFixture $fixture 'owner-data/large.bin' 8192
@@ -261,6 +311,42 @@ catch { if ($_.Exception.Message -notmatch 'MSRV 1.90.0 build failed: 42') { thr
     & pwsh -NoProfile -File $child -Entry (Join-Path $fixtureScripts 'check-msrv.ps1') 2>$null
     Assert-Cache ($LASTEXITCODE -eq 42) 'MSRV must retain native failure and restore environment'
     Assert-Cache (@(Get-ChildItem (Join-Path $fixture 'src-tauri/target') -Directory -Filter 'msrv-*').Count -eq 0) 'MSRV failure must remove its temporary target'
+    $fixture = New-CacheFixture
+    $fixtureScripts = Join-Path $fixture 'scripts'
+    New-Item -ItemType Directory -Path $fixtureScripts | Out-Null
+    foreach ($name in @('rust-build-cache.ps1', 'check-rust-coverage.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $fixtureScripts }
+    New-Item -ItemType Directory -Path (Join-Path $fixture 'src-tauri') | Out-Null
+    $fakeTool = Join-Path $fixture 'fake-llvm-cov.ps1'
+    @'
+$global:coverageWasCalled = $true
+New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
+'artifact' | Set-Content (Join-Path $env:CARGO_TARGET_DIR 'partial.rlib')
+$global:LASTEXITCODE = 42
+'@ | Set-Content $fakeTool
+    $child = Join-Path $fixture 'fake-coverage.ps1'
+    @'
+param($Entry, $FakeTool)
+$ErrorActionPreference = 'Stop'
+$global:coverageWasCalled = $false
+$global:coverageSleepCount = 0
+function Get-Command { param($Name, $ErrorAction) return [pscustomobject]@{Source=$FakeTool} }
+function Get-Process {
+    param([string[]]$Name, [int]$Id, $ErrorAction)
+    if ($PSBoundParameters.ContainsKey('Id')) { return Microsoft.PowerShell.Management\Get-Process -Id $Id -ErrorAction Stop }
+    if ('cargo' -in $Name -and $global:coverageWasCalled) { return [pscustomobject]@{ProcessName='cargo';Id=123} }
+}
+function Start-Sleep { $global:coverageSleepCount++; throw 'Failed coverage must not wait again during cleanup' }
+try { & $Entry; throw 'Expected coverage failure' }
+catch {
+    if ($_.Exception.Message -notmatch 'cargo llvm-cov failed: 42') { throw }
+    if ($global:coverageSleepCount -ne 0) { throw 'Failed coverage entered cleanup waiting' }
+    if ($env:CARGO_TARGET_DIR -or $env:VOXELY_BUILD_CACHE_SESSION) { throw 'Environment not restored' }
+    exit 42
+}
+'@ | Set-Content $child
+    & pwsh -NoProfile -File $child -Entry (Join-Path $fixtureScripts 'check-rust-coverage.ps1') -FakeTool $fakeTool 2>$null
+    Assert-Cache ($LASTEXITCODE -eq 42) 'Coverage tool error must survive a concurrent cleanup failure without another wait'
+    Assert-Cache (@(Get-ChildItem (Join-Path $fixture 'src-tauri/target') -Directory -Filter 'llvm-cov-*').Count -eq 1) 'Busy cleanup must preserve its temporary target'
     Write-Host "PASS: Rust cache lifecycle ($script:assertions assertions, disposable fixtures only)."
 } finally {
     foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }

@@ -18,13 +18,92 @@ pub struct TextReplacementRule {
     pub case_sensitive: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
-#[serde(rename_all = "camelCase")]
-pub struct TextReplacementSettings {
+pub const FORMAL_PRESET: &str = "russian-formal";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ReplacementGroup {
+    pub id: String,
     #[serde(default)]
+    pub name: String,
     pub enabled: bool,
     #[serde(default)]
+    pub preset_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rules: Vec<TextReplacementRule>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct TextReplacementSettings {
+    pub enabled: bool,
+    pub groups: Vec<ReplacementGroup>,
+}
+
+impl Default for TextReplacementSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            groups: vec![ReplacementGroup::system(false)],
+        }
+    }
+}
+
+impl ReplacementGroup {
+    fn system(enabled: bool) -> Self {
+        Self {
+            id: "system-russian-formal".into(),
+            name: String::new(),
+            enabled,
+            preset_id: Some(FORMAL_PRESET.into()),
+            rules: Vec::new(),
+        }
+    }
+
+    fn custom(id: String, rules: Vec<TextReplacementRule>) -> Self {
+        Self {
+            id,
+            name: "Custom".into(),
+            enabled: true,
+            preset_id: None,
+            rules,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TextReplacementSettings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Stored {
+            #[serde(default)]
+            enabled: bool,
+            groups: Option<Vec<ReplacementGroup>>,
+            rules: Option<Vec<TextReplacementRule>>,
+        }
+        let stored = Stored::deserialize(deserializer)?;
+        if stored.groups.is_some() && stored.rules.is_some() {
+            return Err(serde::de::Error::custom(
+                "replacement groups and legacy rules cannot coexist",
+            ));
+        }
+        Ok(match stored.groups {
+            Some(mut groups) => {
+                // Newly installed presets become available without enabling new replacements.
+                if !groups
+                    .iter()
+                    .any(|group| group.preset_id.as_deref() == Some(FORMAL_PRESET))
+                {
+                    groups.push(ReplacementGroup::system(false));
+                }
+                Self {
+                    enabled: stored.enabled,
+                    groups,
+                }
+            }
+            None => Self::from_legacy(stored.enabled, stored.rules.unwrap_or_default()),
+        })
+    }
 }
 
 impl TextReplacementSettings {
@@ -33,17 +112,101 @@ impl TextReplacementSettings {
             .expect("the bundled Russian formal address preset must be valid")
     }
 
-    pub fn validate(&self) -> Result<(), &'static str> {
-        if self.rules.len() > MAX_RULES {
-            return Err("text replacement rules must not exceed 100 entries");
+    pub fn from_legacy(enabled: bool, rules: Vec<TextReplacementRule>) -> Self {
+        let preset = Self::russian_formal_rules();
+        let start = rules.windows(preset.len()).position(|part| part == preset);
+        let mut groups = Vec::new();
+        if let Some(start) = start {
+            if start > 0 {
+                groups.push(ReplacementGroup::custom(
+                    "legacy-before".into(),
+                    rules[..start].to_vec(),
+                ));
+            }
+            groups.push(ReplacementGroup::system(true));
+            if start + preset.len() < rules.len() {
+                groups.push(ReplacementGroup::custom(
+                    "legacy-after".into(),
+                    rules[start + preset.len()..].to_vec(),
+                ));
+            }
+        } else {
+            if !rules.is_empty() {
+                groups.push(ReplacementGroup::custom("legacy-custom".into(), rules));
+            }
+            groups.push(ReplacementGroup::system(false));
         }
-        if self.rules.iter().any(|rule| {
-            rule.from.chars().count() > MAX_TERM_CHARS
-                || rule.to.chars().count() > MAX_TERM_CHARS
-                || rule.from.chars().any(char::is_control)
-                || rule.to.chars().any(char::is_control)
-        }) {
-            return Err("text replacement terms must be at most 200 characters and contain no control characters");
+        Self { enabled, groups }
+    }
+
+    #[cfg(test)]
+    pub fn custom_rules(&self) -> &[TextReplacementRule] {
+        self.groups
+            .iter()
+            .find(|group| group.preset_id.is_none())
+            .map(|group| group.rules.as_slice())
+            .unwrap_or_default()
+    }
+
+    #[cfg(test)]
+    pub fn custom_rules_mut(&mut self) -> &mut Vec<TextReplacementRule> {
+        let index = self
+            .groups
+            .iter()
+            .position(|group| group.preset_id.is_none())
+            .unwrap_or_else(|| {
+                self.groups
+                    .push(ReplacementGroup::custom("native-custom".into(), Vec::new()));
+                self.groups.len() - 1
+            });
+        &mut self.groups[index].rules
+    }
+
+    pub fn validate(&self) -> Result<(), &'static str> {
+        use std::collections::HashSet;
+        let mut ids = HashSet::new();
+        let mut presets = HashSet::new();
+        if self
+            .groups
+            .iter()
+            .filter(|group| group.preset_id.is_none())
+            .count()
+            > 20
+            || self
+                .groups
+                .iter()
+                .map(|group| group.rules.len())
+                .sum::<usize>()
+                > MAX_RULES
+        {
+            return Err("text replacements must not exceed 20 custom groups or 100 custom rules");
+        }
+        for group in &self.groups {
+            if group.id.is_empty()
+                || group.id.len() > 80
+                || !ids.insert(&group.id)
+                || group.id.chars().any(char::is_control)
+            {
+                return Err("replacement group IDs must be unique and valid");
+            }
+            if let Some(preset) = &group.preset_id {
+                if preset != FORMAL_PRESET || !presets.insert(preset) || !group.rules.is_empty() {
+                    return Err("unknown, duplicate, or modified system replacement preset");
+                }
+            } else if group.name.trim().is_empty()
+                || group.name.chars().count() > 80
+                || group.name.chars().any(char::is_control)
+            {
+                return Err("custom replacement group names must be 1-80 characters");
+            }
+            if group.rules.iter().any(|rule| {
+                rule.from.chars().count() > MAX_TERM_CHARS
+                    || rule.to.chars().count() > MAX_TERM_CHARS
+                    || rule.from.chars().any(char::is_control)
+                    || rule.to.chars().any(char::is_control)
+            }) {
+                return Err("text replacement terms must be at most 200 characters and contain no control characters");
+            }
         }
         Ok(())
     }
@@ -59,9 +222,18 @@ pub fn apply_text_replacements(mut text: String, settings: &TextReplacementSetti
         return text;
     }
 
+    let formal = TextReplacementSettings::russian_formal_rules();
     for rule in settings
-        .rules
+        .groups
         .iter()
+        .filter(|group| group.enabled)
+        .flat_map(|group| {
+            if group.preset_id.as_deref() == Some(FORMAL_PRESET) {
+                formal.as_slice()
+            } else {
+                group.rules.as_slice()
+            }
+        })
         .filter(|rule| !rule.from.trim().is_empty())
     {
         match replace_rule(&text, rule) {
@@ -169,7 +341,7 @@ mod tests {
     fn settings(rules: Vec<TextReplacementRule>) -> TextReplacementSettings {
         TextReplacementSettings {
             enabled: true,
-            rules,
+            groups: vec![ReplacementGroup::custom("test".into(), rules)],
         }
     }
 
@@ -179,7 +351,7 @@ mod tests {
         config.enabled = false;
         assert_eq!(apply_text_replacements("вы".into(), &config), "вы");
         config.enabled = true;
-        config.rules = vec![rule("", "x", false), rule(" \t", "x", false)];
+        *config.custom_rules_mut() = vec![rule("", "x", false), rule(" \t", "x", false)];
         assert_eq!(apply_text_replacements(" вы \n".into(), &config), " вы \n");
         assert_eq!(apply_text_replacements(String::new(), &config), "");
     }
@@ -188,15 +360,15 @@ mod tests {
     fn formal_preset_covers_all_forms_without_changing_partial_words() {
         let config = settings(TextReplacementSettings::russian_formal_rules());
         config.validate().unwrap();
-        assert_eq!(config.rules.len(), 16);
+        assert_eq!(config.custom_rules().len(), 16);
         let input = config
-            .rules
+            .custom_rules()
             .iter()
             .map(|item| item.from.clone())
             .collect::<Vec<_>>()
             .join(", ");
         let expected = config
-            .rules
+            .custom_rules()
             .iter()
             .map(|item| item.to.clone())
             .collect::<Vec<_>>()
@@ -264,14 +436,14 @@ mod tests {
     fn validation_limits_unicode_characters_rather_than_bytes() {
         let mut config = settings(vec![rule(&"я".repeat(MAX_TERM_CHARS), "Вы", false)]);
         config.validate().unwrap();
-        config.rules[0].from.push('я');
+        config.custom_rules_mut()[0].from.push('я');
         assert!(config.validate().is_err());
-        config.rules[0].from = "вы".into();
-        config.rules[0].to = "я".repeat(MAX_TERM_CHARS + 1);
+        config.custom_rules_mut()[0].from = "вы".into();
+        config.custom_rules_mut()[0].to = "я".repeat(MAX_TERM_CHARS + 1);
         assert!(config.validate().is_err());
-        config.rules = vec![rule("вы", "Вы", false); MAX_RULES];
+        *config.custom_rules_mut() = vec![rule("вы", "Вы", false); MAX_RULES];
         config.validate().unwrap();
-        config.rules.push(rule("ваш", "Ваш", false));
+        config.custom_rules_mut().push(rule("ваш", "Ваш", false));
         assert!(config.validate().is_err());
     }
 
@@ -315,5 +487,75 @@ mod tests {
             apply_text_replacements(transcript.clone(), &config),
             transcript
         );
+    }
+    #[test]
+    fn grouped_migration_preserves_order_customizations_and_restart() {
+        let mut rules = vec![rule("hello", "вы", true)];
+        rules.extend(TextReplacementSettings::russian_formal_rules());
+        rules.push(rule("Вы", "CUSTOM", true));
+        let old = settings(rules.clone());
+        let legacy = serde_json::json!({ "enabled": true, "rules": rules });
+        let migrated: TextReplacementSettings = serde_json::from_value(legacy).unwrap();
+        migrated.validate().unwrap();
+        assert_eq!(migrated.groups.len(), 3);
+        assert_eq!(migrated.groups[1].preset_id.as_deref(), Some(FORMAL_PRESET));
+        assert_eq!(
+            apply_text_replacements("hello вас".into(), &migrated),
+            apply_text_replacements("hello вас".into(), &old)
+        );
+        let value = serde_json::to_value(&migrated).unwrap();
+        assert!(value.get("rules").is_none());
+        assert!(value["groups"][1].get("rules").is_none());
+        assert_eq!(
+            serde_json::from_value::<TextReplacementSettings>(value).unwrap(),
+            migrated
+        );
+        let modified: TextReplacementSettings = serde_json::from_value(serde_json::json!({"enabled": false, "rules": [{"from":"вы", "to":"CUSTOM", "caseSensitive":false}]})).unwrap();
+        assert!(!modified.enabled);
+        assert_eq!(modified.custom_rules()[0].to, "CUSTOM");
+        assert!(!modified.groups[1].enabled);
+    }
+
+    #[test]
+    fn system_rules_are_resolved_from_resources_and_disabled_groups_do_not_run() {
+        let mut config = TextReplacementSettings::default();
+        config.enabled = true;
+        assert_eq!(apply_text_replacements("вы".into(), &config), "вы");
+        config.groups[0].enabled = true;
+        assert_eq!(apply_text_replacements("вы".into(), &config), "Вы");
+        let exported = serde_json::to_string(&config).unwrap();
+        assert!(!exported.contains("caseSensitive"));
+        config.groups.push(ReplacementGroup::custom(
+            "custom".into(),
+            vec![rule("Вы", "personal", true)],
+        ));
+        assert_eq!(apply_text_replacements("вы".into(), &config), "personal");
+        config.groups[1].enabled = false;
+        assert_eq!(apply_text_replacements("вы".into(), &config), "Вы");
+    }
+
+    #[test]
+    fn rejects_conflicting_or_forged_system_groups() {
+        assert!(serde_json::from_value::<TextReplacementSettings>(
+            serde_json::json!({"enabled": true, "groups": [], "rules": []})
+        )
+        .is_err());
+        let mut config = TextReplacementSettings::default();
+        config.groups.push(config.groups[0].clone());
+        assert!(config.validate().is_err());
+        config.groups.pop();
+        config.groups[0].rules.push(rule("вы", "injected", false));
+        assert!(config.validate().is_err());
+        config.groups[0].rules.clear();
+        config.groups[0].preset_id = Some("unknown".into());
+        assert!(config.validate().is_err());
+    }
+    #[test]
+    fn newly_available_system_presets_are_added_disabled() {
+        let loaded: TextReplacementSettings =
+            serde_json::from_value(serde_json::json!({"enabled":true,"groups":[]})).unwrap();
+        assert_eq!(loaded.groups.len(), 1);
+        assert!(!loaded.groups[0].enabled);
+        assert_eq!(apply_text_replacements("вы".into(), &loaded), "вы");
     }
 }

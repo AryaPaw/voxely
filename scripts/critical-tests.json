@@ -21,6 +21,7 @@
         "app::session::tests::capture_limit_is_distinct_from_queue_loss_and_device_failure",
         "app::session::tests::duplicate_stop_preserves_recording_audio_and_usage",
         "app::session::tests::cancel_discards_audio_history_and_usage",
+        "app::session::tests::hud_cancel_rejects_stale_sessions_hidden_hud_and_completed_state",
         "app::session::tests::cancel_during_stopping_hides_history_until_audio_cleanup_finishes",
         "app::session::tests::cancelled_pipeline_delete_failure_is_retried_until_history_and_usage_are_removed"
       ]
@@ -139,10 +140,34 @@
       "purpose": "Reject invalid settings imports, preserve local lifecycle and retention state, and restore the settings snapshot and hotkey after an application failure.",
       "tests": [
         "settings_transfer::tests::round_trip_preserves_user_settings_and_local_state",
+        "app::shortcuts::tests::capture_intent_suppresses_commands_before_native_registration_ack",
+        "app::shortcuts::tests::capture_epoch_rejects_delayed_native_callbacks_after_capture_has_finished",
+        "app::shortcuts::tests::queued_commands_cannot_cross_a_capture_epoch_even_after_resume",
+        "app::shortcuts::tests::capture_restore_renews_same_shortcut_and_rejects_stale_hook_updates",
+        "app::shortcuts::tests::registration_waiter_keeps_plugin_and_applied_locks_free_for_the_owner_pump",
+        "app::shortcuts::tests::native_same_id_re_registration_discards_only_old_owned_hotkey_messages",
+        "windows_int::escape_hook::tests::escape_callbacks_from_a_previous_hook_epoch_stay_inert_after_capture_resume",
+        "windows_int::escape_hook::tests::failed_hook_cleanup_cannot_make_same_epoch_retry_report_an_inactive_hook_as_ready",
+        "app::shortcuts::tests::queued_global_command_is_rechecked_before_dispatch_while_capturing_a_shortcut",
+        "windows_int::escape_hook::tests::hotkey_capture_passes_escape_to_the_editor_without_cancelling_live_work",
         "settings::tests::legacy_settings_enable_silence_compression_and_disabled_survives_restart",
         "settings_transfer::tests::rejects_invalid_files_without_mutating_current",
         "commands::tests::failed_import_side_effect_restores_all_fields_with_a_new_sequence",
         "app::shortcuts::tests::failed_registration_does_not_skip_restoring_the_previous_hotkey"
+      ]
+    },
+    {
+      "id": "desktop-lifecycle",
+      "purpose": "Не допускать запуск удалённого экспериментального интерфейса и потерю данных в стабильных desktop preview/shutdown путях; проверять реальную Windows activation context.",
+      "tests": [
+        "startup_args::tests::removed_experimental_flags_cannot_initialize_the_real_profile",
+        "startup_args::tests::ordinary_autostart_and_independent_hud_launches_are_unchanged",
+        "startup_args::tests::malformed_utf16_removed_flags_are_rejected",
+        "windows_int::manifest_tests::process_manifest_declares_common_controls_v6_and_per_monitor_v2",
+        "windows_int::manifest_tests::common_controls_v6_is_active_and_task_dialog_entry_point_exists",
+        "commands::tests::superseded_and_abandoned_filter_previews_have_bounded_file_ownership",
+        "commands::tests::preview_publication_waits_for_retention_snapshot_and_cleanup_transaction",
+        "history::retention::tests::stale_generated_previews_cannot_evict_history_and_active_leases_survive_cleanup"
       ]
     },
     {

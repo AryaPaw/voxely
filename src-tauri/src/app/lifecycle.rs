@@ -1,5 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use serde::Serialize;
 use tauri::menu::{MenuBuilder, MenuItemBuilder};
@@ -58,22 +58,30 @@ pub fn runtime_info_with_recovery(recovered: bool) -> RuntimeInfo {
     }
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppIdentity {
+    name: String,
+    local_build_name: String,
+}
+static APP_IDENTITY: LazyLock<AppIdentity> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("../../../src/lib/app-identity.json"))
+        .expect("bundled application identity must be valid")
+});
+
 pub fn app_display_name(_locale: &str) -> &'static str {
-    "Voxely"
+    &APP_IDENTITY.name
 }
 
 pub fn window_title(locale: &str) -> &'static str {
     window_title_for(is_local_build(), locale)
 }
 
-pub fn window_title_for(local_build: bool, locale: &str) -> &'static str {
-    if !local_build {
-        return "Voxely";
-    }
-    if locale.to_ascii_lowercase().starts_with("ru") {
-        "Voxely (локальная версия)"
+pub fn window_title_for(local_build: bool, _locale: &str) -> &'static str {
+    if local_build {
+        &APP_IDENTITY.local_build_name
     } else {
-        "Voxely (local)"
+        &APP_IDENTITY.name
     }
 }
 
@@ -82,7 +90,7 @@ fn apply_app_identity(app: &AppHandle, locale: &str) {
         let _ = window.set_title(window_title(locale));
     }
     if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_tooltip(Some(app_display_name("en")));
+        let _ = tray.set_tooltip(Some(window_title(locale)));
     }
 }
 
@@ -117,7 +125,7 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
         .ok_or_else(|| AppError::StorageFailed("missing tray icon".into()))?;
     TrayIconBuilder::with_id("main")
         .icon(icon)
-        .tooltip(app_display_name(&locale))
+        .tooltip(window_title(&locale))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -515,8 +523,8 @@ mod tests {
         assert!(!local_build_from(false, Some("0")));
         assert!(local_build_from(false, Some("1")));
         assert!(local_build_from(false, Some("true")));
-        assert_eq!(window_title_for(true, "ru"), "Voxely (локальная версия)");
-        assert_eq!(window_title_for(true, "en"), "Voxely (local)");
+        assert_eq!(window_title_for(true, "ru"), "Voxely (Local build)");
+        assert_eq!(window_title_for(true, "en"), "Voxely (Local build)");
         assert_eq!(window_title_for(false, "ru"), "Voxely");
         assert_eq!(window_title_for(false, "en"), "Voxely");
     }

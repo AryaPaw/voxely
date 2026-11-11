@@ -3,6 +3,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 #[cfg(all(test, target_os = "windows"))]
+// Unit tests load the same Tauri Windows resources as the application.
 #[link(name = "resource", kind = "static")]
 unsafe extern "C" {}
 
@@ -17,7 +18,9 @@ mod notify;
 mod runtime_diagnostics;
 mod settings;
 mod settings_transfer;
+mod startup_args;
 mod text_replacements;
+mod theme_tokens;
 mod transcription;
 mod updates;
 mod windows_int;
@@ -37,8 +40,21 @@ use crate::runtime_diagnostics::{Event as DiagnosticEvent, ExitCompletion, ExitR
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Err(error) = startup_args::validate(&std::env::args_os().collect::<Vec<_>>()) {
+        eprintln!("Invalid diagnostic arguments: {error}");
+        std::process::exit(2);
+    }
+    let code = run_app();
+    if code != 0 {
+        std::process::exit(code);
+    }
+}
+
+fn run_app() -> i32 {
     crate::notify::apply_windows_app_identity();
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+    let context = tauri::generate_context!();
+    let built = builder
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             if crate::app::local_rebuild::handle_request(app, &args) {
                 return;
@@ -58,7 +74,7 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .setup(|app| {
+        .setup(move |app| {
             // A control-only secondary invocation must never become a fresh app
             // instance if its target disappeared before single-instance delivery.
             if crate::app::local_rebuild::request(&std::env::args().collect::<Vec<_>>()).is_some() {
@@ -89,6 +105,9 @@ pub fn run() {
             if let Err(err) = reregister_hotkey(app.handle(), &hotkey) {
                 tracing::error!(error = %err, "hotkey failed");
                 crate::notify::show_error(app.handle(), &err);
+            }
+            if let Some(window) = app.get_webview_window("main") {
+                crate::windows_int::main_window::round_corners(&window);
             }
             apply_launch_visibility(app.handle(), std::env::args());
             prepare_overlay_window(app.handle());
@@ -184,40 +203,45 @@ pub fn run() {
             play_cue,
             preview_error_notification
         ])
-        .build(tauri::generate_context!())
-        .unwrap_or_else(|err| {
+        .build(context);
+    let app = match built {
+        Ok(app) => app,
+        Err(err) => {
             crate::runtime_diagnostics::record(DiagnosticEvent::StartupFailed);
             tracing::error!(error = %err, "failed to start");
-            std::process::exit(1);
-        })
-        .run(|app, event| match event {
-            tauri::RunEvent::Ready => crate::runtime_diagnostics::record(DiagnosticEvent::Ready),
-            tauri::RunEvent::ExitRequested { api, code, .. } => {
-                crate::runtime_diagnostics::record(DiagnosticEvent::ExitRequested { code });
-                let ctx = app.state::<Arc<AppContext>>();
-                if !crate::app::shutdown::exit_permitted(&ctx)
-                    && code == Some(tauri::RESTART_EXIT_CODE)
-                {
-                    // Tauri cannot prevent this code. Own restart callers must
-                    // request cleanup before entering Tauri's restart path.
-                    crate::runtime_diagnostics::record(DiagnosticEvent::UncoordinatedRestart);
-                } else if !crate::app::shutdown::exit_permitted(&ctx) {
-                    api.prevent_exit();
-                    crate::runtime_diagnostics::record(DiagnosticEvent::ExitDeferred);
-                    crate::app::shutdown::request(
-                        app,
-                        crate::app::shutdown::Action::Exit(code.unwrap_or(0)),
-                    );
-                }
+            return 1;
+        }
+    };
+    app.run_return(move |app, event| match event {
+        tauri::RunEvent::Ready => {
+            crate::runtime_diagnostics::record(DiagnosticEvent::Ready);
+        }
+        tauri::RunEvent::ExitRequested { api, code, .. } => {
+            crate::runtime_diagnostics::record(DiagnosticEvent::ExitRequested { code });
+            let ctx = app.state::<Arc<AppContext>>();
+            if !crate::app::shutdown::exit_permitted(&ctx) && code == Some(tauri::RESTART_EXIT_CODE)
+            {
+                // Tauri cannot prevent this code. Own restart callers must
+                // request cleanup before entering Tauri's restart path.
+                crate::runtime_diagnostics::record(DiagnosticEvent::UncoordinatedRestart);
+            } else if !crate::app::shutdown::exit_permitted(&ctx) {
+                api.prevent_exit();
+                crate::runtime_diagnostics::record(DiagnosticEvent::ExitDeferred);
+                crate::app::shutdown::request(
+                    app,
+                    crate::app::shutdown::Action::Exit(code.unwrap_or(0)),
+                );
             }
-            tauri::RunEvent::Exit => {
-                crate::runtime_diagnostics::record(DiagnosticEvent::ExitComplete {
-                    source: ExitCompletion::TauriExitEvent,
-                });
+        }
+        tauri::RunEvent::Exit => {
+            #[cfg(windows)]
+            {
+                app.state::<Arc<AppContext>>().native_hud.lock().take();
             }
-            _ => {}
-        });
-    crate::runtime_diagnostics::record(DiagnosticEvent::ExitComplete {
-        source: ExitCompletion::RunReturned,
-    });
+            crate::runtime_diagnostics::record(DiagnosticEvent::ExitComplete {
+                source: ExitCompletion::TauriExitEvent,
+            });
+        }
+        _ => {}
+    })
 }

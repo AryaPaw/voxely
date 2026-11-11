@@ -1,7 +1,7 @@
 {
   "name": "voxely",
   "private": true,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -21,9 +21,11 @@
     "winget:test-lib": "pwsh -File scripts/winget-lib.test.ps1",
     "verify": "pwsh -NoProfile -File scripts/verify.ps1",
     "verify:checks": "bun run verify:preflight && bun run verify:frontend && bun run verify:rust:format && bun run verify:rust:lint && bun run verify:rust:tests && bun run verify:rust:coverage && bun run verify:metadata",
-    "docs:shots": "vite --config scripts/readme-shots/vite.config.ts",
+    "docs:shots": "bun scripts/readme-shots/generate.ts",
     "verify:preflight": "bun scripts/check-preflight.ts && bun test ./scripts/check-preflight.bun.ts",
-    "verify:frontend": "bun run typecheck && bun run lint && bun run format:check && bun run coverage",
+    "theme:generate": "bun scripts/generate-accent-presets.ts",
+    "theme:check": "bun scripts/generate-accent-presets.ts --check",
+    "verify:frontend": "bun run theme:check && bun run typecheck && bun run lint && bun run format:check && bun run coverage",
     "verify:rust:format": "cargo fmt --all --check --manifest-path src-tauri/Cargo.toml",
     "verify:rust:lint": "cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
     "verify:rust:tests": "pwsh -File scripts/check-critical-tests.ps1",

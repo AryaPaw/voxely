@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
   AudioLines,
+  Scissors,
   ChartNoAxesCombined,
   Coins,
   LoaderCircle,
@@ -191,7 +192,7 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
   const maxDailyCost = Math.max(0, ...points.map((point) => point.reportedCostUsd));
   const costAxisDigits = maxDailyCost >= 0.01 ? 2 : maxDailyCost >= 0.0001 ? 4 : 6;
   const chartConfig = {
-    value: { label: activeMetricLabel, color: "var(--primary)" },
+    value: { label: activeMetricLabel, color: "var(--chart-1)" },
   };
   const tickInterval = Math.max(0, Math.ceil(points.length / 7) - 1);
 
@@ -303,7 +304,7 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
         </div>
       ) : data ? (
         <>
-          <div className="grid gap-3 sm:grid-cols-3">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
             <Summary
               icon={RotateCcw}
               label={copy.statisticsRequests}
@@ -321,7 +322,23 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
               label={copy.statisticsAudio}
               value={formatDuration(data.audioDurationMs, copy, copy.dateLocale)}
             />
+            <Summary
+              icon={Scissors}
+              label={copy.statisticsTrimmed}
+              hint={copy.statisticsTrimmedHint}
+              value={
+                data.measuredDictations > 0
+                  ? `${formatDuration(data.trimmedDurationMs, copy, copy.dateLocale)} (${formatNumber(data.measuredAudioDurationMs > 0 ? (100 * data.trimmedDurationMs) / data.measuredAudioDurationMs : 0, copy.dateLocale, 1)}%)`
+                  : copy.statisticsTrimmedUnknown
+              }
+            />
           </div>
+
+          <p className="text-xs text-muted-foreground">
+            {copy.statisticsTrimmedCoverage
+              .replace("{known}", formatNumber(data.measuredDictations, copy.dateLocale))
+              .replace("{total}", formatNumber(data.dictations, copy.dateLocale))}
+          </p>
 
           {data.unpricedAttempts > 0 ? (
             <p
@@ -539,7 +556,7 @@ function Summary({
     <Card size="sm" className="min-w-0 gap-0 py-3.5">
       <CardContent className="px-4">
         <div className="flex items-center gap-2 text-muted-foreground">
-          <Icon className="size-4 shrink-0 text-primary" aria-hidden="true" />
+          <Icon className="size-4 shrink-0 text-primary-text" aria-hidden="true" />
           <p className="truncate text-xs font-medium">{label}</p>
         </div>
         <p className="mt-3 truncate text-xl font-semibold tracking-tight tabular-nums">{value}</p>

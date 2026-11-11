@@ -1,3 +1,4 @@
+import { DEFAULT_ACCENT, type AccentColor } from "../../lib/accent";
 import { useEffect, useLayoutEffect, useRef, useState, type PointerEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -24,6 +25,7 @@ export function OverlayApp() {
   const hoverCheckInFlight = useRef(false);
   const [copy, setCopy] = useState(() => messagesFor("ru"));
   const [theme, setTheme] = useState("dark");
+  const [accent, setAccent] = useState<AccentColor>(DEFAULT_ACCENT);
   const state: SessionState = snapshot.state;
   const recording = state.kind === "recording" || state.kind === "startingRecording";
   const busy = overlayIsBusy(state);
@@ -31,7 +33,8 @@ export function OverlayApp() {
 
   function applySettings(settings: AppSettings) {
     setTheme(settings.theme);
-    applyTheme(settings.theme);
+    setAccent(settings.accentColor ?? DEFAULT_ACCENT);
+    applyTheme(settings.theme, settings.accentColor);
     const locale = resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language);
     applyUiLocale(locale);
     setCopy(messagesFor(locale));
@@ -82,7 +85,7 @@ export function OverlayApp() {
     };
   }, []);
 
-  useEffect(() => watchSystemTheme(theme), [theme]);
+  useEffect(() => watchSystemTheme(theme, accent), [theme, accent]);
 
   useEffect(() => {
     return bindEscapeCancel(() => {

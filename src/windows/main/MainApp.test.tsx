@@ -17,12 +17,14 @@ import { reportError } from "../../lib/system-notify";
 import { HISTORY_CHANGED } from "../../lib/history-sync";
 import { APP_NAVIGATE } from "../../lib/window-section";
 import { MainApp } from "./MainApp";
+import tauriConfig from "../../../src-tauri/tauri.conf.json";
 
 function render(ui: ReactElement) {
   return testingRender(<TooltipProvider>{ui}</TooltipProvider>);
 }
 
 const listeners = new Map<string, Array<(event: { payload: unknown }) => void>>();
+const nativeFrame = vi.hoisted(() => ({ enabled: false }));
 let scrollIntoViewDescriptor: PropertyDescriptor | undefined;
 
 vi.mock("sonner", () => ({
@@ -62,7 +64,7 @@ const settingsPayload = {
     maxRetryDelayMs: 8000,
     totalOperationTimeoutMs: 720000,
   },
-  textReplacements: { enabled: false, rules: [] },
+  textReplacements: { enabled: false, groups: [] },
   activePresetId: "stt-fast",
   presets: [],
   firstRunComplete: true,
@@ -161,14 +163,25 @@ function historyItem(id: string, transcript: string): Recording {
 }
 
 beforeEach(() => {
+  nativeFrame.enabled = false;
   vi.mocked(invoke).mockImplementation(defaultInvoke);
 });
 
 vi.mock("@tauri-apps/api/app", () => ({
   getVersion: vi.fn(async () => "0.2.11"),
 }));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({
+    isMaximized: async () => false,
+    onResized: async () => () => {},
+    minimize: vi.fn(),
+    toggleMaximize: vi.fn(),
+    close: vi.fn(),
+  }),
+}));
 
 vi.mock("@tauri-apps/api/core", () => ({
+  isTauri: () => nativeFrame.enabled,
   invoke: vi.fn(async (cmd: string, args?: Record<string, unknown>) => {
     if (cmd === "get_settings") {
       return settingsPayload;
@@ -249,6 +262,43 @@ afterEach(() => {
 });
 
 describe("MainApp", () => {
+  it("keeps the custom header mounted while settings finish loading", async () => {
+    nativeFrame.enabled = true;
+    const pending = deferred<typeof settingsPayload>();
+    vi.mocked(invoke).mockImplementation((cmd, args) =>
+      cmd === "get_settings" ? pending.promise : defaultInvoke(cmd, args),
+    );
+    const view = render(<MainApp />);
+    await waitFor(() =>
+      expect(view.container.querySelector("header.window-titlebar")).toBeInTheDocument(),
+    );
+    const header = view.container.querySelector("header.window-titlebar");
+    expect(header).toBeInTheDocument();
+    await act(async () => pending.resolve(settingsPayload));
+    await screen.findByRole("heading", { name: "История" });
+    await screen.findByText("v0.2.11");
+    expect(view.container.querySelector("header.window-titlebar")).toBe(header);
+  });
+  it("keeps custom window controls available during loading and settings failure", async () => {
+    const mainWindow = tauriConfig.app.windows.find((window) => window.label === "main");
+    expect(mainWindow?.decorations).toBe(false);
+    let rejectRead!: (reason: Error) => void;
+    vi.mocked(invoke).mockImplementation((cmd, args) => {
+      if (cmd === "get_settings")
+        return new Promise((_, reject) => {
+          rejectRead = reject;
+        });
+      return defaultInvoke(cmd, args);
+    });
+    render(<MainApp />);
+    expect(document.querySelector(".app-shell")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^(Close|Закрыть)$/ })).toBeInTheDocument();
+    await act(async () => rejectRead(new Error("offline")));
+    expect(await screen.findByText("offline")).toBeInTheDocument();
+    expect(document.querySelector(".app-shell")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^(Close|Закрыть)$/ })).toBeInTheDocument();
+  });
+
   it("loads history with settings locale", async () => {
     render(<MainApp />);
     expect(await screen.findByRole("heading", { name: "История" })).toBeInTheDocument();
@@ -278,8 +328,8 @@ describe("MainApp", () => {
     expect(toast.warning).toHaveBeenCalledWith(
       "Вставка отменена до передачи текста целевому приложению.",
     );
-    fireEvent.click(screen.getByRole("button", { name: /Внешний вид/ }));
-    expect(await screen.findByRole("combobox", { name: "Тема" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Общие/ }));
+    expect(await screen.findByRole("radiogroup", { name: "Тема" })).toBeInTheDocument();
     const { invoke } = await import("@tauri-apps/api/core");
     fireEvent.keyDown(window, { key: "Escape", bubbles: true });
     expect(invoke).toHaveBeenCalledWith("cancel_dictation");
@@ -299,7 +349,7 @@ describe("MainApp", () => {
       expect(historyLoads).toBeGreaterThan(0);
     });
     listeners.get(APP_NAVIGATE)?.[0]({ payload: "appearance" });
-    expect(await screen.findByRole("combobox", { name: "Тема" })).toBeInTheDocument();
+    expect(await screen.findByRole("radiogroup", { name: "Тема" })).toBeInTheDocument();
     const loadsBeforeEvent = historyLoads;
     await act(async () => {
       listeners.get(HISTORY_CHANGED)?.[0]({ payload: null });
@@ -314,16 +364,16 @@ describe("MainApp", () => {
     fireEvent.click(screen.getByRole("button", { name: /Сравнение/ }));
     expect(await screen.findByText(/Один клип/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /Общие/ }));
-    expect(await screen.findByText("Глобальный хоткей")).toBeInTheDocument();
+    expect(await screen.findByRole("radiogroup", { name: "Тема" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("switch", { name: "Запускать вместе с Windows" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("save_settings", expect.anything());
     });
-    fireEvent.click(screen.getByRole("button", { name: /Микрофон/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Фильтры/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Запись и звук/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Замена слов/ }));
     fireEvent.click(screen.getByRole("button", { name: /Расшифровка/ }));
     fireEvent.click(screen.getByRole("button", { name: /Хранение/ }));
-    fireEvent.click(screen.getByRole("button", { name: /Дополнительно/ }));
+    fireEvent.click(screen.getByRole("button", { name: /Диагностика/ }));
     fireEvent.click(screen.getByRole("button", { name: /Песочница/ }));
     fireEvent.click(screen.getByRole("button", { name: /О программе/ }));
     expect(await screen.findByText(/0.2.11/)).toBeInTheDocument();
@@ -362,7 +412,7 @@ describe("MainApp", () => {
       await screen.findByRole("heading", { name: "Перед первой диктовкой" }),
     ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Настройки хранения" }));
-    expect(await screen.findByRole("heading", { name: "Хранение" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "Хранение и данные" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Согласен и продолжить" }));
     await waitFor(() => {
       expect(invoke).toHaveBeenCalledWith("acknowledge_first_run_disclosure");
@@ -686,13 +736,17 @@ describe("MainApp", () => {
     });
     render(<MainApp />);
     await screen.findByRole("heading", { name: "История" });
-    fireEvent.click(screen.getByRole("button", { name: /Внешний вид/ }));
-    const theme = screen.getByRole("combobox", { name: "Тема" });
-    fireEvent.click(theme);
-    fireEvent.click(await screen.findByRole("option", { name: "Системная" }));
+    fireEvent.click(screen.getByRole("button", { name: /Общие/ }));
+    const theme = screen.getByRole("radiogroup", { name: "Тема" });
+    fireEvent.click(screen.getByRole("radio", { name: "Системная" }));
 
     await waitFor(() => expect(reportError).toHaveBeenCalledOnce());
-    await waitFor(() => expect(theme).toHaveTextContent("Тёмная"));
+    await waitFor(() =>
+      expect(within(theme).getByRole("radio", { name: "Тёмная" })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      ),
+    );
     expect(document.documentElement.dataset.theme).toBe("dark");
     expect(settingsReads).toBe(2);
   });
@@ -730,13 +784,11 @@ describe("MainApp", () => {
     });
     render(<MainApp />);
     await screen.findByRole("heading", { name: "История" });
-    fireEvent.click(screen.getByRole("button", { name: /Внешний вид/ }));
-    const theme = screen.getByRole("combobox", { name: "Тема" });
-    fireEvent.click(theme);
-    fireEvent.click(await screen.findByRole("option", { name: "Системная" }));
+    fireEvent.click(screen.getByRole("button", { name: /Общие/ }));
+    const theme = screen.getByRole("radiogroup", { name: "Тема" });
+    fireEvent.click(screen.getByRole("radio", { name: "Системная" }));
     await waitFor(() => expect(saveCount).toBe(1));
-    fireEvent.click(screen.getByRole("combobox", { name: "Тема" }));
-    fireEvent.click(await screen.findByRole("option", { name: "Светлая" }));
+    fireEvent.click(screen.getByRole("radio", { name: "Светлая" }));
     await waitFor(() => expect(saveCount).toBe(2));
 
     await act(async () => {
@@ -748,6 +800,10 @@ describe("MainApp", () => {
     });
     await waitFor(() => expect(invoke).toHaveBeenCalledWith("get_settings"));
     expect(document.documentElement.dataset.theme).toBe("light");
+    expect(within(theme).getByRole("radio", { name: "Светлая" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
   });
 
   it("shows partial delete results from the backend", async () => {

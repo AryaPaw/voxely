@@ -1,36 +1,16 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { CircleAlert, ExternalLink, Github } from "lucide-react";
-import { toast } from "sonner";
-import { api, type UpdateOutcome } from "../../../lib/api";
+import { api } from "../../../lib/api";
 import { reportError } from "../../../lib/system-notify";
-import { formatInvokeError, updateToast, type Messages, appDisplayName } from "../../../lib/i18n";
+import { formatInvokeError, type Messages, appDisplayName } from "../../../lib/i18n";
 import { formatReleaseDate } from "../../../lib/release-meta";
 import { PageHeader } from "../../../components/settings/PageHeader";
-import { Button } from "../../../components/ui/button";
 import { SECTION_ICONS, sectionLabel } from "../sectionNav";
-
-function announceUpdate(code: UpdateOutcome, copy: Messages) {
-  const message = updateToast(code, copy);
-  switch (code) {
-    case "failed":
-      toast.error(message);
-      return;
-    case "busy":
-    case "deferred":
-      toast.message(message);
-      return;
-    case "none":
-    case "available":
-    case "installed":
-      toast.success(message);
-      return;
-    default: {
-      const exhaustive: never = code;
-      void exhaustive;
-    }
-  }
-}
+import { UpdateSettings } from "./UpdateSettings";
+import { SettingsGroup } from "../../../components/settings/SettingsGroup";
+import { SettingsField } from "../../../components/settings/SettingsField";
+import { VersionBadge } from "../VersionBadge";
 
 function LinkRow({
   icon,
@@ -71,9 +51,6 @@ function LinkRow({
 export function AboutSettings({ copy }: { copy: Messages }) {
   const [version, setVersion] = useState("");
   const [buildDate, setBuildDate] = useState("");
-  const [checking, setChecking] = useState(false);
-  const [installing, setInstalling] = useState(false);
-  const [updateReady, setUpdateReady] = useState(false);
   const released = buildDate ? formatReleaseDate(buildDate, copy.dateLocale) : "";
 
   useEffect(() => {
@@ -84,65 +61,27 @@ export function AboutSettings({ copy }: { copy: Messages }) {
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.about} title={sectionLabel(copy, "about")} />
-      <div className="mb-8 flex items-center gap-4">
-        <img src="/favicon.png" alt="" className="size-20 shrink-0 object-contain drop-shadow-md" />
+      <div className="about-identity">
+        <img src="/favicon.png" alt="" className="size-14 shrink-0 object-contain" />
         <div className="min-w-0">
           <p className="text-lg font-semibold text-balance">{appDisplayName(copy)}</p>
           <p className="text-sm text-pretty text-muted-foreground">{copy.aboutTagline}</p>
-          <p className="mt-1 text-sm text-muted-foreground">
-            {copy.aboutVersion}{" "}
-            <span className="tabular-nums text-foreground">{version || "…"}</span>
+          <div className="mt-3 flex flex-wrap items-center gap-3 text-sm text-muted-foreground">
+            <VersionBadge version={version} />
             {released ? (
               <>
-                <span className="mx-2 opacity-50">|</span>
-                {released}
+                <span>{released}</span>
               </>
             ) : null}
-          </p>
+          </div>
         </div>
       </div>
-      <div className="mb-6 flex max-w-lg flex-wrap gap-2">
-        <Button
-          variant="outline"
-          disabled={checking || installing}
-          onClick={async () => {
-            setChecking(true);
-            try {
-              const code = await api.checkForUpdates();
-              setUpdateReady(code === "available");
-              announceUpdate(code, copy);
-            } catch (error) {
-              reportError(formatInvokeError(error, copy));
-            } finally {
-              setChecking(false);
-            }
-          }}
-        >
-          {checking ? copy.checking : copy.checkUpdates}
-        </Button>
-        {updateReady ? (
-          <Button
-            disabled={checking || installing}
-            onClick={async () => {
-              setInstalling(true);
-              try {
-                const code = await api.installUpdate();
-                if (code === "installed" || code === "none") {
-                  setUpdateReady(false);
-                }
-                announceUpdate(code, copy);
-              } catch (error) {
-                reportError(formatInvokeError(error, copy));
-              } finally {
-                setInstalling(false);
-              }
-            }}
-          >
-            {installing ? copy.installing : copy.installUpdate}
-          </Button>
-        ) : null}
-      </div>
-      <div className="mb-6 max-w-lg overflow-hidden rounded-xl border border-border">
+      <SettingsGroup title={copy.settingsUpdates}>
+        <SettingsField label={copy.settingsManualUpdate} action>
+          <UpdateSettings copy={copy} />
+        </SettingsField>
+      </SettingsGroup>
+      <div className="mt-6 overflow-hidden rounded-xl border border-border">
         <LinkRow
           copy={copy}
           icon={<CircleAlert className="size-4" aria-hidden="true" />}
@@ -159,9 +98,6 @@ export function AboutSettings({ copy }: { copy: Messages }) {
           onOpen={() => api.openGithub()}
         />
       </div>
-      <p className="text-sm text-muted-foreground">
-        {copy.aboutAuthor}: <span className="text-foreground">{copy.authorName}</span>
-      </p>
     </div>
   );
 }

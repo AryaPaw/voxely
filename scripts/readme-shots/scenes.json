@@ -1,0 +1,12 @@
+[
+  { "section": "history", "heading": "History" },
+  { "section": "statistics", "heading": "Usage statistics" },
+  { "section": "statistics-chart", "route": "statistics", "heading": "Usage statistics" },
+  { "section": "filters", "heading": "Word replacement" },
+  { "section": "compare", "heading": "Compare" },
+  { "section": "audio", "heading": "Recording and audio" },
+  { "section": "general", "heading": "General" },
+  { "section": "transcription", "heading": "Transcription" },
+  { "section": "about", "heading": "About" },
+  { "section": "hud", "heading": "Recording" }
+]

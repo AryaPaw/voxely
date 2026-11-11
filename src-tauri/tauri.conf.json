@@ -4,9 +4,9 @@
   "version": "../package.json",
   "identifier": "com.voxely.desktop",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": "bun run --bun dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run build",
+    "beforeBuildCommand": "bun run --bun build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -19,6 +19,8 @@
         "minWidth": 720,
         "minHeight": 520,
         "center": true,
+        "decorations": false,
+        "shadow": true,
         "visible": false
       }
     ],

@@ -18,6 +18,8 @@ pub struct AppSettings {
     pub input_device: String,
     pub keep_original_recordings: bool,
     pub theme: String,
+    #[serde(default)]
+    pub accent_color: AccentColor,
     pub language: String,
     pub model: String,
     pub custom_model: Option<String>,
@@ -47,6 +49,31 @@ pub struct AppSettings {
     pub compare_models: Vec<String>,
     #[serde(default)]
     pub write_seq: u64,
+}
+
+// The generated palette is shared by React and native consumers.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AccentColor {
+    pub family: String,
+    pub shade: u16,
+}
+fn accent_presets() -> &'static serde_json::Value {
+    static PRESETS: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
+    PRESETS.get_or_init(|| {
+        serde_json::from_str(include_str!("../../src/lib/accent-presets.json"))
+            .expect("generated accent palette")
+    })
+}
+impl Default for AccentColor {
+    fn default() -> Self {
+        serde_json::from_value(accent_presets()["default"].clone())
+            .expect("generated default accent")
+    }
+}
+impl AccentColor {
+    pub(crate) fn preset(&self) -> Option<&'static serde_json::Value> {
+        accent_presets()["presets"].get(format!("{}-{}", self.family, self.shade))
+    }
 }
 
 fn default_retention_policy_confirmed() -> bool {
@@ -149,6 +176,7 @@ impl Default for AppSettings {
             input_device: "default".into(),
             keep_original_recordings: true,
             theme: "dark".into(),
+            accent_color: AccentColor::default(),
             language: "auto".into(),
             model: "openai/gpt-transcribe".into(),
             custom_model: None,
@@ -163,7 +191,7 @@ impl Default for AppSettings {
             active_preset_id: "stt-optimized".into(),
             presets: vec![DspPreset::stt_fast(), DspPreset::stt_optimized()],
             first_run_complete: false,
-            config_revision: 8,
+            config_revision: 9,
             mic_tune: MicTune::default(),
             ui_language: default_ui_language(),
             auto_update_enabled: default_auto_update(),
@@ -200,6 +228,9 @@ impl AppSettings {
             }
         };
         let original_revision = loaded.config_revision;
+        if (4..9).contains(&original_revision) {
+            backup_settings_text(path, "bak", text.as_bytes())?;
+        }
         if original_revision < 6 {
             if original_revision < 4 && path.exists() {
                 let original =
@@ -233,6 +264,10 @@ impl AppSettings {
         if original_revision < 8 {
             loaded.config_revision = 8;
         }
+        if original_revision < 9 {
+            loaded.migrate_honest_dsp_and_insert();
+            loaded.config_revision = 9;
+        }
         let timeout_changed = loaded.apply_connect_timeout_floor();
         if loaded.retry.validate().is_err()
             || loaded.mic_tune.validate().is_err()
@@ -243,7 +278,7 @@ impl AppSettings {
             recovered.retention_policy_confirmed = false;
             return Ok((recovered, true));
         }
-        if original_revision < 8 || timeout_changed {
+        if original_revision < 9 || timeout_changed {
             let _ = loaded.save(path);
         }
         let recovered = !loaded.retention_policy_confirmed;
@@ -324,7 +359,10 @@ impl AppSettings {
     }
 
     pub fn migrate_honest_dsp_and_insert(&mut self) {
-        if self.insertion_mode == "auto" || self.insertion_mode == "sendinput" {
+        if matches!(
+            self.insertion_mode.as_str(),
+            "auto" | "sendinput" | "clipboard"
+        ) {
             self.insertion_mode = "unicode".into();
         }
     }
@@ -368,6 +406,11 @@ impl AppSettings {
 
 pub(crate) fn validate_settings_graph(settings: &AppSettings) -> Result<(), AppError> {
     settings.silence_compression.validate()?;
+    if settings.accent_color.preset().is_none() {
+        return Err(AppError::RequestValidationFailed(
+            "invalid accent color".into(),
+        ));
+    }
     let invalid = |message: &str| AppError::RequestValidationFailed(message.into());
     if !matches!(settings.theme.as_str(), "light" | "dark" | "system")
         || !matches!(settings.ui_language.as_str(), "auto" | "ru" | "en")
@@ -497,6 +540,33 @@ fn backup_settings_text(path: &Path, kind: &str, contents: &[u8]) -> Result<Path
 #[cfg(test)]
 mod tests {
     #[test]
+    fn legacy_settings_get_default_accent_and_persist_custom_choice() {
+        let mut value = serde_json::to_value(AppSettings::default()).unwrap();
+        value.as_object_mut().unwrap().remove("accentColor");
+        let mut settings: AppSettings = serde_json::from_value(value).unwrap();
+        assert_eq!(
+            settings.accent_color,
+            AccentColor {
+                family: "sky".into(),
+                shade: 500
+            }
+        );
+        settings.accent_color = AccentColor {
+            family: "violet".into(),
+            shade: 400,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        settings.save(&path).unwrap();
+        assert_eq!(
+            AppSettings::load(&path).unwrap().accent_color,
+            settings.accent_color
+        );
+        settings.accent_color.shade = 950;
+        assert!(validate_settings_graph(&settings).is_err());
+    }
+
+    #[test]
     fn semantic_invalid_settings_recover_and_keep_retention_guard_after_save() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.json");
@@ -576,7 +646,7 @@ mod tests {
         assert_eq!(loaded.theme, "dark");
         assert_eq!(loaded.retention, "3d");
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 8);
+        assert_eq!(loaded.config_revision, 9);
         assert_eq!(loaded.mic_tune, MicTune::default());
         assert_eq!(loaded.retry.request_timeout_ms, 20_000);
         assert_eq!(loaded.retry.total_operation_timeout_ms, 12 * 60 * 1000);
@@ -595,7 +665,7 @@ mod tests {
         assert_eq!(loaded.theme, "system");
         assert_eq!(loaded.retention, "30d");
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 8);
+        assert_eq!(loaded.config_revision, 9);
     }
 
     #[test]
@@ -622,7 +692,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 8);
+        assert_eq!(loaded.config_revision, 9);
         let quality = loaded
             .presets
             .iter()
@@ -646,7 +716,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.active_preset_id, "stt-fast");
-        assert_eq!(loaded.config_revision, 8);
+        assert_eq!(loaded.config_revision, 9);
     }
 
     #[test]
@@ -663,7 +733,7 @@ mod tests {
         std::fs::write(&path, serde_json::to_vec_pretty(&settings).unwrap()).unwrap();
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.active_preset_id, "stt-optimized");
-        assert_eq!(loaded.config_revision, 8);
+        assert_eq!(loaded.config_revision, 9);
         assert!(loaded
             .presets
             .iter()
@@ -682,7 +752,7 @@ mod tests {
         let loaded = AppSettings::load(&path).unwrap();
         assert_eq!(loaded.retry.request_timeout_ms, 20_000);
         assert_eq!(loaded.retry.total_operation_timeout_ms, 12 * 60 * 1000);
-        assert_eq!(loaded.config_revision, 8);
+        assert_eq!(loaded.config_revision, 9);
     }
 
     #[test]
@@ -747,5 +817,33 @@ mod tests {
         assert!(reset.first_run_complete);
         let full = AppSettings::reset_user_settings(false);
         assert!(!full.first_run_complete);
+    }
+    #[test]
+    fn revision_nine_migrates_clipboard_and_grouped_rules_with_backup() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut legacy = serde_json::to_value(AppSettings::default()).unwrap();
+        legacy["configRevision"] = serde_json::json!(8);
+        legacy["insertionMode"] = serde_json::json!("clipboard");
+        legacy["textReplacements"] = serde_json::json!({"enabled":true,"rules":crate::text_replacements::TextReplacementSettings::russian_formal_rules()});
+        let original = serde_json::to_vec(&legacy).unwrap();
+        std::fs::write(&path, &original).unwrap();
+        let loaded = AppSettings::load(&path).unwrap();
+        assert_eq!(loaded.config_revision, 9);
+        assert_eq!(loaded.insertion_mode, "unicode");
+        assert!(loaded.text_replacements.groups[0].enabled);
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert!(saved["textReplacements"].get("rules").is_none());
+        let backup = dir
+            .path()
+            .read_dir()
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|entry| entry.file_name().to_string_lossy().contains(".bak-"))
+            .unwrap();
+        assert_eq!(std::fs::read(backup.path()).unwrap(), original);
+        assert_eq!(AppSettings::load(&path).unwrap(), loaded);
+        assert_eq!(dir.path().read_dir().unwrap().count(), 2);
     }
 }

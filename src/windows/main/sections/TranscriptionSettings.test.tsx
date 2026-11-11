@@ -51,7 +51,7 @@ function settings(patch: Partial<AppSettings> = {}): AppSettings {
       maxRetryDelayMs: 8000,
       totalOperationTimeoutMs: 720000,
     },
-    textReplacements: { enabled: false, rules: [] },
+    textReplacements: { enabled: false, groups: [] },
     activePresetId: "stt-fast",
     presets: [],
     firstRunComplete: true,

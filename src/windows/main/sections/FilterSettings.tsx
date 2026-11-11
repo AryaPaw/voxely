@@ -15,6 +15,7 @@ import {
   resolveUiLocale,
   type Messages,
 } from "../../../lib/i18n";
+import { SettingsField } from "../../../components/settings/SettingsField";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { SettingsSwitchRow } from "../../../components/settings/SettingsSwitchRow";
 import { Button } from "../../../components/ui/button";
@@ -67,14 +68,16 @@ export function FilterSettings({
   );
 }
 
-function AudioFilterSettings({
+export function AudioFilterSettings({
   settings,
   copy,
   onChange,
+  onOpenHistory,
 }: {
   settings: AppSettings;
   copy: Messages;
   onChange: (patch: Partial<AppSettings>) => void;
+  onOpenHistory?: () => void;
 }) {
   const [preview, setPreview] = useState<DspPreview | null>(null);
   const [previewError, setPreviewError] = useState("");
@@ -192,104 +195,14 @@ function AudioFilterSettings({
   }
 
   return (
-    <section className="rounded-xl border border-border bg-card p-4">
-      <label className="mb-5 flex flex-wrap items-center justify-between gap-3">
-        <span className="text-sm font-medium">{copy.activePreset}</span>
-        <div className="w-60 max-w-full">
-          <SimpleSelect
-            aria-label={copy.activePreset}
-            value={settings.activePresetId}
-            onValueChange={(activePresetId) => onChange({ activePresetId })}
-            options={settings.presets.map((item) => ({
-              value: item.id,
-              label: factoryPresetLabel(item, copy),
-            }))}
-          />
-        </div>
-      </label>
-      {preset ? (
-        <>
-          <div className="grid gap-x-6 sm:grid-cols-2">
-            <TuneSlider
-              label={copy.gainDb.replace("{value}", preset.gain.db.toFixed(1))}
-              min={-12}
-              max={18}
-              step={0.5}
-              value={preset.gain.db}
-              onChange={(db) => patchPreset({ ...preset, gain: { ...preset.gain, db } })}
-            />
-            <TuneSlider
-              label={copy.highpass.replace("{value}", String(Math.round(preset.highPass.cutoffHz)))}
-              min={20}
-              max={200}
-              step={5}
-              value={preset.highPass.cutoffHz}
-              onChange={(cutoffHz) =>
-                patchPreset({
-                  ...preset,
-                  highPass: { ...preset.highPass, cutoffHz },
-                  order: setSlot(preset.order, "highPass", true),
-                })
-              }
-            />
-          </div>
-          <div className="grid gap-x-6 sm:grid-cols-2">
-            <SettingsSwitchRow
-              label={copy.filterRnnoise}
-              checked={slotEnabled(preset, "rnnoise")}
-              onCheckedChange={(enabled) =>
-                patchPreset({ ...preset, order: setSlot(preset.order, "rnnoise", enabled) })
-              }
-            />
-            <SettingsSwitchRow
-              label={copy.filterCompressor}
-              checked={slotEnabled(preset, "compressor")}
-              onCheckedChange={(enabled) =>
-                patchPreset({ ...preset, order: setSlot(preset.order, "compressor", enabled) })
-              }
-            />
-            <SettingsSwitchRow
-              label={copy.filterExpander}
-              checked={slotEnabled(preset, "expander")}
-              onCheckedChange={(enabled) =>
-                patchPreset({ ...preset, order: setSlot(preset.order, "expander", enabled) })
-              }
-            />
-            <SettingsSwitchRow
-              label={copy.filterGate}
-              checked={slotEnabled(preset, "gate")}
-              onCheckedChange={(enabled) =>
-                patchPreset({ ...preset, order: setSlot(preset.order, "gate", enabled) })
-              }
-            />
-            <SettingsSwitchRow
-              label={copy.filterLimiter}
-              checked={slotEnabled(preset, "limiter")}
-              onCheckedChange={(enabled) =>
-                patchPreset({ ...preset, order: setSlot(preset.order, "limiter", enabled) })
-              }
-            />
-          </div>
-          <TuneSlider
-            label={copy.filterRnnoiseMix.replace(
-              "{value}",
-              String(Math.round((preset.rnnoiseMix ?? 1) * 100)),
-            )}
-            min={0}
-            max={1}
-            step={0.05}
-            value={preset.rnnoiseMix ?? 1}
-            onChange={(rnnoiseMix) => patchPreset({ ...preset, rnnoiseMix })}
-          />
-        </>
-      ) : null}
-      <div className="border-t border-border pt-3">
+    <section className="mt-6 rounded-xl border border-border bg-card p-4">
+      <div className="space-y-3">
         <SettingsSwitchRow
           label={copy.silenceCompressionTitle}
+          description={copy.silenceCompressionHint}
           checked={silence.enabled}
           onCheckedChange={(enabled) => onChange({ silenceCompression: { ...silence, enabled } })}
         />
-        <p className="mb-3 text-xs text-muted-foreground">{copy.silenceCompressionHint}</p>
         <TuneSlider
           label={copy.silenceCompressionPause.replace(
             "{value}",
@@ -304,8 +217,107 @@ function AudioFilterSettings({
           disabled={!silence.enabled}
           onChange={(maxPauseMs) => onChange({ silenceCompression: { ...silence, maxPauseMs } })}
         />
+        <p className="mt-2 text-xs text-muted-foreground">{copy.silencePreviewHint}</p>
+        {onOpenHistory ? (
+          <Button variant="link" className="px-0" onClick={onOpenHistory}>
+            {copy.navHistory}
+          </Button>
+        ) : null}
       </div>
-      <div className="mt-1 flex flex-wrap items-center gap-3 border-t border-border pt-4">
+      <details className="settings-disclosure">
+        <summary>{copy.settingsProcessing}</summary>
+        <SettingsField label={copy.activePreset}>
+          <SimpleSelect
+            aria-label={copy.activePreset}
+            value={settings.activePresetId}
+            onValueChange={(activePresetId) => onChange({ activePresetId })}
+            options={settings.presets.map((item) => ({
+              value: item.id,
+              label: factoryPresetLabel(item, copy),
+            }))}
+          />
+        </SettingsField>
+        {preset ? (
+          <>
+            <div className="grid gap-x-6 sm:grid-cols-2">
+              <TuneSlider
+                label={copy.gainDb.replace("{value}", preset.gain.db.toFixed(1))}
+                min={-12}
+                max={18}
+                step={0.5}
+                value={preset.gain.db}
+                onChange={(db) => patchPreset({ ...preset, gain: { ...preset.gain, db } })}
+              />
+              <TuneSlider
+                label={copy.highpass.replace(
+                  "{value}",
+                  String(Math.round(preset.highPass.cutoffHz)),
+                )}
+                min={20}
+                max={200}
+                step={5}
+                value={preset.highPass.cutoffHz}
+                onChange={(cutoffHz) =>
+                  patchPreset({
+                    ...preset,
+                    highPass: { ...preset.highPass, cutoffHz },
+                    order: setSlot(preset.order, "highPass", true),
+                  })
+                }
+              />
+            </div>
+            <div className="grid gap-x-6 sm:grid-cols-2">
+              <SettingsSwitchRow
+                label={copy.filterRnnoise}
+                checked={slotEnabled(preset, "rnnoise")}
+                onCheckedChange={(enabled) =>
+                  patchPreset({ ...preset, order: setSlot(preset.order, "rnnoise", enabled) })
+                }
+              />
+              <SettingsSwitchRow
+                label={copy.filterCompressor}
+                checked={slotEnabled(preset, "compressor")}
+                onCheckedChange={(enabled) =>
+                  patchPreset({ ...preset, order: setSlot(preset.order, "compressor", enabled) })
+                }
+              />
+              <SettingsSwitchRow
+                label={copy.filterExpander}
+                checked={slotEnabled(preset, "expander")}
+                onCheckedChange={(enabled) =>
+                  patchPreset({ ...preset, order: setSlot(preset.order, "expander", enabled) })
+                }
+              />
+              <SettingsSwitchRow
+                label={copy.filterGate}
+                checked={slotEnabled(preset, "gate")}
+                onCheckedChange={(enabled) =>
+                  patchPreset({ ...preset, order: setSlot(preset.order, "gate", enabled) })
+                }
+              />
+              <SettingsSwitchRow
+                label={copy.filterLimiter}
+                checked={slotEnabled(preset, "limiter")}
+                onCheckedChange={(enabled) =>
+                  patchPreset({ ...preset, order: setSlot(preset.order, "limiter", enabled) })
+                }
+              />
+            </div>
+            <TuneSlider
+              label={copy.filterRnnoiseMix.replace(
+                "{value}",
+                String(Math.round((preset.rnnoiseMix ?? 1) * 100)),
+              )}
+              min={0}
+              max={1}
+              step={0.05}
+              value={preset.rnnoiseMix ?? 1}
+              onChange={(rnnoiseMix) => patchPreset({ ...preset, rnnoiseMix })}
+            />
+          </>
+        ) : null}
+      </details>
+      <div className="mt-4 flex flex-wrap items-center gap-3">
         <Button disabled={busy} onClick={() => void toggleSample()}>
           {recording ? copy.stopSample : copy.recordSample}
         </Button>
@@ -321,7 +333,11 @@ function AudioFilterSettings({
           {sampleError.includes("no filter sample") ? copy.noFilterSample : sampleError}
         </p>
       ) : null}
-      {preview ? <FilterPreviewPlayer preview={preview} copy={copy} /> : null}
+      {preview ? (
+        <FilterPreviewPlayer preview={preview} copy={copy} />
+      ) : !recording && !previewError ? (
+        <p className="mt-3 text-xs text-muted-foreground">{copy.noFilterSample}</p>
+      ) : null}
     </section>
   );
 }
@@ -519,7 +535,7 @@ function TuneSlider({
   disabled?: boolean;
 }) {
   return (
-    <div className="mb-5">
+    <div className="space-y-2 py-3">
       <Label className="mb-1 text-sm">{label}</Label>
       <Slider
         disabled={disabled}

@@ -1,6 +1,7 @@
 use chrono::{Duration, Utc};
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::{Arc, Weak};
 
 use super::repository::{HistoryRepo, Recording};
 use crate::error::AppError;
@@ -25,7 +26,110 @@ impl Retention {
 }
 
 pub fn keep_temp_wav(name: &str) -> bool {
-    name == "filter-sample.wav" || name.starts_with("filter-preview")
+    name == "filter-sample.wav"
+        || (name.starts_with("filter-preview") && !generated_filter_preview_name(name))
+}
+
+/// Only generated preview files belong to this lease. Retained dictation audio
+/// and the filter sample can never be passed to its destructor.
+#[derive(Debug)]
+pub(crate) struct FilterPreviewLease {
+    root: std::path::PathBuf,
+    revision: uuid::Uuid,
+}
+impl FilterPreviewLease {
+    pub(crate) fn new(root: &Path) -> Result<Arc<Self>, AppError> {
+        let root = root
+            .canonicalize()
+            .map_err(|error| AppError::StorageFailed(error.to_string()))?;
+        for _ in 0..3 {
+            let revision = uuid::Uuid::new_v4();
+            if Self::names_for(revision).iter().all(|name| {
+                std::fs::symlink_metadata(root.join(name))
+                    .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+            }) {
+                return Ok(Arc::new(Self { root, revision }));
+            }
+        }
+        Err(AppError::StorageFailed(
+            "Couldn't reserve unique filter preview paths".into(),
+        ))
+    }
+    fn names(&self) -> [String; 4] {
+        Self::names_for(self.revision)
+    }
+    fn names_for(revision: uuid::Uuid) -> [String; 4] {
+        [
+            format!("filter-preview-{revision}-original.wav"),
+            format!("filter-preview-{revision}.wav"),
+            format!("filter-preview-{revision}-original.wav.tmp"),
+            format!("filter-preview-{revision}.wav.tmp"),
+        ]
+    }
+    pub(crate) fn paths(&self) -> (std::path::PathBuf, std::path::PathBuf) {
+        let names = self.names();
+        (self.root.join(&names[0]), self.root.join(&names[1]))
+    }
+}
+impl Drop for FilterPreviewLease {
+    fn drop(&mut self) {
+        // Reject a replaced root and validate each UUID basename independently.
+        if self.root.canonicalize().ok().as_ref() != Some(&self.root) {
+            return;
+        }
+        for name in self.names() {
+            if !generated_filter_preview_name(&name) {
+                continue;
+            }
+            let Some(path) = safe_audio_path(&self.root, &name) else {
+                continue;
+            };
+            if let Err(error) = std::fs::remove_file(&path) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!(%error, "Generated filter preview cleanup deferred to orphan maintenance");
+                }
+            }
+        }
+    }
+}
+
+/// One artifact owner with weak leases for native views and a retained latest
+/// result for the legacy serialized-path API. No DSP/settings state is copied.
+#[derive(Default)]
+pub(crate) struct FilterPreviewOwner {
+    generation: u64,
+    legacy: Option<Arc<FilterPreviewLease>>,
+    leases: Vec<Weak<FilterPreviewLease>>,
+}
+impl FilterPreviewOwner {
+    pub(crate) fn reserve(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.generation
+    }
+    pub(crate) fn is_current(&self, generation: u64) -> bool {
+        self.generation == generation
+    }
+    pub(crate) fn publish(&mut self, lease: &Arc<FilterPreviewLease>, legacy: bool) {
+        self.leases.retain(|lease| lease.strong_count() > 0);
+        self.leases.push(Arc::downgrade(lease));
+        self.legacy = legacy.then(|| lease.clone());
+    }
+    pub(crate) fn invalidate(&mut self) {
+        self.reserve();
+        self.legacy.take();
+    }
+    pub(crate) fn protected_names(&mut self) -> Vec<String> {
+        let mut names = Vec::new();
+        self.leases.retain(|weak| {
+            if let Some(lease) = weak.upgrade() {
+                names.extend(lease.names());
+                true
+            } else {
+                false
+            }
+        });
+        names
+    }
 }
 
 pub fn keep_compare_temp_wav(name: &str) -> bool {
@@ -116,7 +220,7 @@ fn plan_retention(
         path.is_file().then(|| name.clone())
     }));
     let protected_bytes = file_names_bytes(audio_root, &protected_paths);
-    let total_audio_bytes = audio_inventory_bytes(audio_root);
+    let total_audio_bytes = audio_inventory_bytes(audio_root, protected_names);
     let mut planned_ids = HashSet::new();
     let mut selected = Vec::new();
     let mut planned_bytes = 0u64;
@@ -302,7 +406,7 @@ fn processing_tmp_keep(known: &[Recording], name: &str) -> bool {
     })
 }
 
-fn audio_inventory_bytes(audio_root: &Path) -> u64 {
+fn audio_inventory_bytes(audio_root: &Path, protected_names: &HashSet<String>) -> u64 {
     let Ok(entries) = std::fs::read_dir(audio_root) else {
         return 0;
     };
@@ -311,6 +415,11 @@ fn audio_inventory_bytes(audio_root: &Path) -> u64 {
         .filter_map(|entry| {
             let name = entry.file_name();
             let name = name.to_string_lossy();
+            // An abandoned generated cache file isn't retained history. A
+            // sharing violation during later cleanup must never evict real audio.
+            if generated_filter_preview_name(&name) && !protected_names.contains(name.as_ref()) {
+                return None;
+            }
             let metadata = entry.metadata().ok()?;
             (metadata.is_file() && (name.ends_with(".wav") || name.ends_with(".wav.tmp")))
                 .then_some(metadata.len())
@@ -776,6 +885,11 @@ pub fn cleanup_orphans_except(
         if protected_names.contains(&name) {
             continue;
         }
+        if generated_filter_preview_name(&name) {
+            std::fs::remove_file(entry.path())
+                .map_err(|error| AppError::StorageFailed(error.to_string()))?;
+            continue;
+        }
         if name.ends_with(".tmp") || name.ends_with(".wav.tmp") {
             if processing_tmp_keep(&known, &name) {
                 continue;
@@ -805,6 +919,54 @@ mod tests {
     use crate::history::repository::{new_recording, TranscriptionAttempt};
     use rusqlite::Connection;
     use tempfile::tempdir;
+
+    #[test]
+    fn stale_generated_previews_cannot_evict_history_and_active_leases_survive_cleanup() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("history.sqlite")).unwrap();
+        let mut record = new_recording("fixture/model".into());
+        record.raw_audio_path = Some(format!("{}.raw.wav", record.id));
+        let recording = dir.path().join(record.raw_audio_path.as_ref().unwrap());
+        std::fs::write(&recording, [1; 16]).unwrap();
+        repo.insert(&record).unwrap();
+        let stale = dir
+            .path()
+            .join(format!("filter-preview-{}.wav", uuid::Uuid::new_v4()));
+        std::fs::write(&stale, [2; 200]).unwrap();
+        let preview = preview_retention(
+            &repo,
+            dir.path(),
+            Retention::Forever,
+            Some(32),
+            &HashSet::new(),
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(preview.entries_to_delete, 0);
+        assert_eq!(preview.total_audio_bytes, 16);
+        assert!(
+            apply_retention(&repo, dir.path(), Retention::Forever, Some(32))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(repo.get(&record.id).unwrap().is_some() && recording.is_file());
+        let lease = FilterPreviewLease::new(dir.path()).unwrap();
+        let (original, processed) = lease.paths();
+        std::fs::write(&original, b"original").unwrap();
+        std::fs::write(&processed, b"processed").unwrap();
+        let mut owner = FilterPreviewOwner::default();
+        owner.publish(&lease, false);
+        let protected = owner.protected_names().into_iter().collect();
+        std::fs::write(dir.path().join("filter-sample.wav"), b"sample").unwrap();
+        std::fs::write(dir.path().join("filter-preview-user-note.wav"), b"unowned").unwrap();
+        cleanup_orphans_except(dir.path(), &repo, &protected).unwrap();
+        assert!(!stale.exists());
+        assert!(recording.is_file() && original.is_file() && processed.is_file());
+        assert!(dir.path().join("filter-sample.wav").is_file());
+        assert!(dir.path().join("filter-preview-user-note.wav").is_file());
+        drop(lease);
+        assert!(!original.exists() && !processed.exists());
+    }
 
     #[test]
     fn retention_preview_serializes_with_camel_case_wire_fields() {

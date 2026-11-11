@@ -32,7 +32,7 @@ export function FirstRunDisclosure({
       className="mx-6 mt-5 rounded-xl border border-primary/25 bg-primary/[0.06] p-4 shadow-sm"
     >
       <div className="flex items-start gap-3">
-        <Info aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
+        <Info aria-hidden="true" className="mt-0.5 h-5 w-5 shrink-0 text-primary-text" />
         <div className="min-w-0 flex-1">
           <h2 id="first-run-disclosure-title" className="text-sm font-semibold">
             {copy.firstRunDisclosureTitle}

@@ -69,6 +69,8 @@ pub struct AppContext {
     pub settings_write_gate: Mutex<()>,
     pub captured_target: Mutex<Option<CapturedTarget>>,
     pub overlay: Mutex<OverlayLifecycle>,
+    #[cfg(windows)]
+    pub native_hud: Mutex<Option<crate::windows_int::native_hud::NativeHud>>,
     pub in_flight: Mutex<HashSet<String>>,
     pub transport: Mutex<OpenRouterTransport>,
     pub overlay_timeline: Mutex<OverlayTimeline>,
@@ -80,8 +82,9 @@ pub struct AppContext {
     pub abort_start: AtomicBool,
     pub session_generation: AtomicU64,
     pub shortcut_sync_generation: AtomicU64,
+    pub shortcut_capture_epoch: AtomicU64,
     pub applied_shortcut_layout: Mutex<Option<crate::app::shortcuts::ShortcutLayout>>,
-    pub pending_session_command: Mutex<Option<crate::app::shortcuts::SessionCommand>>,
+    pub pending_session_command: Mutex<Option<crate::app::shortcuts::QueuedSessionCommand>>,
     pub preview_capture: Mutex<Option<CaptureSession>>,
     pub compare_capture: Mutex<Option<CaptureSession>>,
     pub compare_cancel: Mutex<Option<tokio::sync::watch::Sender<bool>>>,
@@ -101,6 +104,7 @@ pub struct AppContext {
     pub meter_owner: Mutex<Option<String>>,
     pub insert_in_flight: AtomicBool,
     pub filter_generation: AtomicU64,
+    pub(crate) filter_previews: Mutex<crate::history::retention::FilterPreviewOwner>,
     pub update_gate: tokio::sync::Mutex<bool>,
     pub update_installing: AtomicBool,
     pub settings_recovery: Mutex<bool>,
@@ -146,6 +150,8 @@ impl AppContext {
             settings_write_gate: Mutex::new(()),
             captured_target: Mutex::new(None),
             overlay: Mutex::new(OverlayLifecycle::default()),
+            #[cfg(windows)]
+            native_hud: Mutex::new(None),
             in_flight: Mutex::new(HashSet::new()),
             transport: Mutex::new(transport),
             overlay_timeline: Mutex::new(OverlayTimeline::default()),
@@ -157,6 +163,7 @@ impl AppContext {
             abort_start: AtomicBool::new(false),
             session_generation: AtomicU64::new(0),
             shortcut_sync_generation: AtomicU64::new(0),
+            shortcut_capture_epoch: AtomicU64::new(0),
             applied_shortcut_layout: Mutex::new(None),
             pending_session_command: Mutex::new(None),
             preview_capture: Mutex::new(None),
@@ -178,6 +185,7 @@ impl AppContext {
             meter_owner: Mutex::new(None),
             insert_in_flight: AtomicBool::new(false),
             filter_generation: AtomicU64::new(0),
+            filter_previews: Mutex::new(Default::default()),
             update_gate: tokio::sync::Mutex::new(false),
             update_installing: AtomicBool::new(false),
             settings_recovery: Mutex::new(recovered),
@@ -234,8 +242,24 @@ pub fn toggle_recording(app: &AppHandle) -> Result<(), AppError> {
 }
 
 pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
+    cancel_recording_checked(app, None)
+}
+
+#[cfg(windows)]
+pub fn cancel_recording_from_hud(
+    app: &AppHandle,
+    generation: u64,
+    epoch: u64,
+) -> Result<(), AppError> {
+    cancel_recording_checked(app, Some((generation, epoch)))
+}
+
+fn cancel_recording_checked(app: &AppHandle, ticket: Option<(u64, u64)>) -> Result<(), AppError> {
     let ctx = app.state::<Arc<AppContext>>();
     let _session_lifecycle = ctx.session_lifecycle.lock();
+    if ticket.is_some_and(|ticket| !hud_cancel_ticket_matches(&ctx, ticket)) {
+        return Ok(());
+    }
     let _admission = crate::app::operations::lock_admission(&ctx);
     ctx.session_generation.fetch_add(1, Ordering::SeqCst);
     if let Some(tx) = ctx.cancel_tx.lock().as_ref() {
@@ -320,6 +344,15 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
             Ok(())
         }
     }
+}
+
+// Caller holds session_lifecycle, including through cancellation's state mutation.
+fn hud_cancel_ticket_matches(ctx: &AppContext, (generation, epoch): (u64, u64)) -> bool {
+    let overlay = *ctx.overlay.lock();
+    generation == ctx.session_generation.load(Ordering::SeqCst)
+        && epoch == overlay.epoch
+        && overlay.visible
+        && is_cancellable(&ctx.state.lock())
 }
 
 fn stop_cancelled_capture(
@@ -1924,6 +1957,15 @@ fn overlay_native_hwnd(app: &AppHandle) -> Option<NativeHwnd> {
 }
 
 fn native_hwnd_for_label(app: &AppHandle, label: &str) -> Option<NativeHwnd> {
+    #[cfg(windows)]
+    if label == "overlay" {
+        if let Some(ctx) = app.try_state::<Arc<AppContext>>() {
+            if let Some(hud) = ctx.native_hud.lock().as_ref() {
+                let value = hud.hwnd() as usize;
+                return (value != 0).then_some(NativeHwnd { value });
+            }
+        }
+    }
     let window = app.get_webview_window(label)?;
     let hwnd = window.hwnd().ok()?;
     Some(NativeHwnd {
@@ -2035,6 +2077,15 @@ fn show_overlay(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
     ctx.overlay.lock().show();
     ctx.overlay_timeline.lock().mark_window_created();
+    #[cfg(windows)]
+    {
+        let mut native = ctx.native_hud.lock();
+        if native.as_ref().is_some_and(|hud| hud.hwnd() != 0) {
+            return;
+        }
+        // An exited experimental renderer must never suppress the standard HUD.
+        native.take();
+    }
     if let Some(window) = app.get_webview_window("overlay") {
         reveal_overlay(&window);
         ctx.emit_overlay(app);
@@ -2080,6 +2131,10 @@ fn overlay_url() -> WebviewUrl {
 }
 
 pub fn prepare_overlay_window(app: &AppHandle) {
+    #[cfg(windows)]
+    if crate::app::native_hud::prepare(app) {
+        return;
+    }
     if let Some(window) = app.get_webview_window("overlay") {
         decorate_overlay(&window);
         position_overlay(&window);
@@ -2760,6 +2815,9 @@ async fn run_transcription(
     attempt_offset: u32,
     cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<crate::transcription::openrouter::TranscriptionSuccess, AppError> {
+    let upload_duration = crate::audio::capture::capture_wav_duration_ms(path)? as i64;
+    let original_duration = i64::try_from(audio_duration.as_millis())
+        .map_err(|_| AppError::AudioProcessingFailed("audio duration overflow".into()))?;
     let client = {
         let ctx = app.state::<Arc<AppContext>>();
         ctx.clone_transport_client()?
@@ -2781,6 +2839,18 @@ async fn run_transcription(
         cancel,
         move |progress| {
             let ctx = app_for_progress.state::<Arc<AppContext>>();
+            if matches!(&progress, SttProgress::Attempt(_)) {
+                if let Err(error) = ctx.history.lock().record_silence_metrics(
+                    &recording_id_owned,
+                    original_duration,
+                    upload_duration,
+                ) {
+                    let mut stored = persistence_error_for_callback.lock();
+                    if stored.is_none() {
+                        *stored = Some(error);
+                    }
+                }
+            }
             let progress = offset_attempt_number(progress, attempt_offset);
             if let Err(err) = emit_stt_progress(
                 &ctx,
@@ -3836,6 +3906,10 @@ fn write_stt_upload(
 
 #[cfg(all(test, windows))]
 mod overlay_visual_tests;
+
+#[cfg(all(test, windows))]
+#[path = "../../../scripts/readme-shots/native.rs"]
+mod readme_shots;
 
 #[cfg(test)]
 mod tests {
@@ -5290,6 +5364,32 @@ mod tests {
         capture.stop().unwrap();
         assert_eq!(*ctx.captured_target.lock(), Some(next));
         assert_eq!(ctx.session_generation.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn hud_cancel_rejects_stale_sessions_hidden_hud_and_completed_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let _lifecycle = ctx.session_lifecycle.lock();
+        ctx.session_generation.store(7, Ordering::SeqCst);
+        *ctx.state.lock() = SessionState::Recording;
+        ctx.overlay.lock().show();
+        let epoch = ctx.overlay.lock().epoch;
+        assert!(hud_cancel_ticket_matches(&ctx, (7, epoch)));
+        assert!(!hud_cancel_ticket_matches(&ctx, (6, epoch)));
+        assert!(!hud_cancel_ticket_matches(
+            &ctx,
+            (7, epoch.saturating_sub(1))
+        ));
+        ctx.overlay.lock().hide();
+        let hidden_epoch = ctx.overlay.lock().epoch;
+        assert!(!hud_cancel_ticket_matches(&ctx, (7, hidden_epoch)));
+        ctx.overlay.lock().show();
+        let next_epoch = ctx.overlay.lock().epoch;
+        assert!(!hud_cancel_ticket_matches(&ctx, (7, epoch)));
+        *ctx.state.lock() = SessionState::Completed;
+        assert!(!hud_cancel_ticket_matches(&ctx, (7, next_epoch)));
+        assert_eq!(ctx.session_generation.load(Ordering::SeqCst), 7);
     }
 
     #[test]

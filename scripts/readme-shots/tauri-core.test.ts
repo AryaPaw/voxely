@@ -1,9 +1,21 @@
 import { describe, expect, it } from "vitest";
 import { invoke, convertFileSrc } from "./tauri-core";
 import { listen } from "./tauri-event";
-import type { AppSettings, CompareState, UsageStatistics } from "../../src/lib/api";
+import type { AppSettings, CompareState, Recording, UsageStatistics } from "../../src/lib/api";
 
 describe("browser fixtures", () => {
+  it("uses varied conversational dictations without artificial paragraph breaks", async () => {
+    const history = await invoke<Recording[]>("list_history");
+    expect(history.every((item) => !/[\r\n!]/.test(item.transcript ?? ""))).toBe(true);
+    expect(history.some((item) => (item.transcript?.length ?? 0) < 60)).toBe(true);
+    expect(history.some((item) => (item.transcript?.length ?? 0) > 300)).toBe(true);
+    expect(history.some((item) => item.transcript?.includes("?"))).toBe(true);
+    const audio = await invoke<string>("recording_audio_url", { id: history[1].id });
+    const pcm = Uint8Array.from(atob(audio.split(",")[1].split("#")[0]), (value) =>
+      value.charCodeAt(0),
+    );
+    expect(new DataView(pcm.buffer).getUint32(40, true)).toBe(history[1].durationMs * 16 * 2);
+  });
   it("publishes compare recording and results for the current clip", async () => {
     const changes: unknown[] = [];
     const unsubscribe = await listen("compare://state", ({ payload }) => changes.push(payload));

@@ -91,6 +91,9 @@ pub(crate) enum Event {
     SetupCompleted,
     Ready,
     StartupFailed,
+    SystemSessionCheckpoint {
+        ready: bool,
+    },
     MainWindowHidden,
     MainWindowHideResult {
         hidden: bool,

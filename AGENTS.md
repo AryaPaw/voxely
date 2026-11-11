@@ -2,6 +2,8 @@
 
 Voxely is a Windows desktop dictation app built with Tauri, Rust, React and Bun. This file is the canonical project instruction source for Codex. Personal defaults remain in `~/.codex/AGENTS.md`; ECC is installed through its native Codex plugin, not copied into this repository.
 
+Эксперимент GPUI удалён. Единственный основной интерфейс – Tauri + React.
+
 ## Scope and Git checkpoints
 
 Inspect Git status before each implementation wave and preserve unrelated staged, unstaged and untracked work. After a coherent green slice, review the diff and applicable verification. When committing is authorized, make a focused conventional commit; don't mix independent changes or include local tooling dumps, credentials, logs or build artifacts.
@@ -30,7 +32,7 @@ After Rust/frontend changes that affect the running app, update the daily driver
 1. If the executable is locked, use `scripts/stop-local-app.ps1` for a PID-bound, idle-only graceful exit, or Quit in the tray for older builds. `rebuild-local-app.ps1 -StopRunning` combines graceful exit and rebuilding. Never force-stop active work or temporarily change persisted `closeToTray`.
 2. Run `bun run rebuild:local-app`.
 3. If it didn't launch the app, run `pwsh -NoProfile -File scripts/start-local-app.ps1`. This launches the exact release executable outside the invoking terminal's Windows Job. Do not substitute plain `Start-Process` from an automation terminal.
-4. Verify the executable path, start time at or after the binary's modification time, and expected main/overlay HWND. The title is `Voxely (local)` or `Voxely (локальная версия)`.
+4. Verify the executable path, start time at or after the binary's modification time, and expected main/overlay HWND. The local title and tray tooltip are `Voxely (Local build)`, independent of UI language; canonical names are in `src/lib/app-identity.json`.
 
 For automation launches, also verify `IsProcessInJob(process, NULL)` is false. Job membership or a nearby automation-host restart alone does not prove a historical exit's cause. If the user reports a remaining defect, recheck the on-screen executable and timestamps first.
 

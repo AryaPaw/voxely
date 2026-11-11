@@ -150,6 +150,21 @@ pub fn dpi_scale_for_hwnd(raw: isize) -> Option<f64> {
 }
 
 #[cfg(windows)]
+pub fn dpi_scale_for_cursor() -> Option<f64> {
+    unsafe {
+        use windows::Win32::Foundation::POINT;
+        use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONEAREST};
+        use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+        let mut point = POINT::default();
+        windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point).ok()?;
+        let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+        let (mut x, mut y) = (0, 0);
+        GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut x, &mut y).ok()?;
+        (x > 0).then_some(f64::from(x) / 96.0)
+    }
+}
+
+#[cfg(windows)]
 pub fn work_area_for_foreground(skip_roots: &[usize]) -> Option<WorkArea> {
     unsafe {
         use windows::Win32::UI::WindowsAndMessaging::{GetAncestor, GetForegroundWindow, GA_ROOT};

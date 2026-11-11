@@ -1,3 +1,7 @@
+let previewPointerMatches = false;
+export function setPreviewPointerMatches(value: boolean) {
+  previewPointerMatches = value;
+}
 import type {
   AppSettings,
   CompareState,
@@ -98,11 +102,20 @@ let settings: AppSettings = {
   activePresetId: "stt-optimized",
   textReplacements: {
     enabled: true,
-    rules: [
-      { from: "voxily", to: "Voxely", caseSensitive: false },
-      { from: "github", to: "GitHub", caseSensitive: false },
-      { from: "open router", to: "OpenRouter", caseSensitive: false },
-      { from: "web view", to: "WebView2", caseSensitive: false },
+    groups: [
+      { id: "system-russian-formal", name: "", presetId: "russian-formal", enabled: true },
+      {
+        id: "terms",
+        name: "Names and terms",
+        enabled: true,
+        presetId: null,
+        rules: [
+          { from: "voxily", to: "Voxely", caseSensitive: false },
+          { from: "github", to: "GitHub", caseSensitive: false },
+          { from: "open router", to: "OpenRouter", caseSensitive: false },
+          { from: "web view", to: "WebView2", caseSensitive: false },
+        ],
+      },
     ],
   },
   presets: [preset, optimizedPreset],
@@ -115,11 +128,11 @@ const history: Recording[] = [
   {
     id: "rec-1",
     createdAt: new Date().toISOString(),
-    durationMs: 40_000,
+    durationMs: 28_000,
     rawAudioPath: "a.wav",
     processedAudioPath: "b.wav",
     transcript:
-      "Quick notes from today's planning call. We agreed to finish onboarding before starting the new dashboard. The first screen should explain the recording shortcut without making people read a whole guide.\n\nI'll put together a prototype tomorrow morning. Please try it when you have a moment and note anything that feels confusing. Let's meet on Thursday to decide what actually needs to be in the release.",
+      "Can you check how the settings are grouped? Recording and microphone options should stay together. I'd put appearance and updates under General. And let's make the save errors clearer, because right now it's hard to tell what actually went wrong. Can you also check that the changes stay saved after restarting the app?",
     status: "completed",
     provider: "openrouter",
     model: "openai/gpt-transcribe",
@@ -136,7 +149,7 @@ const history: Recording[] = [
     durationMs: 4000,
     rawAudioPath: "c.wav",
     processedAudioPath: "d.wav",
-    transcript: "Sounds good, see you at eleven!",
+    transcript: "Yes, that works. Let's keep it like this.",
     status: "completed",
     provider: "openrouter",
     model: "openai/gpt-transcribe",
@@ -150,11 +163,11 @@ const history: Recording[] = [
   {
     id: "rec-3",
     createdAt: new Date(Date.now() - 2 * 60 * 60_000).toISOString(),
-    durationMs: 120_000,
+    durationMs: 41_000,
     rawAudioPath: "e.wav",
     processedAudioPath: "f.wav",
     transcript:
-      "A few notes from today's planning call. We agreed to finish the onboarding changes before starting on the new dashboard. The first screen should explain what happens after you press the recording shortcut, without making people read a whole guide.\n\nFor the dashboard, I'd like to see the daily totals first, with a simple way to switch between the last week and the last month. We should also keep the original recordings available so it's easy to check a transcript later.\n\nI'll put together a small prototype tomorrow morning. Once everyone has had a chance to try it, let's meet on Thursday and decide what actually needs to be in the release.",
+      "I tried both models on the same recording. The second one handled the product names a bit better, but the first one was faster. Could we keep both results so I can compare them later? I'd also like to listen to the version with the pauses removed. Keep the original recording as well, because sometimes I need to check what I actually said. And please check the beginning and the end, so that quiet speech doesn't get cut off.",
     status: "completed",
     provider: "openrouter",
     model: "openai/gpt-transcribe",
@@ -168,11 +181,10 @@ const history: Recording[] = [
   {
     id: "rec-4",
     createdAt: new Date(Date.now() - 26 * 60 * 60_000).toISOString(),
-    durationMs: 35_000,
+    durationMs: 6000,
     rawAudioPath: "g.wav",
     processedAudioPath: "h.wav",
-    transcript:
-      "Remember to pick up coffee and oat milk on the way home. There's still enough pasta for dinner, so we only need tomatoes and something for the salad. If the little bakery is still open, grab a loaf of bread as well. I'll be back around seven, but don't wait for me if you're hungry.",
+    transcript: "Let's check the changes once more, then we can prepare the release.",
     status: "completed",
     provider: "openrouter",
     model: "openai/whisper-large-v3",
@@ -297,6 +309,9 @@ function fixtureUsageStatistics(start: string, end: string): UsageStatistics {
     failed: Math.min(2, totals.dictations),
     interrupted: 0,
     unpricedAttempts,
+    trimmedDurationMs: Math.floor(totals.dictations * 0.8) * 22_000,
+    measuredAudioDurationMs: Math.floor(totals.dictations * 0.8) * 118_000,
+    measuredDictations: Math.floor(totals.dictations * 0.8),
     audioDurationMs: totals.dictations * 118_000,
     daily,
     models: [
@@ -320,6 +335,8 @@ function fixtureUsageStatistics(start: string, end: string): UsageStatistics {
 
 export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): Promise<T> {
   switch (cmd) {
+    case "overlay_pointer_matches":
+      return previewPointerMatches as T;
     case "get_settings":
       return structuredClone(settings) as T;
     case "get_overlay_snapshot":
@@ -330,7 +347,7 @@ export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): P
       } as T;
     case "get_runtime_info":
       return {
-        localBuild: false,
+        localBuild: new URLSearchParams(location.search).get("localBuild") === "1",
         buildDate: new Date().toISOString().slice(0, 10),
         settingsRecovered: false,
       } as T;
@@ -343,7 +360,9 @@ export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): P
       fixtureEmit("settings://changed", settings);
       return structuredClone(settings) as T;
     case "recording_audio_url":
-      return fixtureAudioUrl() as T;
+      return fixtureAudioUrl(
+        (history.find((item) => item.id === _args?.id)?.durationMs ?? 100) / 1000,
+      ) as T;
     case "recording_api_audio":
       await new Promise((resolve) =>
         setTimeout(
@@ -493,4 +512,8 @@ export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): P
 
 export function convertFileSrc(path: string): string {
   return path.startsWith("data:") ? path : fixtureAudioUrl();
+}
+
+export function isTauri(): boolean {
+  return false;
 }

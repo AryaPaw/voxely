@@ -107,6 +107,9 @@ pub struct UsageStatistics {
     pub reported_cost_usd: f64,
     pub unpriced_attempts: i64,
     pub audio_duration_ms: i64,
+    pub trimmed_duration_ms: i64,
+    pub measured_audio_duration_ms: i64,
+    pub measured_dictations: i64,
     pub daily: Vec<UsageStatisticsBucket>,
     pub models: Vec<UsageStatisticsModel>,
 }
@@ -195,12 +198,29 @@ impl HistoryRepo {
         )
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
         ensure_search_text_column(&conn)?;
+        ensure_silence_metrics_columns(&conn)?;
         let repo = Self { conn };
         repo.backfill_search_text()?;
         repo.backfill_usage_statistics()?;
         repo.remove_legacy_cancelled_usage()?;
         repo.prune_usage_statistics(Utc::now() - chrono::Duration::days(90))?;
         Ok(repo)
+    }
+
+    /// First prepared API variant wins, so retries never multiply pause savings.
+    pub fn record_silence_metrics(
+        &self,
+        id: &str,
+        original_ms: i64,
+        upload_ms: i64,
+    ) -> Result<(), AppError> {
+        if original_ms < 0 || upload_ms < 0 {
+            return Err(AppError::RequestValidationFailed(
+                "negative audio duration".into(),
+            ));
+        }
+        self.conn.execute("UPDATE usage_dictations SET prepared_duration_ms=?2,upload_duration_ms=?3 WHERE recording_id=?1 AND prepared_duration_ms IS NULL AND NOT EXISTS(SELECT 1 FROM usage_suppressed WHERE recording_id=?1)", params![id, original_ms, upload_ms.min(original_ms)]).map_err(storage_err)?;
+        Ok(())
     }
 
     pub fn insert(&self, rec: &Recording) -> Result<(), AppError> {
@@ -477,12 +497,15 @@ impl HistoryRepo {
             reported_cost_usd: 0.0,
             unpriced_attempts: 0,
             audio_duration_ms: 0,
+            trimmed_duration_ms: 0,
+            measured_audio_duration_ms: 0,
+            measured_dictations: 0,
             daily: Vec::new(),
             models: Vec::new(),
         };
         let mut daily = std::collections::BTreeMap::<String, UsageStatisticsBucket>::new();
         let mut models = std::collections::BTreeMap::<String, UsageStatisticsModel>::new();
-        let mut stmt = self.conn.prepare("SELECT created_at,model,duration_ms,status,cost_usd FROM usage_dictations WHERE created_at>=?1 AND created_at<?2").map_err(storage_err)?;
+        let mut stmt = self.conn.prepare("SELECT created_at,model,duration_ms,status,cost_usd,prepared_duration_ms,upload_duration_ms FROM usage_dictations WHERE created_at>=?1 AND created_at<?2").map_err(storage_err)?;
         let rows = stmt
             .query_map(params![start_s, end_s], |r| {
                 Ok((
@@ -491,11 +514,18 @@ impl HistoryRepo {
                     r.get::<_, i64>(2)?,
                     r.get::<_, String>(3)?,
                     r.get::<_, Option<f64>>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<i64>>(6)?,
                 ))
             })
             .map_err(storage_err)?;
         for row in rows {
-            let (at, model, duration, status, cost) = row.map_err(storage_err)?;
+            let (at, model, duration, status, cost, prepared, upload) = row.map_err(storage_err)?;
+            if let (Some(prepared), Some(upload)) = (prepared, upload) {
+                stats.measured_dictations += 1;
+                stats.measured_audio_duration_ms += prepared;
+                stats.trimmed_duration_ms += (prepared - upload).max(0);
+            }
             let date = local_date(&at);
             stats.dictations += 1;
             stats.audio_duration_ms += duration.max(0);
@@ -1173,6 +1203,26 @@ impl HistoryRepo {
         }
         total
     }
+}
+
+fn ensure_silence_metrics_columns(conn: &Connection) -> Result<(), AppError> {
+    let mut statement = conn
+        .prepare("PRAGMA table_info(usage_dictations)")
+        .map_err(storage_err)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(storage_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_err)?;
+    for column in ["prepared_duration_ms", "upload_duration_ms"] {
+        if !columns.iter().any(|name| name == column) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE usage_dictations ADD COLUMN {column} INTEGER CHECK({column} >= 0)"
+            ))
+            .map_err(storage_err)?;
+        }
+    }
+    Ok(())
 }
 
 fn ensure_search_text_column(conn: &Connection) -> Result<(), AppError> {
@@ -2424,5 +2474,49 @@ mod tests {
         }
         assert!(repo.get(&old.id).unwrap().is_some());
         assert!(repo.get(&boundary.id).unwrap().is_some());
+    }
+    #[test]
+    fn pause_metrics_are_idempotent_survive_history_retention_and_restart() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("silence.db");
+        let repo = HistoryRepo::open(&path).unwrap();
+        let rec = new_recording("model".into());
+        repo.insert(&rec).unwrap();
+        let old = new_recording("old".into());
+        repo.insert(&old).unwrap();
+        repo.record_silence_metrics(&rec.id, 12000, 4000).unwrap();
+        repo.record_silence_metrics(&rec.id, 12000, 1000).unwrap();
+        assert!(repo.record_silence_metrics(&old.id, -1, 0).is_err());
+        let start = Utc::now() - chrono::Duration::days(1);
+        let end = Utc::now() + chrono::Duration::days(1);
+        let stats = repo.get_usage_statistics(start, end).unwrap();
+        assert_eq!(stats.measured_dictations, 1);
+        assert_eq!(stats.measured_audio_duration_ms, 12000);
+        assert_eq!(stats.trimmed_duration_ms, 8000);
+        repo.conn
+            .execute("DELETE FROM recordings WHERE id=?1", [&rec.id])
+            .unwrap();
+        drop(repo);
+        let repo = HistoryRepo::open(&path).unwrap();
+        assert_eq!(
+            repo.get_usage_statistics(start, end)
+                .unwrap()
+                .trimmed_duration_ms,
+            8000
+        );
+        repo.delete_with_usage(&rec.id).unwrap();
+        assert_eq!(
+            repo.get_usage_statistics(start, end)
+                .unwrap()
+                .trimmed_duration_ms,
+            0
+        );
+        repo.record_silence_metrics(&rec.id, 12000, 0).unwrap();
+        assert_eq!(
+            repo.get_usage_statistics(start, end)
+                .unwrap()
+                .measured_dictations,
+            0
+        );
     }
 }
