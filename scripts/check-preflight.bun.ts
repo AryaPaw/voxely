@@ -143,6 +143,7 @@ describe("verification preflight", () => {
         "rust-toolchain.toml",
         ".gitattributes",
         ".gitignore",
+        "src/lib/accent-presets.json",
       ]) {
         mkdirSync(dirname(join(fixture, path)), { recursive: true });
         cpSync(join(source, path), join(fixture, path));
@@ -166,6 +167,11 @@ describe("verification preflight", () => {
         ).code,
       ).toBe(0);
       expect(readFileSync(join(clone, "fixture.rs")).includes(13)).toBe(false);
+      const palette = readFileSync(join(clone, "src/lib/accent-presets.json"));
+      expect(palette.includes(13)).toBe(false);
+      expect(palette.toString("utf8")).toBe(
+        readFileSync(join(source, "src/lib/accent-presets.json"), "utf8").replace(/\r\n/g, "\n"),
+      );
       expect(command(["bun", "scripts/check-preflight.ts"], clone).code).toBe(0);
       const routing = {
         GIT_DIR: sentinelGit,
@@ -198,7 +204,7 @@ describe("verification preflight", () => {
       expect(crlf.code).not.toBe(0);
       expect(crlf.output).toContain("CR/CRLF");
       writeFileSync(join(fixture, "fixture.rs"), "fn main() {}\n");
-      mkdirSync(join(fixture, "src"));
+      mkdirSync(join(fixture, "src"), { recursive: true });
       writeFileSync(join(fixture, "src/uncommitted.ts"), "export {};\n");
       const untracked = command(["bun", "scripts/check-preflight.ts", "--push"]);
       expect(untracked.code).not.toBe(0);

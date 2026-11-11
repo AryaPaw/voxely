@@ -4,3 +4,6 @@
 # Match rustfmt's newline_style = "Unix" on Windows checkouts too.
 *.rs text eol=lf
 .githooks/* text eol=lf
+
+# Генератор палитры проверяет точное совпадение байтов, включая окончания строк.
+src/lib/accent-presets.json text eol=lf
