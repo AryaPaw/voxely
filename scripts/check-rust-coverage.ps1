@@ -99,7 +99,7 @@ if (-not $llvmCov) { throw 'cargo-llvm-cov is required: cargo install cargo-llvm
 $previousTarget = $env:CARGO_TARGET_DIR
 $previousIncremental = $env:CARGO_INCREMENTAL
 $targetRoot = [System.IO.Path]::GetFullPath((Join-Path (Get-Location) 'target'))
-$covTarget = Join-Path $targetRoot ("llvm-cov-" + [guid]::NewGuid().ToString('N'))
+$covTarget = Join-Path $targetRoot 'llvm-cov'
 . (Join-Path $PSScriptRoot 'rust-build-cache.ps1')
 Invoke-VoxelyBuildCache -Action {
 param($coverageCache)
@@ -139,7 +139,7 @@ finally {
     $env:CARGO_INCREMENTAL = $previousIncremental
     try {
         if ($null -eq $coverageFailure) { Assert-VoxelyCacheIdle -Cache $coverageCache -WaitForBuilders }
-        Remove-VoxelyCacheDirectory -Cache $coverageCache -Path $covTarget
+        Remove-VoxelyCacheDirectory -Cache $coverageCache -Path $covTarget -WaitForBuilders:($null -eq $coverageFailure)
     } catch {
         if ($null -ne $coverageFailure) { Write-Warning "Coverage cache cleanup failed: $($_.Exception.Message)" }
         else { $coverageFailure = $_ }

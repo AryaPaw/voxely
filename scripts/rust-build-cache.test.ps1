@@ -2,11 +2,15 @@
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'rust-build-cache.ps1')
 $script:actualCacheContext = ${function:Get-VoxelyBuildCache}
+$script:actualOpenCargoLock = ${function:Open-VoxelyCargoLock}
+$script:actualCargoLockPaths = ${function:Get-VoxelyCargoLockPaths}
 $script:budget = 1MB
 $script:free = 100GB
 $script:busy = $false
 $script:busyChecksRemaining = 0
+$script:idleChecksBeforeNewBuilder = -1
 $script:busySentinel = $null
+$script:onBusyCheck = $null
 $script:forbidSleep = $false
 $script:sleepCount = 0
 $script:runningApp = $null
@@ -22,13 +26,34 @@ function Get-VoxelyCacheFreeBytes { param($Cache) return $script:free }
 function Get-Process {
     param([string[]]$Name, [int]$Id, $ErrorAction)
     if ($PSBoundParameters.ContainsKey('Id')) { return Microsoft.PowerShell.Management\Get-Process -Id $Id -ErrorAction Stop }
-    if ('cargo' -in $Name -and $script:busy) { return [pscustomobject]@{ProcessName='cargo';Id=123} }
-    if ('cargo' -in $Name -and $script:busyChecksRemaining -gt 0) {
-        Assert-Cache (Test-Path -LiteralPath $script:busySentinel) 'Cleanup must retain artifacts while any compiler is busy'
-        $script:busyChecksRemaining--
-        return [pscustomobject]@{ProcessName='cargo';Id=123}
-    }
+    if ('cargo' -in $Name -or 'rustc' -in $Name -or 'link' -in $Name) { throw 'Cache maintenance must not scan global compiler names' }
     if ('voxely' -in $Name -and $null -ne $script:runningApp) { return $script:runningApp }
+}
+function Get-VoxelyCargoLockPaths {
+    param($Cache)
+    $paths = @(& $script:actualCargoLockPaths -Cache $Cache)
+    $script:firstLockOfAttempt = $true
+    if ($script:idleChecksBeforeNewBuilder -ge 0) {
+        if ($script:idleChecksBeforeNewBuilder -eq 0) {
+            $script:busyChecksRemaining = 2
+            $script:idleChecksBeforeNewBuilder = -1
+        } else { $script:idleChecksBeforeNewBuilder-- }
+    }
+    return $paths
+}
+function Open-VoxelyCargoLock {
+    param([string]$Path)
+    if ($script:firstLockOfAttempt) {
+        $script:firstLockOfAttempt = $false
+        if ($script:busy) { throw [IO.IOException]::new('fixture-owned-profile-lock-busy', [int]0x80070021) }
+        if ($script:busyChecksRemaining -gt 0) {
+        Assert-Cache (Test-Path -LiteralPath $script:busySentinel) 'Cleanup must retain artifacts while this target profile is locked'
+        if ($null -ne $script:onBusyCheck) { & $script:onBusyCheck }
+        $script:busyChecksRemaining--
+        throw [IO.IOException]::new('fixture-owned-profile-lock-busy', [int]0x80070021)
+        }
+    }
+    return & $script:actualOpenCargoLock -Path $Path
 }
 function Start-Sleep {
     param([int]$Milliseconds)
@@ -57,6 +82,17 @@ function Write-CacheFixture([string]$Root, [string]$Relative, [int]$Bytes = 16) 
     [IO.File]::WriteAllBytes($file, [byte[]]::new($Bytes))
     return $file
 }
+function Get-CacheArtifactCount([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path)) { return 0 }
+    return @(Get-ChildItem -LiteralPath $Path -File -Recurse -Force | Where-Object Name -ne '.cargo-lock').Count
+}
+function Get-TemporaryArtifactCount([string]$Root, [string]$Pattern) {
+    $count = 0
+    foreach ($directory in @(Get-ChildItem -LiteralPath (Join-Path $Root 'src-tauri/target') -Directory -Filter $Pattern)) {
+        $count += Get-CacheArtifactCount $directory.FullName
+    }
+    return $count
+}
 $script:temporary = Join-Path ([IO.Path]::GetTempPath()) ('voxely-cache-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $script:temporary | Out-Null
 $savedEnvironment = @{}
@@ -77,20 +113,58 @@ try {
         param($cache)
         Assert-Cache (Test-VoxelyBuildCacheSession $cache) 'Lease must be valid inside action'
         Assert-Cache (Test-Path -LiteralPath $debug) 'Under-budget cache must remain'
-        Assert-Cache (-not (Test-Path (Join-Path $cache.Target 'msrv-1.90'))) 'MSRV should be cleaned before action'
+        Assert-Cache ((Get-CacheArtifactCount (Join-Path $cache.Target 'msrv-1.90')) -eq 0) 'MSRV artifacts should be cleaned before action'
         $null = Write-CacheFixture $fixture ('llvm-cov-' + ('c' * 32) + '/debug/temporary.rlib')
     }
     Assert-Cache (Test-Path $exe) 'Runtime executable must remain'
     Assert-Cache (Test-Path $dll) 'Adjacent runtime DLL must remain'
     Assert-Cache (Test-Path $unknown) 'Unknown data must remain'
-    Assert-Cache (@(Get-ChildItem (Join-Path $fixture 'src-tauri/target') -Directory -Filter 'llvm-cov*').Count -eq 0) 'Post-build temporary targets must be removed'
+    Assert-Cache ((Get-TemporaryArtifactCount $fixture 'llvm-cov*') -eq 0) 'Post-build temporary artifacts must be removed while Cargo lock scaffolds remain'
+
+    $fixture = New-CacheFixture
+    $exe = Write-CacheFixture $fixture 'release/voxely.exe'
+    $instrumented = Join-Path $fixture 'src-tauri/target/llvm-cov'
+    $outsideInstrumentation = Write-CacheFixture $fixture 'owner-data/keep.profraw' 64
+    $outsideInstrumentationHash = (Get-FileHash -LiteralPath $outsideInstrumentation).Hash
+    Invoke-VoxelyBuildCache -RepoRoot $fixture -Action {
+        # Real cargo-llvm-cov keeps its profile below llvm-cov-target and its
+        # instrumentation/metadata files beside that profile, not inside it.
+        $null = Write-CacheFixture $fixture 'llvm-cov/llvm-cov-target/debug/.cargo-lock' 0
+        foreach ($artifact in @(
+            'llvm-cov/top-level.profraw', 'llvm-cov/top-level.profdata', 'llvm-cov/top-level.json',
+            'llvm-cov/llvm-cov-target/unit-1.profraw', 'llvm-cov/llvm-cov-target/unit-2.profraw',
+            'llvm-cov/llvm-cov-target/unit-3.profraw', 'llvm-cov/llvm-cov-target/merged.profdata',
+            'llvm-cov/llvm-cov-target/coverage.json', 'llvm-cov/llvm-cov-target/.rustc_info.json',
+            'llvm-cov/llvm-cov-target/debug/deps/fixture.rlib',
+            'llvm-cov/llvm-cov-target/debug/.fingerprint/fixture/hash'
+        )) { $null = Write-CacheFixture $fixture $artifact 64 }
+    }
+    Assert-Cache ((Get-CacheArtifactCount $instrumented) -eq 0) 'Nested coverage cleanup must remove profraw/profdata and metadata beside the locked profile'
+    $instrumentedLocks = @(Get-ChildItem -LiteralPath $instrumented -File -Recurse -Force)
+    Assert-Cache ($instrumentedLocks.Count -ge 3 -and @($instrumentedLocks | Where-Object { $_.Name -ne '.cargo-lock' -or $_.Length -ne 0 }).Count -eq 0) 'Nested coverage cleanup must leave only zero-length Cargo locks'
+    Assert-Cache (Test-Path -LiteralPath $exe) 'Nested instrumentation cleanup must preserve the daily driver'
+    Assert-Cache ((Get-FileHash -LiteralPath $outsideInstrumentation).Hash -ceq $outsideInstrumentationHash) 'Cleanup must preserve same-extension files outside its private temporary namespace'
+    Invoke-VoxelyBuildCache -RepoRoot $fixture -Action {
+        $null = Write-CacheFixture $fixture 'llvm-cov/llvm-cov-target/next-run.profraw' 64
+    }
+    Assert-Cache ((Get-CacheArtifactCount $instrumented) -eq 0) 'Reusing the bounded coverage namespace must not accumulate parent instrumentation files'
+
+    $fixture = New-CacheFixture
+    $null = Write-CacheFixture $fixture 'llvm-cov/llvm-cov-target/debug/.cargo-lock' 0
+    $unknown = Write-CacheFixture $fixture 'llvm-cov/llvm-cov-target/unrelated-owner/sentinel.bin' 32
+    $unknownHash = (Get-FileHash -LiteralPath $unknown).Hash
+    $raw = Write-CacheFixture $fixture 'llvm-cov/llvm-cov-target/owned.profraw' 64
+    Invoke-VoxelyBuildCache -RepoRoot $fixture -Action { }
+    Assert-Cache (-not (Test-Path -LiteralPath $raw)) 'Known coverage namespace files must be reclaimed beside unknown directories'
+    Assert-Cache ((Get-FileHash -LiteralPath $unknown).Hash -ceq $unknownHash) 'Parent instrumentation cleanup must preserve unknown subdirectories unchanged'
 
     $fixture = New-CacheFixture
     $exe = Write-CacheFixture $fixture 'release/voxely.exe'
     $null = Write-CacheFixture $fixture 'debug/deps/large.rlib' 8192
     $script:budget = 4096
     Invoke-VoxelyBuildCache -RepoRoot $fixture -Action { }
-    Assert-Cache (-not (Test-Path (Join-Path $fixture 'src-tauri/target/debug'))) 'Over-budget debug profile must be evicted coherently'
+    Assert-Cache ((Get-CacheArtifactCount (Join-Path $fixture 'src-tauri/target/debug')) -eq 0) 'Over-budget debug artifacts must be evicted coherently'
+    Assert-Cache (Test-Path -LiteralPath (Join-Path $fixture 'src-tauri/target/debug/.cargo-lock')) 'Debug eviction must preserve the Cargo lock identity'
     Assert-Cache (Test-Path $exe) 'Budget eviction must preserve exe'
 
     $fixture = New-CacheFixture
@@ -111,7 +185,7 @@ try {
             throw 'fixture-command-exit-23'
         }
     } 'fixture-command-exit-23'
-    Assert-Cache (@(Get-ChildItem (Join-Path $fixture 'src-tauri/target') -Directory -Filter 'llvm-cov*').Count -eq 0) 'Failure must still clean temporary targets'
+    Assert-Cache ((Get-TemporaryArtifactCount $fixture 'llvm-cov*') -eq 0) 'Failure must still clean temporary artifacts'
     Assert-Cache (-not $env:VOXELY_BUILD_CACHE_SESSION -and -not $env:CARGO_TARGET_DIR) 'Environment must restore after failure'
     Invoke-VoxelyBuildCache -RepoRoot $fixture -Action { }
 
@@ -145,6 +219,58 @@ try {
     Assert-Cache ($script:busyChecksRemaining -eq 0) 'Post-build cleanup must wait for transient compiler activity'
     Assert-Cache (-not (Test-Path -LiteralPath $script:busySentinel)) 'Post-build cleanup must reclaim owned temporary files after compilers exit'
     Assert-Cache (Test-Path -LiteralPath $exe) 'Waiting cleanup must preserve the daily driver'
+    $script:busySentinel = $null
+
+    $fixture = New-CacheFixture
+    $exe = Write-CacheFixture $fixture 'release/voxely.exe'
+    Invoke-VoxelyBuildCache -RepoRoot $fixture -Action {
+        param($cache)
+        $owned = Join-Path $cache.Target ('llvm-cov-' + ('a' * 32))
+        $script:busySentinel = Write-CacheFixture $fixture ('llvm-cov-' + ('a' * 32) + '/debug/new-builder.rlib')
+        Assert-VoxelyCacheIdle -Cache $cache -WaitForBuilders
+        # A new external builder starts after the caller's successful idle check.
+        $script:busyChecksRemaining = 2
+        $waitsBeforeRemoval = $script:sleepCount
+        Remove-VoxelyCacheDirectory -Cache $cache -Path $owned -WaitForBuilders
+        Assert-Cache ($script:sleepCount -eq $waitsBeforeRemoval + 2) 'Removal recheck must wait for a newly started builder'
+        Assert-Cache (-not (Test-Path -LiteralPath $script:busySentinel)) 'Removal must reclaim its own artifacts only after the new builder exits'
+
+        $script:busySentinel = Write-CacheFixture $fixture ('llvm-cov-' + ('b' * 32) + '/debug/new-repair-builder.rlib')
+        # Repair holds one native lock set throughout all of its deletions.
+        $script:busyChecksRemaining = 2
+        $waitsBeforeRepair = $script:sleepCount
+        Repair-VoxelyBuildCache -Cache $cache -WaitForBuilders
+        Assert-Cache ($script:sleepCount -eq $waitsBeforeRepair + 2) 'Repair must wait for this target profile before acquiring the lock set for all deletions'
+        Assert-Cache ($script:busyChecksRemaining -eq 0) 'Repair must observe the complete delayed builder lifecycle'
+        Assert-Cache (-not (Test-Path -LiteralPath $script:busySentinel)) 'Repair must not delete artifacts before its new builder becomes idle'
+    }
+    Assert-Cache (Test-Path -LiteralPath $exe) 'Delayed-builder cleanup must preserve the daily driver'
+    $script:busySentinel = $null
+
+    $fixture = New-CacheFixture
+    Invoke-VoxelyBuildCache -RepoRoot $fixture -Action {
+        param($cache)
+        $owned = Join-Path $cache.Target ('llvm-cov-' + ('c' * 32))
+        $script:busySentinel = Write-CacheFixture $fixture ('llvm-cov-' + ('c' * 32) + '/debug/recheck-tree.rlib')
+        $script:busyJunction = Join-Path $owned 'new-junction'
+        $script:busyJunctionTarget = Join-Path $fixture 'outside-cache'
+        New-Item -ItemType Directory -Path $script:busyJunctionTarget | Out-Null
+        $outsideSentinel = Join-Path $script:busyJunctionTarget 'preserve.txt'
+        'outside sentinel' | Set-Content -LiteralPath $outsideSentinel
+        $script:busyChecksRemaining = 2
+        $script:onBusyCheck = {
+            New-Item -ItemType Junction -Path $script:busyJunction -Target $script:busyJunctionTarget | Out-Null
+            $script:onBusyCheck = $null
+        }
+        try {
+            Expect-CacheFailure { Remove-VoxelyCacheDirectory -Cache $cache -Path $owned -WaitForBuilders } 'reparse point'
+            Assert-Cache (Test-Path -LiteralPath $script:busySentinel) 'A reparse point created during waiting must reject deletion of the owned tree'
+            Assert-Cache ((Get-Content -LiteralPath $outsideSentinel) -eq 'outside sentinel') 'The new junction destination must remain untouched'
+        } finally {
+            $script:onBusyCheck = $null
+            if (Test-Path -LiteralPath $script:busyJunction) { [IO.Directory]::Delete($script:busyJunction) }
+        }
+    }
     $script:busySentinel = $null
 
     $fixture = New-CacheFixture
@@ -207,7 +333,8 @@ try {
     Invoke-VoxelyBuildCache -RepoRoot $fixture -Full -Action { }
     Assert-Cache (Test-Path $exe) 'Full maintenance must preserve runtime exe'
     Assert-Cache (Test-Path $dll) 'Full maintenance must preserve runtime DLLs'
-    Assert-Cache (-not (Test-Path (Join-Path $fixture 'src-tauri/target/debug'))) 'Full maintenance must evict debug'
+    Assert-Cache ((Get-CacheArtifactCount (Join-Path $fixture 'src-tauri/target/debug')) -eq 0) 'Full maintenance must evict debug artifacts'
+    Assert-Cache (Test-Path -LiteralPath (Join-Path $fixture 'src-tauri/target/debug/.cargo-lock')) 'Full maintenance must preserve the Cargo lock scaffold'
 
     $fixture = New-CacheFixture
     $null = Write-CacheFixture $fixture 'release/voxely.exe'
@@ -288,33 +415,82 @@ Invoke-VoxelyBuildCache -RepoRoot $Root -Action { param($childCache) if (-not (T
     $fixtureScripts = Join-Path $fixture 'scripts'
     New-Item -ItemType Directory -Path $fixtureScripts | Out-Null
     foreach ($name in @('rust-build-cache.ps1', 'check-msrv.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $fixtureScripts }
+    Add-Content -LiteralPath (Join-Path $fixtureScripts 'rust-build-cache.ps1') -Value @'
+$script:fixtureOpenCargoLock = ${function:Open-VoxelyCargoLock}
+function Open-VoxelyCargoLock {
+    param([string]$Path)
+    if ($global:msrvWasCalled -and $global:msrvBusyChecks -gt 0) {
+        if (-not (Test-Path -LiteralPath $global:msrvArtifact)) { throw 'MSRV deleted artifacts while its profile was locked' }
+        $global:msrvBusyChecks--
+        throw [IO.IOException]::new('fixture-owned-msrv-profile-busy', [int]0x80070021)
+    }
+    return & $script:fixtureOpenCargoLock -Path $Path
+}
+'@
     New-Item -ItemType Directory -Path (Join-Path $fixture 'src-tauri') | Out-Null
     'rust-version = "1.90.0"' | Set-Content (Join-Path $fixture 'src-tauri/Cargo.toml')
     $child = Join-Path $fixture 'fake-msrv.ps1'
     @'
-param($Entry)
+param($Entry, [ValidateSet('failure', 'busy-failure', 'success')][string]$Scenario = 'failure')
 $ErrorActionPreference = 'Stop'
+$global:msrvWasCalled = $false
+$global:msrvSleepCount = 0
+$global:msrvBusyChecks = 0
+$global:msrvArtifact = $null
 function Get-Process {
     param([string[]]$Name, [int]$Id, $ErrorAction)
     if ($PSBoundParameters.ContainsKey('Id')) { return Microsoft.PowerShell.Management\Get-Process -Id $Id -ErrorAction Stop }
+    if ('cargo' -in $Name) { throw 'MSRV must not scan global compilers' }
+}
+function Start-Sleep {
+    $global:msrvSleepCount++
+    if ($Scenario -ne 'success') { throw 'Failed MSRV must not restart the cleanup wait' }
 }
 function cargo {
     if ($args[0] -ne '+1.90.0' -or $args[1] -ne 'build' -or '--locked' -notin $args -or '--all-targets' -notin $args) { throw 'Wrong MSRV arguments' }
-    if ([IO.Path]::GetFileName($env:CARGO_TARGET_DIR) -notmatch '^msrv-1\.90\.0-[0-9a-f]{32}$') { throw 'MSRV target was not isolated' }
+    if ([IO.Path]::GetFileName($env:CARGO_TARGET_DIR) -cne 'msrv-1.90.0') { throw 'MSRV target was not isolated in its bounded namespace' }
     New-Item -ItemType Directory -Path $env:CARGO_TARGET_DIR -Force | Out-Null
-    'artifact' | Set-Content (Join-Path $env:CARGO_TARGET_DIR 'partial.rlib')
-    $global:LASTEXITCODE = 42
+    $global:msrvArtifact = Join-Path $env:CARGO_TARGET_DIR 'partial.rlib'
+    'artifact' | Set-Content $global:msrvArtifact
+    $global:msrvWasCalled = $true
+    $global:msrvBusyChecks = if ($Scenario -eq 'failure') { 0 } else { 2 }
+    $global:LASTEXITCODE = if ($Scenario -eq 'success') { 0 } else { 42 }
 }
-try { & $Entry; throw 'Expected MSRV failure' }
-catch { if ($_.Exception.Message -notmatch 'MSRV 1.90.0 build failed: 42') { throw }; if ($env:CARGO_TARGET_DIR -or $env:VOXELY_BUILD_CACHE_SESSION) { throw 'Environment not restored' }; exit 42 }
+try {
+    & $Entry
+    if ($Scenario -ne 'success') { throw 'Expected MSRV failure' }
+    if ($global:msrvSleepCount -ne 2) { throw 'Successful MSRV did not wait for the newly started builder' }
+    if ($env:CARGO_TARGET_DIR -or $env:VOXELY_BUILD_CACHE_SESSION) { throw 'Environment not restored' }
+    exit 0
+}
+catch {
+    if ($_.Exception.Message -notmatch 'MSRV 1.90.0 build failed: 42') { throw }
+    if ($global:msrvSleepCount -ne 0) { throw 'Failed MSRV entered cleanup waiting' }
+    if ($env:CARGO_TARGET_DIR -or $env:VOXELY_BUILD_CACHE_SESSION) { throw 'Environment not restored' }
+    exit 42
+}
 '@ | Set-Content $child
     & pwsh -NoProfile -File $child -Entry (Join-Path $fixtureScripts 'check-msrv.ps1') 2>$null
     Assert-Cache ($LASTEXITCODE -eq 42) 'MSRV must retain native failure and restore environment'
-    Assert-Cache (@(Get-ChildItem (Join-Path $fixture 'src-tauri/target') -Directory -Filter 'msrv-*').Count -eq 0) 'MSRV failure must remove its temporary target'
+    Assert-Cache ((Get-TemporaryArtifactCount $fixture 'msrv-*') -eq 0) 'MSRV failure must remove its temporary artifacts'
+    & pwsh -NoProfile -File $child -Entry (Join-Path $fixtureScripts 'check-msrv.ps1') -Scenario busy-failure 2>$null
+    Assert-Cache ($LASTEXITCODE -eq 42) 'MSRV must retain the original Cargo failure without waiting when cleanup becomes busy'
+    Assert-Cache ((Get-TemporaryArtifactCount $fixture 'msrv-*') -eq 1) 'Busy MSRV failure cleanup must preserve its temporary artifact'
+    & pwsh -NoProfile -File $child -Entry (Join-Path $fixtureScripts 'check-msrv.ps1') -Scenario success 2>$null
+    Assert-Cache ($LASTEXITCODE -eq 0) 'Successful MSRV must wait for a newly started builder before cleanup'
+    Assert-Cache ((Get-TemporaryArtifactCount $fixture 'msrv-*') -eq 0) 'Successful MSRV cleanup must reclaim owned artifacts after the profile lock is released'
     $fixture = New-CacheFixture
     $fixtureScripts = Join-Path $fixture 'scripts'
     New-Item -ItemType Directory -Path $fixtureScripts | Out-Null
     foreach ($name in @('rust-build-cache.ps1', 'check-rust-coverage.ps1')) { Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $fixtureScripts }
+    Add-Content -LiteralPath (Join-Path $fixtureScripts 'rust-build-cache.ps1') -Value @'
+$script:fixtureOpenCargoLock = ${function:Open-VoxelyCargoLock}
+function Open-VoxelyCargoLock {
+    param([string]$Path)
+    if ($global:coverageWasCalled) { throw [IO.IOException]::new('fixture-owned-coverage-profile-busy', [int]0x80070021) }
+    return & $script:fixtureOpenCargoLock -Path $Path
+}
+'@
     New-Item -ItemType Directory -Path (Join-Path $fixture 'src-tauri') | Out-Null
     $fakeTool = Join-Path $fixture 'fake-llvm-cov.ps1'
     @'
@@ -333,7 +509,7 @@ function Get-Command { param($Name, $ErrorAction) return [pscustomobject]@{Sourc
 function Get-Process {
     param([string[]]$Name, [int]$Id, $ErrorAction)
     if ($PSBoundParameters.ContainsKey('Id')) { return Microsoft.PowerShell.Management\Get-Process -Id $Id -ErrorAction Stop }
-    if ('cargo' -in $Name -and $global:coverageWasCalled) { return [pscustomobject]@{ProcessName='cargo';Id=123} }
+    if ('cargo' -in $Name) { throw 'Coverage must not scan global compilers' }
 }
 function Start-Sleep { $global:coverageSleepCount++; throw 'Failed coverage must not wait again during cleanup' }
 try { & $Entry; throw 'Expected coverage failure' }
@@ -346,7 +522,7 @@ catch {
 '@ | Set-Content $child
     & pwsh -NoProfile -File $child -Entry (Join-Path $fixtureScripts 'check-rust-coverage.ps1') -FakeTool $fakeTool 2>$null
     Assert-Cache ($LASTEXITCODE -eq 42) 'Coverage tool error must survive a concurrent cleanup failure without another wait'
-    Assert-Cache (@(Get-ChildItem (Join-Path $fixture 'src-tauri/target') -Directory -Filter 'llvm-cov-*').Count -eq 1) 'Busy cleanup must preserve its temporary target'
+    Assert-Cache ((Get-TemporaryArtifactCount $fixture 'llvm-cov*') -eq 1) 'Busy cleanup must preserve its temporary artifact'
     Write-Host "PASS: Rust cache lifecycle ($script:assertions assertions, disposable fixtures only)."
 } finally {
     foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name, $savedEnvironment[$name], 'Process') }
