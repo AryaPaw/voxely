@@ -20,10 +20,15 @@
         "dsp::pipeline::tests::rnnoise_edge_signal_stays_aligned_after_dry_wet_mix_and_pcm16_storage",
         "app::session::tests::capture_limit_is_distinct_from_queue_loss_and_device_failure",
         "app::session::tests::duplicate_stop_preserves_recording_audio_and_usage",
+        "app::session::tests::stop_context_survives_shutdown_between_capture_take_and_worker_completion",
         "app::session::tests::cancel_discards_audio_history_and_usage",
         "app::session::tests::hud_cancel_rejects_stale_sessions_hidden_hud_and_completed_state",
+        "app::session::tests::overlay_snapshot_cannot_pair_a_previous_idle_state_with_a_new_recording_revision",
+        "app::session::tests::delayed_error_dismissal_serializes_validation_and_rejects_new_generation_or_epoch",
         "app::session::tests::cancel_during_stopping_hides_history_until_audio_cleanup_finishes",
-        "app::session::tests::cancelled_pipeline_delete_failure_is_retried_until_history_and_usage_are_removed"
+        "app::session::tests::cancelled_pipeline_delete_failure_is_retried_until_history_and_usage_are_removed",
+        "audio::resample::tests::streaming_resample_is_independent_of_chunk_boundaries",
+        "audio::resample::tests::streaming_capture_rejects_ultrasonic_alias_and_preserves_voice_tail"
       ]
     },
     {
@@ -40,7 +45,8 @@
         "app::session::tests::initial_history_insert_failure_releases_start_ownership_before_hud_publication",
         "audio::capture::tests::wav_readers_reject_invalid_metadata_before_allocating_or_resampling",
         "audio::capture::tests::wav_readers_reject_sparse_oversized_files_without_loading_payload",
-        "app::session::tests::hostile_wav_retry_releases_reservation_without_resampling_or_modifying_source"
+        "app::session::tests::hostile_wav_retry_releases_reservation_without_resampling_or_modifying_source",
+        "app::session::tests::stale_capture_lookup_failure_releases_history_before_session_cleanup"
       ]
     },
     {
@@ -92,7 +98,9 @@
         "app::session::tests::deferred_usage_capacity_reserves_all_configured_attempts_before_api_admission",
         "app::session::tests::usage_reservation_covers_retry_settings_changed_after_admission",
         "transcription::openrouter::tests::malformed_200_keeps_confirmed_cost_in_progress_and_usage_journal",
-        "transcription::openrouter::tests::malformed_200_does_not_invent_or_accept_invalid_cost"
+        "transcription::openrouter::tests::malformed_200_does_not_invent_or_accept_invalid_cost",
+        "history::repository::tests::compare_usage_survives_restart_manual_history_delete_and_full_clear_fences_late_writers",
+        "history::repository::tests::usage_operation_migration_preserves_legacy_rows_and_prunes_compare_at_its_own_cutoff"
       ]
     },
     {
@@ -110,7 +118,9 @@
       "tests": [
         "app::session::tests::shutdown_during_normal_capture_stop_preserves_late_result_as_interrupted",
         "app::session::tests::shutdown_timeout_persists_metadata_when_native_capture_finishes_late",
-        "app::session::tests::shutdown_exit_reservation_refuses_contention_and_requires_completed_cleanup"
+        "app::session::tests::shutdown_exit_reservation_refuses_contention_and_requires_completed_cleanup",
+        "app::shutdown::tests::shutdown_worker_drains_a_full_healthy_usage_backlog_before_forced_exit",
+        "app::shutdown::tests::shutdown_deadline_forces_exit_while_usage_recovery_waits_for_history"
       ]
     },
     {
@@ -132,7 +142,21 @@
         "app::compare::tests::stale_compare_processing_cannot_write_or_release_a_new_take",
         "app::compare::tests::compare_timeout_keeps_busy_until_late_native_capture_and_discards_its_audio",
         "app::compare::tests::cancelled_run_keeps_lease_until_old_worker_finishes",
-        "app::compare::tests::compare_commit_rejects_shutdown_and_released_recording_before_any_write"
+        "app::compare::tests::compare_commit_rejects_shutdown_and_released_recording_before_any_write",
+        "app::compare::tests::compare_api_retries_and_partial_prices_reach_shared_usage_without_history",
+        "app::compare::tests::compare_usage_storage_failure_cancels_requests_recovers_price_and_respects_clear",
+        "app::compare::tests::pending_compare_start_and_stale_cleanup_never_hold_ui_admission",
+        "app::compare::tests::delayed_compare_stop_cannot_take_a_newer_capture_after_the_observed_one_finishes",
+        "app::compare::tests::stopping_a_pending_compare_withdraws_only_its_publication_until_native_cleanup",
+        "app::compare::tests::duplicate_compare_stop_keeps_the_stop_reservation_and_ready_audio",
+        "app::compare::tests::compare_disk_write_releases_admission_protects_candidates_and_rejects_stale_publish",
+        "app::compare::tests::compare_clear_releases_admission_and_reserves_monotonic_generation_until_cleanup",
+        "commands::tests::full_history_clear_preserves_compare_identity_after_partial_audio_cleanup",
+        "app::compare::tests::startup_nonce_skips_undeletable_previous_outputs_and_rejects_exhaustion_before_capture",
+        "app::compare::tests::delayed_compare_snapshots_keep_ordered_revisions_across_clear_and_getters",
+        "app::compare::tests::compare_admission_reserves_recovery_capacity_and_full_queue_preserves_confirmed_prices",
+        "app::session::tests::compare_admission_blocks_dictation_without_reserving_phantom_recordings",
+        "app::session::tests::old_compare_flush_cannot_dequeue_a_new_confirmed_price_revision"
       ]
     },
     {
@@ -167,7 +191,14 @@
         "windows_int::manifest_tests::common_controls_v6_is_active_and_task_dialog_entry_point_exists",
         "commands::tests::superseded_and_abandoned_filter_previews_have_bounded_file_ownership",
         "commands::tests::preview_publication_waits_for_retention_snapshot_and_cleanup_transaction",
-        "history::retention::tests::stale_generated_previews_cannot_evict_history_and_active_leases_survive_cleanup"
+        "history::retention::tests::stale_generated_previews_cannot_evict_history_and_active_leases_survive_cleanup",
+        "app::session::tests::meter_handoff_releases_ui_ownership_before_waiting_for_native_stop",
+        "commands::tests::stale_filter_start_discards_outside_admission_and_retains_native_reservation",
+        "app::session::tests::shutdown_native_join_releases_ui_locks_and_retains_audio_until_late_completion",
+        "app::session::tests::shutdown_completed_capture_preserves_history_and_releases_stop_reservations_on_success_and_error",
+        "commands::tests::preview_disk_write_releases_admission_and_keeps_retention_safe_until_stale_cleanup",
+        "commands::tests::preview_partial_write_failure_rolls_back_candidates_and_preserves_previous_lease",
+        "app::operations::tests::pending_audio_write_names_stay_exclusive_and_protected_until_rollback_finishes"
       ]
     },
     {
@@ -175,7 +206,11 @@
       "purpose": "Retry transient provider failures and cancel an in-flight HTTP request using the real request pipeline and a local server.",
       "tests": [
         "transcription::openrouter::tests::retries_503_then_success",
-        "transcription::openrouter::tests::cancel_aborts_in_flight_http"
+        "transcription::openrouter::tests::cancel_aborts_in_flight_http",
+        "transcription::openrouter::tests::response_body_limits_cover_known_unknown_exact_and_truncated_lengths",
+        "transcription::openrouter::tests::prewarm_stops_at_cap_without_waiting_for_chunked_eof",
+        "transcription::openrouter::tests::stt_bounds_preserve_http_error_classification_and_reject_oversized_success",
+        "transcription::openrouter::tests::cancelling_transcription_aborts_an_unfinished_chunked_body"
       ]
     }
   ]

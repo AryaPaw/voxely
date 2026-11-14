@@ -1,4 +1,13 @@
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
@@ -7,6 +16,7 @@ import { api, type AppSettings, type Recording } from "../../lib/api";
 import {
   acceptSavedSettings,
   nextWriteSeq,
+  reconcileFailedSettings,
   shouldKeepOptimistic,
 } from "../../lib/settings-persist";
 import { applyTheme, resolvedTheme, watchSystemTheme } from "../../lib/theme";
@@ -68,6 +78,11 @@ export function MainApp() {
   historyQueryRef.current = historySearchQuery(query);
   const settingsRef = useRef<AppSettings | null>(null);
   settingsRef.current = settings;
+  const persistedSettingsRef = useRef<AppSettings | null>(null);
+  const acceptPersistedSettings = useCallback((saved: AppSettings) => {
+    persistedSettingsRef.current = acceptSavedSettings(persistedSettingsRef.current, saved);
+    setSettings((prev) => acceptSavedSettings(prev, saved));
+  }, []);
 
   const refreshHistory = useCallback(
     async (reset = true, search = queryRef.current, preserveLoadedPages = false) => {
@@ -182,9 +197,7 @@ export function MainApp() {
   const loadSettings = useCallback(async () => {
     try {
       const nextSettings = await api.settings();
-      setSettings(nextSettings);
-      applyTheme(nextSettings.theme, nextSettings.accentColor);
-      applyUiLocale(resolveUiLocale(nextSettings.uiLanguage ?? "auto", navigator.language));
+      acceptPersistedSettings(nextSettings);
       setLoadError("");
       void getVersion()
         .then(setVersion)
@@ -209,7 +222,7 @@ export function MainApp() {
       const locale = resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto", navigator.language);
       setLoadError(formatInvokeError(error, messagesFor(locale)));
     }
-  }, []);
+  }, [acceptPersistedSettings]);
 
   useEffect(() => {
     void loadSettings();
@@ -240,7 +253,7 @@ export function MainApp() {
       }
     });
     const unlistenSettings = listen<AppSettings>("settings://changed", (event) => {
-      setSettings((prev) => acceptSavedSettings(prev, event.payload));
+      acceptPersistedSettings(event.payload);
     });
     const unbindEscape = bindEscapeCancel(() => {
       void api.cancel().catch(() => undefined);
@@ -252,7 +265,7 @@ export function MainApp() {
       void unlistenInsertCancelled.then((fn) => fn());
       void unlistenSettings.then((fn) => fn());
     };
-  }, [loadSettings, refreshHistory]);
+  }, [acceptPersistedSettings, loadSettings, refreshHistory]);
 
   useEffect(() => {
     let active = true;
@@ -300,7 +313,7 @@ export function MainApp() {
     };
   }, [localBuild]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     if (!settings) {
       return;
     }
@@ -354,16 +367,18 @@ export function MainApp() {
     applyTheme(outgoing.theme, outgoing.accentColor);
     try {
       const saved = await api.saveSettings(outgoing);
-      setSettings((prev) => acceptSavedSettings(prev, saved));
+      acceptPersistedSettings(saved);
     } catch (error) {
       try {
         const persisted = await api.settings();
-        setSettings((prev) =>
-          prev && (prev.writeSeq ?? 0) > seq ? prev : acceptSavedSettings(prev, persisted),
-        );
+        persistedSettingsRef.current = acceptSavedSettings(persistedSettingsRef.current, persisted);
+        const confirmed = persistedSettingsRef.current;
+        setSettings((prev) => reconcileFailedSettings(prev, seq, confirmed));
       } catch {
         setSettings((prev) =>
-          shouldKeepOptimistic(prev, seq) ? (prev as AppSettings) : currentSettings,
+          shouldKeepOptimistic(prev, seq)
+            ? (prev as AppSettings)
+            : (persistedSettingsRef.current ?? currentSettings),
         );
       }
       reportError(formatInvokeError(error, copy));
@@ -373,7 +388,7 @@ export function MainApp() {
   async function acknowledgeFirstRunDisclosure() {
     try {
       const acknowledged = await api.acknowledgeFirstRunDisclosure();
-      setSettings((prev) => acceptSavedSettings(prev, acknowledged));
+      acceptPersistedSettings(acknowledged);
     } catch (error) {
       reportError(formatInvokeError(error, copy));
       throw error;
@@ -410,7 +425,7 @@ export function MainApp() {
             copy={copy}
           />
         ) : section === "statistics" ? (
-          <div className="min-h-0 flex-1 overflow-auto p-6">
+          <div key={section} className="min-h-0 flex-1 overflow-auto p-6">
             <Suspense
               fallback={
                 <div
@@ -425,7 +440,7 @@ export function MainApp() {
             </Suspense>
           </div>
         ) : section === "compare" && settings ? (
-          <div className="min-h-0 flex-1 overflow-auto p-6">
+          <div key={section} className="min-h-0 flex-1 overflow-auto p-6">
             <ComparePane
               settings={settings}
               copy={copy}
@@ -435,7 +450,7 @@ export function MainApp() {
             />
           </div>
         ) : (
-          <div className="min-h-0 flex-1 overflow-auto p-6">
+          <div key={section} className="min-h-0 flex-1 overflow-auto p-6">
             {section === "general" || section === "appearance" ? (
               <GeneralSettings
                 settings={settings}
@@ -470,7 +485,7 @@ export function MainApp() {
             {section === "historySettings" ? (
               <HistorySettings
                 onSettingsReplaced={(next, wipeApiKey) => {
-                  setSettings((prev) => acceptSavedSettings(prev, next));
+                  acceptPersistedSettings(next);
                   if (wipeApiKey) setKeyConfigured(false);
                 }}
                 settings={settings}
@@ -506,7 +521,7 @@ export function MainApp() {
                       writeSeq: nextWriteSeq(currentSettings.writeSeq ?? 0),
                     };
                     const result = await api.applyRetentionSettings(outgoing, expectedPreview);
-                    setSettings((prev) => acceptSavedSettings(prev, result.settings));
+                    acceptPersistedSettings(result.settings);
                     setSettingsRecovered(false);
                     await refreshHistory(true, queryRef.current, true);
                     if (result.failed.length > 0) {

@@ -236,6 +236,7 @@ export interface CompareSlot {
 }
 
 export interface CompareState {
+  revision: number;
   recording: boolean;
   running: boolean;
   nonce: number;
@@ -257,6 +258,8 @@ export type UpdateOutcome = "none" | "available" | "installed" | "busy" | "defer
 
 export type OverlaySnapshot = {
   revision: number;
+  generation: number;
+  epoch: number;
   visible: boolean;
   state: SessionState;
   limitReached?: boolean;
@@ -309,6 +312,8 @@ export const api = {
   models: () => ipc<Array<{ id: string; name: string }>>("discover_models"),
   toggle: () => ipc<void>("toggle_dictation"),
   cancel: () => ipc<void>("cancel_dictation"),
+  cancelOverlay: (generation: number, epoch: number) =>
+    ipc<void>("cancel_overlay_dictation", { generation, epoch }),
   setHotkeyCapture: (capturing: boolean) => ipc<void>("set_hotkey_capture", { capturing }),
   retry: (id: string) => ipc<Recording>("retry_recording", { id }),
   manualReprocess: (recordingId: string) => ipc<Recording>("manual_reprocess", { recordingId }),
@@ -323,8 +328,8 @@ export const api = {
   openGithub: (page?: string) => ipc<void>("open_github", { page }),
   openOpenrouterModels: () => ipc<void>("open_openrouter_models"),
   resetMainWindow: () => ipc<void>("reset_main_window"),
-  startModelCompare: () => ipc<void>("start_model_compare"),
-  stopModelCompare: () => ipc<CompareState>("stop_model_compare"),
+  startModelCompare: () => ipc<number>("start_model_compare"),
+  stopModelCompare: (nonce?: number) => ipc<CompareState>("stop_model_compare", { nonce }),
   runModelCompare: () => ipc<CompareState>("run_model_compare"),
   getModelCompare: () => ipc<CompareState>("get_model_compare"),
   clearModelCompare: () => ipc<void>("clear_model_compare"),

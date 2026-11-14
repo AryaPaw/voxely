@@ -47,6 +47,10 @@ jobs:
         run: echo "VOXELY_BUILD_DATE=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))" >> $env:GITHUB_ENV
       - name: Install frontend
         run: bun install --frozen-lockfile
+      - name: Install dependency audit tool
+        run: cargo install cargo-audit --locked --version 0.22.2
+      - name: Dependency security
+        run: bun run verify:security
       - name: Frontend checks
         run: bun run verify:frontend
       - name: Rust format

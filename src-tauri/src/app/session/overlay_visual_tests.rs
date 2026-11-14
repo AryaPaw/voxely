@@ -170,16 +170,22 @@ fn pixel_sample(backdrop: isize, overlay: isize) -> Result<String, String> {
 #[test]
 #[ignore = "requires a visible Windows desktop; creates only isolated owned WebView2 windows"]
 fn native_overlay_transparency_survives_visibility_cycles() {
-    run_overlay_fixture(false);
+    run_overlay_fixture(false, "dark");
 }
 
 #[test]
 #[ignore = "requires a visible Windows desktop; uses only isolated owned windows and metadata"]
 fn native_warmed_overlay_shows_after_hidden_idle() {
-    run_overlay_fixture(true);
+    run_overlay_fixture(true, "dark");
 }
 
-fn run_overlay_fixture(warmed: bool) {
+#[test]
+#[ignore = "requires a visible Windows desktop; creates only isolated owned WebView2 windows"]
+fn native_overlay_light_transparency_survives_visibility_cycles() {
+    run_overlay_fixture(false, "light");
+}
+
+fn run_overlay_fixture(warmed: bool, theme: &str) {
     let temporary = tempfile::tempdir().unwrap();
     let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../dist");
     assert!(
@@ -197,10 +203,13 @@ fn run_overlay_fixture(warmed: bool) {
     let result: Arc<Mutex<Option<Result<(), String>>>> = Arc::new(Mutex::new(None));
     let result_on_setup = Arc::clone(&result);
     let ctx = Arc::new(AppContext::initialize(temporary.path().join("data")).unwrap());
-    ctx.settings.lock().theme = "dark".into();
+    ctx.settings.lock().theme = theme.into();
     if !warmed {
         *ctx.state.lock() = SessionState::Recording;
-        ctx.overlay.lock().show();
+        ctx.overlay.lock().show(
+            ctx.session_generation
+                .load(std::sync::atomic::Ordering::SeqCst),
+        );
     }
     // No production bootstrap/plugins: no microphone, credentials, autostart,
     // history, global hotkeys, updater or diagnostic settings are touched.

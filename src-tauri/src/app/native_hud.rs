@@ -1,7 +1,7 @@
 //! Experimental renderer selection is process-local; persisted settings stay unchanged.
 use crate::app::session::AppContext;
 use crate::windows_int::native_hud::{Frame, NativeHud};
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::Arc;
 use tauri::{AppHandle, Manager};
 
 pub fn prepare(app: &AppHandle) -> bool {
@@ -25,8 +25,10 @@ pub fn prepare(app: &AppHandle) -> bool {
             let ctx = weak.upgrade()?;
             // Never make the HUD thread wait for capture, cancel or persistence.
             let _lifecycle = ctx.session_lifecycle.try_lock()?;
-            let state = ctx.state.try_lock()?.clone();
+            let state = ctx.state.try_lock()?;
             let overlay = *ctx.overlay.try_lock()?;
+            let snapshot = overlay.snapshot(state.clone());
+            drop(state);
             let settings = ctx.settings.try_lock()?;
             let locale = if settings.ui_language == "auto" {
                 system_locale()
@@ -42,15 +44,16 @@ pub fn prepare(app: &AppHandle) -> bool {
                 ctx.capture
                     .try_lock()?
                     .as_ref()
-                    .map(|capture| capture.meter().levels)
+                    .and_then(|capture| capture.try_meter())
+                    .map(|sample| sample.levels)
                     .unwrap_or_default()
             } else {
                 Vec::new()
             };
             Some(Frame {
-                snapshot: overlay.snapshot(state),
+                snapshot,
                 epoch: overlay.epoch,
-                generation: ctx.session_generation.load(Ordering::SeqCst),
+                generation: overlay.generation,
                 theme: settings.theme.clone(),
                 accent_color: settings.accent_color.clone(),
                 locale,

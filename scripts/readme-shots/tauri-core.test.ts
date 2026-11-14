@@ -17,11 +17,14 @@ describe("browser fixtures", () => {
     expect(new DataView(pcm.buffer).getUint32(40, true)).toBe(history[1].durationMs * 16 * 2);
   });
   it("publishes compare recording and results for the current clip", async () => {
-    const changes: unknown[] = [];
-    const unsubscribe = await listen("compare://state", ({ payload }) => changes.push(payload));
-    await invoke("start_model_compare");
+    const changes: CompareState[] = [];
+    const unsubscribe = await listen("compare://state", ({ payload }) =>
+      changes.push(payload as CompareState),
+    );
+    const owner = await invoke<number>("start_model_compare");
+    expect(owner).toBeGreaterThan(0);
     expect((await invoke<CompareState>("get_model_compare")).recording).toBe(true);
-    await invoke("stop_model_compare");
+    await invoke("stop_model_compare", { nonce: owner });
     const result = await invoke<CompareState>("run_model_compare");
     expect(result.slots.length).toBeGreaterThan(1);
     expect(
@@ -29,10 +32,21 @@ describe("browser fixtures", () => {
     ).toBe(true);
     expect(result.listenPath).toMatch(/^data:audio\/wav/);
     expect(changes).toHaveLength(3);
-    await invoke("start_model_compare");
+    expect(changes[0].revision).toBeGreaterThan(0);
+    expect(changes[1].revision).toBeGreaterThan(changes[0].revision);
+    expect(changes[2].revision).toBeGreaterThan(changes[1].revision);
+    expect(result.revision).toBeGreaterThan(changes[2].revision);
+    const nextOwner = await invoke<number>("start_model_compare");
     expect((await invoke<CompareState>("get_model_compare")).slots).toEqual([]);
+    const staleStop = await invoke<CompareState>("stop_model_compare", { nonce: owner });
+    expect(staleStop.recording).toBe(true);
+    expect(staleStop.nonce).toBe(nextOwner);
+    await invoke("stop_model_compare", { nonce: nextOwner });
     unsubscribe();
     await invoke("clear_model_compare");
+    const cleared = await invoke<CompareState>("get_model_compare");
+    expect(cleared.revision).toBeGreaterThan(result.revision);
+    expect(cleared.nonce).toBeGreaterThan(result.nonce);
   });
   it("persists settings and emits isolated changed values", async () => {
     const initial = await invoke<AppSettings>("get_settings");

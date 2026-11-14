@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   DndContext,
   KeyboardSensor,
@@ -16,6 +16,7 @@ import {
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
+import { ExternalLink } from "lucide-react";
 import { api, type AppSettings, type CompareState } from "../../../lib/api";
 import { formatInvokeError, messagesForUiLanguage, type Messages } from "../../../lib/i18n";
 import { PageHeader } from "../../../components/settings/PageHeader";
@@ -30,6 +31,7 @@ import {
 } from "./compare-models";
 
 const emptyState: CompareState = {
+  revision: 0,
   recording: false,
   running: false,
   nonce: 0,
@@ -56,12 +58,35 @@ export function ComparePane({
   const [error, setError] = useState("");
   const statusCopy = messagesForUiLanguage(settings.uiLanguage ?? "auto", navigator.language);
   const audioRef = useRef<HTMLAudioElement | null>(null);
-  const stateEventRevisionRef = useRef(0);
-  const recordingRef = useRef(false);
+  const appliedRevisionRef = useRef(0);
   const startingRef = useRef(false);
   const mountedRef = useRef(true);
-  const stopAfterStartRef = useRef(false);
-  recordingRef.current = state.recording;
+  const ownedNonceRef = useRef<number | null>(null);
+  const stopRequestsRef = useRef(new Map<number, Promise<CompareState>>());
+  const attachAudio = useCallback((node: HTMLAudioElement | null) => {
+    if (audioRef.current !== node) audioRef.current?.pause();
+    audioRef.current = node;
+  }, []);
+  const stopCapture = useCallback((nonce: number) => {
+    const existing = stopRequestsRef.current.get(nonce);
+    if (existing) return existing;
+    const request = api
+      .stopModelCompare(nonce)
+      .then((next) => {
+        if (ownedNonceRef.current === nonce) ownedNonceRef.current = null;
+        return next;
+      })
+      .finally(() => {
+        stopRequestsRef.current.delete(nonce);
+      });
+    stopRequestsRef.current.set(nonce, request);
+    return request;
+  }, []);
+  const applySnapshot = useCallback((next: CompareState) => {
+    if (!Number.isSafeInteger(next.revision) || next.revision <= appliedRevisionRef.current) return;
+    appliedRevisionRef.current = next.revision;
+    setState(next);
+  }, []);
   const models = useMemo(() => settings.compareModels ?? [], [settings.compareModels]);
   const slotIds = useMemo(() => compareSlotIds(models.length), [models.length]);
   const unique = useMemo(() => new Set(models.map((item) => item.trim())), [models]);
@@ -83,53 +108,56 @@ export function ComparePane({
     let cancelled = false;
     let stopState: (() => void) | undefined;
     let stopError: (() => void) | undefined;
+    let subscribed = false;
+    const dispose = () => {
+      const stateListener = stopState;
+      const errorListener = stopError;
+      stopState = undefined;
+      stopError = undefined;
+      stateListener?.();
+      errorListener?.();
+    };
     void (async () => {
       try {
-        const [unlistenState, unlistenError] = await Promise.all([
-          listen<CompareState>("compare://state", (event) => {
-            stateEventRevisionRef.current += 1;
-            if (!cancelled) setState(event.payload);
-          }),
-          listen<string>("compare://error", (event) => {
-            if (!cancelled) setError(formatInvokeError(event.payload, copy));
-          }),
-        ]);
+        stopState = await listen<CompareState>("compare://state", (event) => {
+          if (!cancelled) applySnapshot(event.payload);
+        });
         if (cancelled) {
-          unlistenState();
-          unlistenError();
+          dispose();
           return;
         }
-        stopState = unlistenState;
-        stopError = unlistenError;
-
-        const snapshotRevision = stateEventRevisionRef.current;
-        const next = await api.getModelCompare();
-        if (!cancelled && stateEventRevisionRef.current === snapshotRevision) {
-          setState(next);
+        stopError = await listen<string>("compare://error", (event) => {
+          if (!cancelled) setError(formatInvokeError(event.payload, copy));
+        });
+        if (cancelled) {
+          dispose();
+          return;
         }
+
+        subscribed = true;
+        const next = await api.getModelCompare();
+        if (!cancelled) applySnapshot(next);
       } catch (err) {
+        if (!subscribed) dispose();
         if (!cancelled) setError(formatInvokeError(err, copy));
       }
     })();
     return () => {
       cancelled = true;
-      stopState?.();
-      stopError?.();
+      dispose();
     };
-  }, [copy]);
+  }, [applySnapshot, copy]);
 
   useEffect(() => {
     mountedRef.current = true;
-    const node = audioRef.current;
     return () => {
       mountedRef.current = false;
-      node?.pause();
-      if (recordingRef.current || startingRef.current) {
-        stopAfterStartRef.current = true;
-        void api.stopModelCompare().catch(() => undefined);
+      const nonce = ownedNonceRef.current;
+      if (nonce !== null) {
+        void stopCapture(nonce).catch(() => undefined);
       }
     };
-  }, []);
+  }, [stopCapture]);
 
   function patchModels(next: string[]) {
     onChange({ compareModels: next });
@@ -147,25 +175,27 @@ export function ComparePane({
 
   async function toggleRecord() {
     setError("");
-    const eventRevision = stateEventRevisionRef.current;
-    try {
-      if (state.recording) {
-        const next = await api.stopModelCompare();
-        if (stateEventRevisionRef.current === eventRevision) setState(next);
-        return;
+    if (state.recording) {
+      try {
+        const next = await stopCapture(state.nonce);
+        applySnapshot(next);
+      } catch (err) {
+        if (mountedRef.current) setError(formatInvokeError(err, copy));
       }
-      startingRef.current = true;
-      stopAfterStartRef.current = false;
-      await api.startModelCompare();
+      return;
+    }
+    if (startingRef.current) return;
+    startingRef.current = true;
+    try {
+      const nonce = await api.startModelCompare();
+      ownedNonceRef.current = nonce;
       if (!mountedRef.current) {
-        if (!stopAfterStartRef.current) {
-          stopAfterStartRef.current = true;
-          await api.stopModelCompare();
-        }
+        await stopCapture(nonce);
         return;
       }
       const next = await api.getModelCompare();
-      if (stateEventRevisionRef.current === eventRevision) setState(next);
+      if (mountedRef.current) applySnapshot(next);
+      else if (ownedNonceRef.current === nonce) await stopCapture(nonce);
     } catch (err) {
       if (mountedRef.current) setError(formatInvokeError(err, copy));
     } finally {
@@ -175,21 +205,19 @@ export function ComparePane({
 
   async function run() {
     setError("");
-    const eventRevision = stateEventRevisionRef.current;
     try {
       const next = await api.runModelCompare();
-      if (stateEventRevisionRef.current === eventRevision) setState(next);
+      applySnapshot(next);
     } catch (err) {
       setError(formatInvokeError(err, copy));
     }
   }
 
   function cancelRun() {
-    const eventRevision = stateEventRevisionRef.current;
     void api
       .cancelModelCompare()
       .then((next) => {
-        if (stateEventRevisionRef.current === eventRevision) setState(next);
+        applySnapshot(next);
       })
       .catch((err: unknown) => setError(formatInvokeError(err, copy)));
   }
@@ -207,6 +235,7 @@ export function ComparePane({
       </p>
       <div className="mb-4 flex flex-wrap gap-2">
         <Button type="button" variant="outline" onClick={() => void api.openOpenrouterModels()}>
+          <ExternalLink aria-hidden="true" />
           {copy.openRouterCatalog}
         </Button>
         <Button type="button" onClick={() => void toggleRecord()} disabled={state.running}>
@@ -241,7 +270,7 @@ export function ComparePane({
       ) : null}
       {state.listenPath ? (
         <audio
-          ref={audioRef}
+          ref={attachAudio}
           key={state.nonce}
           className="mb-4 w-full max-w-lg"
           controls

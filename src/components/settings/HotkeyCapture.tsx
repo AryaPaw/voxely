@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ComponentProps } from "react";
 import { api } from "../../lib/api";
 import { hotkeyFromKeyboardEvent } from "../../lib/hotkey";
 import { Button } from "../ui/button";
@@ -7,11 +7,12 @@ export function HotkeyCapture({
   value,
   prompt,
   onChange,
+  ...buttonProps
 }: {
   value: string;
   prompt: string;
   onChange: (value: string) => void;
-}) {
+} & Pick<ComponentProps<typeof Button>, "id" | "aria-describedby" | "aria-labelledby">) {
   const [listening, setListening] = useState(false);
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
@@ -45,6 +46,7 @@ export function HotkeyCapture({
 
   return (
     <Button
+      {...buttonProps}
       type="button"
       variant={listening ? "default" : "outline"}
       className="w-full justify-start font-normal"

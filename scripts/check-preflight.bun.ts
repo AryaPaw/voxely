@@ -150,6 +150,9 @@ describe("verification preflight", () => {
       }
       const pkg = JSON.parse(readFileSync(join(source, "package.json"), "utf8"));
       pkg.scripts["verify:preflight"] = "bun scripts/check-preflight.ts";
+      // This fixture checks gate propagation, without installing dependencies
+      // or querying external advisory services in its disposable checkout.
+      pkg.scripts["verify:security"] = 'bun -e "process.exit(0)"';
       pkg.scripts["verify:frontend"] = 'bun -e "process.exit(23)"';
       writeFileSync(join(fixture, "package.json"), JSON.stringify(pkg));
       writeFileSync(join(fixture, "fixture.rs"), "fn main() {}\n");
@@ -212,6 +215,18 @@ describe("verification preflight", () => {
       rmSync(join(fixture, "src/uncommitted.ts"));
       expect(command(["bun", "scripts/check-preflight.ts", "--install-hooks"]).code).toBe(0);
       const shell = Bun.which("sh") ?? resolve(dirname(Bun.which("git")!), "../bin/sh.exe");
+      pkg.scripts["verify:security"] = 'bun -e "process.exit(22)"';
+      writeFileSync(join(fixture, "package.json"), JSON.stringify(pkg));
+      git("add", "package.json");
+      git("commit", "-qm", "security failure fixture");
+      const securityHook = command([shell, ".githooks/pre-push"], fixture, mixedRouting);
+      expect(securityHook.code).not.toBe(0);
+      expect(securityHook.output).toContain('script "verify:security" exited with code 22');
+      expect(securityHook.output).not.toContain('script "verify:frontend" exited with code 23');
+      pkg.scripts["verify:security"] = 'bun -e "process.exit(0)"';
+      writeFileSync(join(fixture, "package.json"), JSON.stringify(pkg));
+      git("add", "package.json");
+      git("commit", "-qm", "frontend failure fixture");
       const routedHook = command([shell, ".githooks/pre-push"], fixture, mixedRouting);
       expect(routedHook.code).not.toBe(0);
       expect(routedHook.output).toContain('script "verify:frontend" exited with code 23');

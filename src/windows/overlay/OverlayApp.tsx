@@ -9,10 +9,13 @@ import { acceptOverlayRevision, applyOverlaySnapshot } from "../../lib/overlay-s
 import { overlayCancelArmed } from "../../lib/overlay-wave";
 import { bindEscapeCancel } from "../../lib/escape-cancel";
 import { applyTheme, watchSystemTheme } from "../../lib/theme";
+import { acceptSavedSettings } from "../../lib/settings-persist";
 import { OverlayWave } from "./OverlayWave";
 
 const HIDDEN: OverlaySnapshot = {
   revision: 0,
+  generation: 0,
+  epoch: 0,
   visible: false,
   state: { kind: "idle" },
 };
@@ -23,35 +26,41 @@ export function OverlayApp() {
   const [hovered, setCancelHover] = useState(false);
   const hoverEpoch = useRef(0);
   const hoverCheckInFlight = useRef(false);
+  const acceptedSettings = useRef<AppSettings | null>(null);
   const [copy, setCopy] = useState(() => messagesFor("ru"));
   const [theme, setTheme] = useState("dark");
   const [accent, setAccent] = useState<AccentColor>(DEFAULT_ACCENT);
   const state: SessionState = snapshot.state;
   const recording = state.kind === "recording" || state.kind === "startingRecording";
   const busy = overlayIsBusy(state);
-  const cancelReady = overlayCancelArmed(busy, hovered);
+  const hasCancelTicket = snapshot.generation > 0 && snapshot.epoch > 0;
+  const cancelReady = overlayCancelArmed(busy && hasCancelTicket, hovered);
 
   function applySettings(settings: AppSettings) {
-    setTheme(settings.theme);
-    setAccent(settings.accentColor ?? DEFAULT_ACCENT);
-    applyTheme(settings.theme, settings.accentColor);
-    const locale = resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language);
+    const next = acceptSavedSettings(acceptedSettings.current, settings);
+    if (next === acceptedSettings.current) return;
+    acceptedSettings.current = next;
+    setTheme(next.theme);
+    setAccent(next.accentColor ?? DEFAULT_ACCENT);
+    const locale = resolveUiLocale(next.uiLanguage ?? "auto", navigator.language);
     applyUiLocale(locale);
     setCopy(messagesFor(locale));
   }
 
   useEffect(() => {
+    let cancelled = false;
     void invoke("overlay_mark_frame", { phase: "react" }).catch(() => undefined);
     const frame = window.requestAnimationFrame(() => {
       void invoke("overlay_mark_frame", { phase: "frame" }).catch(() => undefined);
     });
     void api
       .settings()
-      .then(applySettings)
+      .then((settings) => {
+        if (!cancelled) applySettings(settings);
+      })
       .catch(() => undefined);
     let revision = 0;
     let unlistenFn: (() => void) | undefined;
-    let cancelled = false;
     const unlistenState = listen<OverlaySnapshot>("overlay://snapshot", (event) => {
       if (!acceptOverlayRevision(revision, event.payload.revision)) {
         return;
@@ -73,9 +82,9 @@ export function OverlayApp() {
         setSnapshot(initial);
       }
     });
-    const unlistenSettings = listen<AppSettings>("settings://changed", (event) =>
-      applySettings(event.payload),
-    );
+    const unlistenSettings = listen<AppSettings>("settings://changed", (event) => {
+      if (!cancelled) applySettings(event.payload);
+    });
     return () => {
       cancelled = true;
       window.cancelAnimationFrame(frame);
@@ -85,7 +94,10 @@ export function OverlayApp() {
     };
   }, []);
 
-  useEffect(() => watchSystemTheme(theme, accent), [theme, accent]);
+  useLayoutEffect(() => {
+    applyTheme(theme, accent);
+    return watchSystemTheme(theme, accent);
+  }, [theme, accent]);
 
   useEffect(() => {
     return bindEscapeCancel(() => {
@@ -97,13 +109,13 @@ export function OverlayApp() {
     hoverEpoch.current += 1;
     hoverCheckInFlight.current = false;
     setCancelHover(false);
-  }, [busy, snapshot.visible]);
+  }, [busy, snapshot.visible, snapshot.generation, snapshot.epoch]);
 
   useEffect(() => {
     if (recording) {
       setElapsed(0);
     }
-  }, [recording]);
+  }, [recording, snapshot.generation]);
 
   useEffect(() => {
     if (!recording) {
@@ -111,19 +123,19 @@ export function OverlayApp() {
     }
     const clock = window.setInterval(() => setElapsed((value) => value + 1), 1000);
     return () => window.clearInterval(clock);
-  }, [recording]);
+  }, [recording, snapshot.generation]);
 
   function onPillClick() {
     if (cancelReady) {
       hoverEpoch.current += 1;
       hoverCheckInFlight.current = false;
       setCancelHover(false);
-      void api.cancel().catch(() => undefined);
+      void api.cancelOverlay(snapshot.generation, snapshot.epoch).catch(() => undefined);
     }
   }
 
   function checkCancelHover(event: PointerEvent<HTMLButtonElement>) {
-    if (!busy || !snapshot.visible || hovered || hoverCheckInFlight.current) {
+    if (!busy || !snapshot.visible || !hasCancelTicket || hovered || hoverCheckInFlight.current) {
       return;
     }
 

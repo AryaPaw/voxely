@@ -92,6 +92,16 @@ pub struct TranscriptionAttempt {
     pub latency_ms: Option<i64>,
 }
 
+/// API accounting only: never contains a transcript, audio or a filesystem path.
+#[derive(Clone)]
+pub struct ApiAttemptUsage {
+    pub operation_id: String,
+    pub attempt_id: String,
+    pub occurred_at: DateTime<Utc>,
+    pub model: String,
+    pub cost_usd: Option<f64>,
+}
+
 pub struct HistoryRepo {
     conn: Connection,
 }
@@ -199,6 +209,7 @@ impl HistoryRepo {
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
         ensure_search_text_column(&conn)?;
         ensure_silence_metrics_columns(&conn)?;
+        ensure_usage_operation_column(&conn)?;
         let repo = Self { conn };
         repo.backfill_search_text()?;
         repo.backfill_usage_statistics()?;
@@ -627,6 +638,8 @@ impl HistoryRepo {
             .map_err(storage_err)?;
         let result = (|| -> Result<(), AppError> {
             self.conn.execute("INSERT OR IGNORE INTO usage_suppressed(recording_id) SELECT id FROM recordings", []).map_err(storage_err)?;
+            // Invalidate in-flight Compare writers as part of the same clear.
+            self.conn.execute("INSERT INTO usage_meta(key,value) VALUES('compare-generation',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![Uuid::new_v4().to_string()]).map_err(storage_err)?;
             self.conn
                 .execute_batch("DELETE FROM usage_dictations; DELETE FROM usage_attempts; COMMIT;")
                 .map_err(storage_err)
@@ -635,6 +648,48 @@ impl HistoryRepo {
             let _ = self.conn.execute_batch("ROLLBACK;");
         }
         result
+    }
+
+    pub fn compare_usage_generation(&self) -> Result<String, AppError> {
+        self.conn
+            .query_row(
+                "SELECT value FROM usage_meta WHERE key='compare-generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|generation| generation.unwrap_or_else(|| "initial".into()))
+            .map_err(storage_err)
+    }
+
+    /// Attempts use the same ledger as dictation, but no synthetic history row.
+    /// A stable ID lets completion add its confirmed price without double counting.
+    pub fn record_compare_attempt(
+        &self,
+        attempt: &ApiAttemptUsage,
+        generation: &str,
+    ) -> Result<(), AppError> {
+        if !attempt.operation_id.starts_with("compare:")
+            || attempt.attempt_id.is_empty()
+            || attempt.model.is_empty()
+            || attempt
+                .cost_usd
+                .is_some_and(|cost| !cost.is_finite() || cost < 0.0)
+        {
+            return Err(AppError::RequestValidationFailed(
+                "invalid compare usage metadata".into(),
+            ));
+        }
+        self.conn.execute(
+            "INSERT INTO usage_attempts(attempt_id,recording_id,occurred_at,model,cost_usd,operation_kind)
+             SELECT ?1,?2,?3,?4,?5,'compare'
+             WHERE ?6=COALESCE((SELECT value FROM usage_meta WHERE key='compare-generation'),'initial')
+             ON CONFLICT(attempt_id) DO UPDATE SET cost_usd=COALESCE(usage_attempts.cost_usd,excluded.cost_usd)
+             WHERE usage_attempts.operation_kind='compare'
+               AND usage_attempts.recording_id=excluded.recording_id AND usage_attempts.model=excluded.model",
+            params![attempt.attempt_id, attempt.operation_id, attempt.occurred_at.to_rfc3339(), attempt.model, attempt.cost_usd, generation],
+        ).map_err(storage_err)?;
+        Ok(())
     }
     pub fn delete_usage_for_recording(&self, id: &str) -> Result<(), AppError> {
         let tx = self.conn.unchecked_transaction().map_err(storage_err)?;
@@ -1221,6 +1276,22 @@ fn ensure_silence_metrics_columns(conn: &Connection) -> Result<(), AppError> {
             ))
             .map_err(storage_err)?;
         }
+    }
+    Ok(())
+}
+
+fn ensure_usage_operation_column(conn: &Connection) -> Result<(), AppError> {
+    let mut statement = conn
+        .prepare("PRAGMA table_info(usage_attempts)")
+        .map_err(storage_err)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(storage_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(storage_err)?;
+    if !columns.iter().any(|column| column == "operation_kind") {
+        conn.execute_batch("ALTER TABLE usage_attempts ADD COLUMN operation_kind TEXT NOT NULL DEFAULT 'dictation' CHECK(operation_kind IN ('dictation','compare'))")
+            .map_err(storage_err)?;
     }
     Ok(())
 }
@@ -2475,6 +2546,193 @@ mod tests {
         assert!(repo.get(&old.id).unwrap().is_some());
         assert!(repo.get(&boundary.id).unwrap().is_some());
     }
+    #[test]
+    fn compare_usage_survives_restart_manual_history_delete_and_full_clear_fences_late_writers() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("compare-usage.db");
+        let repo = HistoryRepo::open(&path).unwrap();
+        let generation = repo.compare_usage_generation().unwrap();
+        let at = Utc::now();
+        let mut attempt = ApiAttemptUsage {
+            operation_id: "compare:run".into(),
+            attempt_id: "compare:run:slot:1".into(),
+            occurred_at: at,
+            model: "model-a".into(),
+            cost_usd: None,
+        };
+        repo.record_compare_attempt(&attempt, &generation).unwrap();
+        attempt.cost_usd = Some(0.03);
+        repo.record_compare_attempt(&attempt, &generation).unwrap();
+        repo.record_compare_attempt(&attempt, &generation).unwrap();
+        let recording = new_recording("dictation-model".into());
+        repo.insert(&recording).unwrap();
+        repo.delete_with_usage(&recording.id).unwrap();
+        drop(repo);
+        let repo = HistoryRepo::open(&path).unwrap();
+        let statistics = repo
+            .get_usage_statistics(
+                at - chrono::Duration::seconds(1),
+                at + chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!(statistics.api_requests, 1);
+        assert_eq!(statistics.reported_cost_usd, 0.03);
+        assert_eq!(statistics.unpriced_attempts, 0);
+        assert_eq!(statistics.dictations, 0);
+        assert_eq!(repo.count(None).unwrap(), 0);
+        repo.clear_usage_statistics().unwrap();
+        attempt.attempt_id = "compare:run:slot:2".into();
+        repo.record_compare_attempt(&attempt, &generation).unwrap();
+        drop(repo);
+        let repo = HistoryRepo::open(&path).unwrap();
+        assert_eq!(
+            repo.get_usage_statistics(
+                at - chrono::Duration::seconds(1),
+                at + chrono::Duration::seconds(1)
+            )
+            .unwrap()
+            .api_requests,
+            0
+        );
+        let fresh_generation = repo.compare_usage_generation().unwrap();
+        assert_ne!(generation, fresh_generation);
+        repo.record_compare_attempt(&attempt, &fresh_generation)
+            .unwrap();
+        assert_eq!(
+            repo.get_usage_statistics(
+                at - chrono::Duration::seconds(1),
+                at + chrono::Duration::seconds(1)
+            )
+            .unwrap()
+            .api_requests,
+            1
+        );
+    }
+
+    #[test]
+    fn usage_operation_migration_preserves_legacy_rows_and_prunes_compare_at_its_own_cutoff() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("legacy-usage.db");
+        let at = Utc::now();
+        let connection = Connection::open(&path).unwrap();
+        connection.execute_batch("CREATE TABLE usage_attempts(attempt_id TEXT PRIMARY KEY,recording_id TEXT NOT NULL,occurred_at TEXT NOT NULL,model TEXT NOT NULL,cost_usd REAL);").unwrap();
+        connection
+            .execute(
+                "INSERT INTO usage_attempts VALUES('old-attempt','old-dictation',?1,'legacy',0.2)",
+                params![at.to_rfc3339()],
+            )
+            .unwrap();
+        drop(connection);
+        let repo = HistoryRepo::open(&path).unwrap();
+        assert_eq!(
+            repo.conn
+                .query_row(
+                    "SELECT operation_kind FROM usage_attempts WHERE attempt_id='old-attempt'",
+                    [],
+                    |row| row.get::<_, String>(0)
+                )
+                .unwrap(),
+            "dictation"
+        );
+        let generation = repo.compare_usage_generation().unwrap();
+        let cutoff = at - chrono::Duration::days(90);
+        for (id, timestamp) in [
+            ("expired", cutoff - chrono::Duration::seconds(1)),
+            ("boundary", cutoff),
+        ] {
+            repo.record_compare_attempt(
+                &ApiAttemptUsage {
+                    operation_id: "compare:run".into(),
+                    attempt_id: id.into(),
+                    occurred_at: timestamp,
+                    model: "model-a".into(),
+                    cost_usd: Some(0.1),
+                },
+                &generation,
+            )
+            .unwrap();
+        }
+        repo.prune_usage_statistics(cutoff).unwrap();
+        assert_eq!(
+            repo.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM usage_attempts WHERE attempt_id='expired'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            repo.conn
+                .query_row(
+                    "SELECT COUNT(*) FROM usage_attempts WHERE attempt_id='boundary'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        drop(repo);
+        let repo = HistoryRepo::open(&path).unwrap();
+        let statistics = repo
+            .get_usage_statistics(
+                at - chrono::Duration::seconds(1),
+                at + chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        assert_eq!(statistics.api_requests, 1);
+        assert_eq!(statistics.reported_cost_usd, 0.2);
+        assert_eq!(statistics.dictations, 0);
+        let columns: Vec<String> = repo
+            .conn
+            .prepare("PRAGMA table_info(usage_attempts)")
+            .unwrap()
+            .query_map([], |row| row.get(1))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            columns,
+            [
+                "attempt_id",
+                "recording_id",
+                "occurred_at",
+                "model",
+                "cost_usd",
+                "operation_kind"
+            ]
+        );
+    }
+
+    #[test]
+    fn compare_usage_rejects_invalid_prices_without_affecting_the_ledger() {
+        let dir = tempdir().unwrap();
+        let repo = HistoryRepo::open(&dir.path().join("usage.db")).unwrap();
+        let generation = repo.compare_usage_generation().unwrap();
+        for price in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(repo
+                .record_compare_attempt(
+                    &ApiAttemptUsage {
+                        operation_id: "compare:run".into(),
+                        attempt_id: "attempt".into(),
+                        occurred_at: Utc::now(),
+                        model: "model".into(),
+                        cost_usd: Some(price),
+                    },
+                    &generation
+                )
+                .is_err());
+        }
+        assert_eq!(
+            repo.conn
+                .query_row("SELECT COUNT(*) FROM usage_attempts", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn pause_metrics_are_idempotent_survive_history_retention_and_restart() {
         let dir = tempdir().unwrap();

@@ -189,6 +189,7 @@ fn run_app() -> i32 {
             recording_audio_url,
             recording_api_audio,
             cancel_dictation,
+            cancel_overlay_dictation,
             set_hotkey_capture,
             open_github,
             open_openrouter_models,

@@ -13,7 +13,7 @@ use parking_lot::Mutex;
 use rtrb::RingBuffer;
 
 use super::devices::resolve_device;
-use super::resample::{f32_to_i16, i16_to_f32, to_mono, LinearStreamResampler};
+use super::resample::{f32_to_i16, i16_to_f32, to_mono, StreamResampler};
 use crate::dsp::metrics::{SAMPLE_RATE, STT_SAMPLE_RATE};
 use crate::error::AppError;
 use crate::transcription::limits::MAX_MULTIPART_AUDIO_FILE_BYTES;
@@ -648,7 +648,7 @@ fn run_capture_writer(
     let mut writer =
         WavWriter::create(&tmp, spec).map_err(|e| AppError::StorageFailed(e.to_string()))?;
     let mut leftover = Vec::new();
-    let mut resampler = LinearStreamResampler::new(input_rate, SAMPLE_RATE);
+    let mut resampler = StreamResampler::new(input_rate, SAMPLE_RATE)?;
     let mut written = 0u64;
     let mut truncated = false;
     while !stop.load(Ordering::SeqCst) {
@@ -680,12 +680,12 @@ fn run_capture_writer(
         truncated = true;
     }
     if !leftover.is_empty() && written < MAX_PCM16_FRAMES {
-        let ready = resampler.push(&leftover);
+        let ready = resampler.push(&leftover)?;
         leftover.clear();
         write_pcm_samples(&mut writer, &ready, &mut written)?;
     }
     if written < MAX_PCM16_FRAMES {
-        let tail = resampler.finish();
+        let tail = resampler.finish()?;
         write_pcm_samples(&mut writer, &tail, &mut written)?;
         if written >= MAX_PCM16_FRAMES {
             truncated = true;
@@ -788,7 +788,7 @@ pub fn capture_wav_duration_ms(path: &Path) -> Result<u64, AppError> {
 
 fn flush_pcm_chunk(
     leftover: &mut Vec<f32>,
-    resampler: &mut LinearStreamResampler,
+    resampler: &mut StreamResampler,
     writer: &mut hound::WavWriter<std::io::BufWriter<std::fs::File>>,
     written: &mut u64,
 ) -> Result<bool, AppError> {
@@ -798,7 +798,7 @@ fn flush_pcm_chunk(
     }
     let take = leftover.len();
     let chunk: Vec<f32> = leftover.drain(..take).collect();
-    let resampled = resampler.push(&chunk);
+    let resampled = resampler.push(&chunk)?;
     write_pcm_samples(writer, &resampled, written)?;
     Ok(*written >= MAX_PCM16_FRAMES)
 }
@@ -1507,7 +1507,7 @@ mod tests {
             sample_format: hound::SampleFormat::Int,
         };
         let mut writer = WavWriter::create(&path, spec).unwrap();
-        let mut resampler = LinearStreamResampler::new(SAMPLE_RATE, SAMPLE_RATE);
+        let mut resampler = StreamResampler::new(SAMPLE_RATE, SAMPLE_RATE).unwrap();
         let mut pending = vec![0.5; 511];
         let mut written = MAX_PCM16_FRAMES - 1;
         assert!(!flush_pcm_chunk(&mut pending, &mut resampler, &mut writer, &mut written).unwrap());

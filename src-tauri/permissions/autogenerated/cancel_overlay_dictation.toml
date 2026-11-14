@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-cancel-overlay-dictation"
+description = "Enables the cancel_overlay_dictation command without any pre-configured scope."
+commands.allow = ["cancel_overlay_dictation"]
+
+[[permission]]
+identifier = "deny-cancel-overlay-dictation"
+description = "Denies the cancel_overlay_dictation command without any pre-configured scope."
+commands.deny = ["cancel_overlay_dictation"]

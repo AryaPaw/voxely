@@ -22,7 +22,7 @@ use crate::app::overlay::{
 use crate::app::overlay_controller::{delayed_hide_is_stale, OverlayLifecycle, OverlaySnapshot};
 use crate::audio::capture::{
     read_pcm16_wav_with_rate, write_pcm16_wav, CaptureCleanupHandle, CaptureSession,
-    CaptureStopOutcome, MeterSample,
+    CaptureStartFailure, CaptureStopOutcome, MeterSample,
 };
 use crate::audio::devices::list_input_devices;
 use crate::dsp::metrics::{SAMPLE_RATE, STT_SAMPLE_RATE};
@@ -48,13 +48,49 @@ use crate::windows_int::text_injector::{
 type ShutdownCaptureCompletion = Arc<Mutex<Option<Box<dyn FnOnce() + Send>>>>;
 const SHUTDOWN_CAPTURE_CLEANUP_BOUND: Duration = Duration::from_secs(30);
 const CANCELLED_CLEANUP_MAX_ATTEMPTS: u32 = 8;
-const MAX_PENDING_ATTEMPTS: usize = 256;
+pub(crate) const MAX_PENDING_ATTEMPTS: usize = 256;
 
 #[derive(Clone)]
-struct PendingAttempt {
-    row: crate::history::repository::TranscriptionAttempt,
-    cost_usd: Option<f64>,
-    model: String,
+enum PendingAttempt {
+    Dictation {
+        row: crate::history::repository::TranscriptionAttempt,
+        cost_usd: Option<f64>,
+        model: String,
+    },
+    Compare {
+        queue_id: String,
+        usage: crate::history::repository::ApiAttemptUsage,
+        generation: String,
+    },
+}
+
+impl PendingAttempt {
+    fn queue_id(&self) -> &str {
+        match self {
+            Self::Dictation { row, .. } => &row.id,
+            Self::Compare { queue_id, .. } => queue_id,
+        }
+    }
+
+    fn recording_id(&self) -> Option<&str> {
+        match self {
+            Self::Dictation { row, .. } => Some(&row.recording_id),
+            Self::Compare { .. } => None,
+        }
+    }
+
+    fn persist(&self, history: &crate::history::repository::HistoryRepo) -> Result<(), AppError> {
+        match self {
+            Self::Dictation {
+                row,
+                cost_usd,
+                model,
+            } => history.record_attempt_for_model(row, *cost_usd, model),
+            Self::Compare {
+                usage, generation, ..
+            } => history.record_compare_attempt(usage, generation),
+        }
+    }
 }
 
 pub struct AppContext {
@@ -72,6 +108,7 @@ pub struct AppContext {
     #[cfg(windows)]
     pub native_hud: Mutex<Option<crate::windows_int::native_hud::NativeHud>>,
     pub in_flight: Mutex<HashSet<String>>,
+    pub(crate) pending_audio_writes: Mutex<HashSet<String>>,
     pub transport: Mutex<OpenRouterTransport>,
     pub overlay_timeline: Mutex<OverlayTimeline>,
     pub session_lifecycle: Mutex<()>,
@@ -137,6 +174,7 @@ impl AppContext {
                 settings.storage_limit_bytes(),
             )?;
         }
+        let compare_nonce = crate::app::compare::initial_compare_nonce(&audio)?;
         let transport = OpenRouterTransport::new(settings.retry.to_policy().connect_timeout)?;
         Ok(Self {
             settings_path,
@@ -153,6 +191,7 @@ impl AppContext {
             #[cfg(windows)]
             native_hud: Mutex::new(None),
             in_flight: Mutex::new(HashSet::new()),
+            pending_audio_writes: Mutex::new(HashSet::new()),
             transport: Mutex::new(transport),
             overlay_timeline: Mutex::new(OverlayTimeline::default()),
             session_lifecycle: Mutex::new(()),
@@ -169,7 +208,10 @@ impl AppContext {
             preview_capture: Mutex::new(None),
             compare_capture: Mutex::new(None),
             compare_cancel: Mutex::new(None),
-            compare_state: Mutex::new(crate::app::compare::CompareState::default()),
+            compare_state: Mutex::new(crate::app::compare::CompareState {
+                nonce: compare_nonce,
+                ..Default::default()
+            }),
             compare_running: AtomicBool::new(false),
             capture_starting: AtomicBool::new(false),
             pending_native_capture_starts: AtomicUsize::new(0),
@@ -196,8 +238,18 @@ impl AppContext {
     }
 
     pub fn overlay_snapshot(&self) -> OverlaySnapshot {
-        let state = self.state.lock().clone();
-        self.overlay.lock().snapshot(state)
+        self.overlay_snapshot_with(|| {})
+    }
+
+    fn overlay_snapshot_with(&self, after_state_read: impl FnOnce()) -> OverlaySnapshot {
+        // Keep the state owner until its matching overlay revision is read.
+        // A new session must never lend its revision to an older Idle state.
+        let state = self.state.lock();
+        let published_state = state.clone();
+        after_state_read();
+        let snapshot = self.overlay.lock().snapshot(published_state);
+        drop(state);
+        snapshot
     }
 
     pub fn emit_overlay(&self, app: &AppHandle) {
@@ -245,7 +297,6 @@ pub fn cancel_recording(app: &AppHandle) -> Result<(), AppError> {
     cancel_recording_checked(app, None)
 }
 
-#[cfg(windows)]
 pub fn cancel_recording_from_hud(
     app: &AppHandle,
     generation: u64,
@@ -350,6 +401,7 @@ fn cancel_recording_checked(app: &AppHandle, ticket: Option<(u64, u64)>) -> Resu
 fn hud_cancel_ticket_matches(ctx: &AppContext, (generation, epoch): (u64, u64)) -> bool {
     let overlay = *ctx.overlay.lock();
     generation == ctx.session_generation.load(Ordering::SeqCst)
+        && generation == overlay.generation
         && epoch == overlay.epoch
         && overlay.visible
         && is_cancellable(&ctx.state.lock())
@@ -787,7 +839,10 @@ fn discard_stale_capture_completion(
         remove_capture_artifacts(&result.path);
         return;
     };
-    let interrupted_without_duration = match ctx.history.lock().get(recording_id) {
+    // A match scrutinee's temporary guard lives through its arms. Release
+    // history before any arm can acquire session_lifecycle during cleanup.
+    let recording = ctx.history.lock().get(recording_id);
+    let interrupted_without_duration = match recording {
         Ok(Some(rec)) => rec.status == RecordingStatus::Interrupted && rec.duration_ms <= 0,
         Ok(None) => false,
         Err(err) => {
@@ -947,9 +1002,6 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
         });
     }
     crate::app::compare::steal_compare_capture(app);
-    if !release_meter_monitor(&ctx) {
-        return Err(AppError::TranscriptionInProgress);
-    }
     let (tx, _) = tokio::sync::watch::channel(false);
     *ctx.cancel_tx.lock() = Some(tx);
     ctx.transition(SessionEvent::StartRequested)?;
@@ -979,6 +1031,9 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
         crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Start);
     }
     ctx.capture_starting.store(true, Ordering::SeqCst);
+    // Transfer ownership while admission is held, but never wait for the
+    // microphone driver on the UI thread or under the lifecycle lock.
+    let previous_meter = take_meter_monitor_for_release(&ctx);
     ctx.pending_native_capture_starts
         .fetch_add(1, Ordering::SeqCst);
     ctx.emit_history(app);
@@ -996,7 +1051,24 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     let late_app = app.clone();
     let late_recording_id = recording_id.clone();
     thread::spawn(move || {
-        let started = CaptureSession::start_with_late_completion(
+        let ready = previous_meter
+            .map(|session| stop_meter_capture(&completion_ctx, session))
+            .unwrap_or(Ok(()))
+            .and_then(|()| {
+                if crate::app::operations::lease_matches(
+                    generation,
+                    completion_ctx.session_generation.load(Ordering::SeqCst),
+                ) {
+                    Ok(())
+                } else {
+                    Err(AppError::Cancelled)
+                }
+            })
+            .map_err(|error| CaptureStartFailure {
+                error,
+                native_worker_pending: false,
+            });
+        let started = ready.and_then(|()| CaptureSession::start_with_late_completion(
             device.as_deref(),
             dest,
             move || {
@@ -1037,7 +1109,7 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
                 drop(_lifecycle);
                 schedule_deferred_shutdown_exit(&late_app, &late_ctx);
             },
-        );
+        ));
         let native_worker_pending = started
             .as_ref()
             .err()
@@ -1353,11 +1425,17 @@ enum StopOrigin {
     Automatic,
 }
 
+struct CaptureStopContext {
+    session: CaptureSession,
+    generation: u64,
+    recording_id: Option<String>,
+}
+
 fn take_capture_for_stop(
     ctx: &AppContext,
     origin: StopOrigin,
     capture_target: impl FnOnce(u64) -> Option<CapturedTarget>,
-) -> Result<Option<CaptureSession>, AppError> {
+) -> Result<Option<CaptureStopContext>, AppError> {
     let _session_lifecycle = ctx.session_lifecycle.lock();
     let _admission = crate::app::operations::lock_admission(ctx);
     // Recheck after acquiring the lifecycle lock: another stop may have won.
@@ -1385,7 +1463,11 @@ fn take_capture_for_stop(
             );
         }
     }
-    Ok(session)
+    Ok(session.map(|session| CaptureStopContext {
+        session,
+        generation: ctx.session_generation.load(Ordering::SeqCst),
+        recording_id: ctx.session_recording_id.lock().clone(),
+    }))
 }
 
 fn stop_recording(app: &AppHandle, origin: StopOrigin) -> Result<(), AppError> {
@@ -1400,7 +1482,12 @@ fn stop_recording(app: &AppHandle, origin: StopOrigin) -> Result<(), AppError> {
     let session = take_capture_for_stop(&ctx, origin, |generation| {
         native::capture_session_target(&skip, generation)
     })?;
-    let Some(session) = session else {
+    let Some(CaptureStopContext {
+        session,
+        generation,
+        recording_id,
+    }) = session
+    else {
         return Ok(());
     };
     /*
@@ -1412,8 +1499,6 @@ fn stop_recording(app: &AppHandle, origin: StopOrigin) -> Result<(), AppError> {
     if ctx.settings.lock().notifications {
         crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Stop);
     }
-    let generation = ctx.session_generation.load(Ordering::SeqCst);
-    let recording_id = ctx.session_recording_id.lock().clone();
     let app_handle = app.clone();
     thread::spawn(move || {
         let late_handle = app_handle.clone();
@@ -1463,20 +1548,17 @@ fn dispatch_capture_stop_result(
 
 fn finish_stop_error(app: &AppHandle, err: AppError, generation: u64, recording_id: Option<&str>) {
     let ctx = app.state::<Arc<AppContext>>();
-    if !crate::app::operations::lease_matches(
-        generation,
-        ctx.session_generation.load(Ordering::SeqCst),
-    ) {
+    let Some(_session_lifecycle) = lock_current_session_generation(&ctx, generation) else {
         if let Some(id) = recording_id {
             discard_stale_capture_failure(&ctx, id);
         }
         return;
-    }
+    };
     if let Some(id) = recording_id {
         if let Err(storage_err) = mark_recording_failed(&ctx, id, &err) {
             tracing::error!(error = %storage_err, recording_id = id, "persist capture-stop failure");
         }
-        clear_live_session(&ctx, id);
+        clear_live_session_locked(&ctx, id);
         ctx.emit_history(app);
     }
     let _ = ctx.transition(SessionEvent::SaveFailed(err.clone()));
@@ -1492,13 +1574,10 @@ fn finish_stop(
     recording_id: Option<&str>,
 ) {
     let ctx = app.state::<Arc<AppContext>>();
-    if !crate::app::operations::lease_matches(
-        generation,
-        ctx.session_generation.load(Ordering::SeqCst),
-    ) {
+    let Some(_session_lifecycle) = lock_current_session_generation(&ctx, generation) else {
         discard_stale_capture_completion(&ctx, recording_id, &result);
         return;
-    }
+    };
     let (can_continue, id) = {
         let state = ctx.state.lock().clone();
         let id = ctx.session_recording_id.lock().clone();
@@ -1515,7 +1594,7 @@ fn finish_stop(
             if let Err(storage_err) = mark_recording_failed(&ctx, id, &err) {
                 tracing::error!(error = %storage_err, recording_id = id, "persist out-of-session capture failure");
             }
-            clear_live_session(&ctx, id);
+            clear_live_session_locked(&ctx, id);
             ctx.emit_history(app);
             let _ = ctx.transition(SessionEvent::SaveFailed(err.clone()));
             ctx.emit_state(app);
@@ -1534,7 +1613,7 @@ fn finish_stop(
         if let Err(storage_err) = mark_recording_failed(&ctx, &id, &err) {
             tracing::error!(error = %storage_err, recording_id = id, "persist invalid save transition");
         }
-        clear_live_session(&ctx, &id);
+        clear_live_session_locked(&ctx, &id);
         ctx.emit_history(app);
         if let Err(state_err) = ctx.transition(SessionEvent::SaveFailed(err.clone())) {
             tracing::warn!(error = %state_err, recording_id = id, "publish invalid capture-save transition failure");
@@ -1550,7 +1629,7 @@ fn finish_stop(
             if let Err(storage_err) = mark_recording_failed(&ctx, &id, &err) {
                 tracing::error!(error = %storage_err, recording_id = id, "persist capture-save failure");
             }
-            clear_live_session(&ctx, &id);
+            clear_live_session_locked(&ctx, &id);
             ctx.emit_history(app);
             let _ = ctx.transition(SessionEvent::SaveFailed(err.clone()));
             ctx.emit_state(app);
@@ -1564,7 +1643,7 @@ fn finish_stop(
         .set_limit_reached(capture_reached_api_limit(&result));
     ctx.emit_history(app);
     if let Some(err) = capture_failure {
-        clear_live_session(&ctx, &id);
+        clear_live_session_locked(&ctx, &id);
         let _ = ctx.transition(SessionEvent::SaveFailed(err.clone()));
         ctx.emit_state(app);
         crate::notify::show_error(app, &err);
@@ -2075,7 +2154,9 @@ fn reveal_overlay(window: &WebviewWindow) {
 
 fn show_overlay(app: &AppHandle) {
     let ctx = app.state::<Arc<AppContext>>();
-    ctx.overlay.lock().show();
+    ctx.overlay
+        .lock()
+        .show(ctx.session_generation.load(Ordering::SeqCst));
     ctx.overlay_timeline.lock().mark_window_created();
     #[cfg(windows)]
     {
@@ -2200,13 +2281,33 @@ fn schedule_error_overlay_hide(app: AppHandle, delay: Duration, generation: u64)
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(delay).await;
         let ctx = app.state::<Arc<AppContext>>();
-        if delayed_hide_is_stale(expected, ctx.overlay.lock().epoch) {
+        if !dismiss_error_overlay_if_current(&ctx, generation, expected, || {}) {
             return;
         }
         hide_overlay_for_generation(&app, generation);
-        let _ = ctx.transition(SessionEvent::Dismiss);
         ctx.emit_state(&app);
     });
+}
+
+fn dismiss_error_overlay_if_current(
+    ctx: &AppContext,
+    generation: u64,
+    expected_epoch: u64,
+    before_dismiss: impl FnOnce(),
+) -> bool {
+    let Some(_lifecycle) = lock_current_session_generation(ctx, generation) else {
+        return false;
+    };
+    let current_epoch = ctx.overlay.lock().epoch;
+    if delayed_hide_is_stale(expected_epoch, current_epoch)
+        || !crate::app::overlay_controller::hide_should_dismiss(&ctx.state.lock())
+    {
+        return false;
+    }
+    // Validation and mutation share lifecycle ownership. No window operation,
+    // notification or synchronous UI wait may be placed inside this boundary.
+    before_dismiss();
+    ctx.transition(SessionEvent::Dismiss).is_ok()
 }
 
 pub(crate) fn shutdown_session(app: &AppHandle) -> bool {
@@ -2228,9 +2329,8 @@ pub(crate) fn shutdown_session(app: &AppHandle) -> bool {
     request_transcription_cancel_for_shutdown(&ctx);
     let recording_id = ctx.session_recording_id.lock().clone();
     if let Some(session) = ctx.capture.lock().take() {
-        ctx.capture_stopping.store(true, Ordering::SeqCst);
-        stop_capture_for_shutdown(
-            &ctx,
+        spawn_shutdown_capture_stop(
+            Arc::clone(&ctx),
             Some(app.clone()),
             session,
             recording_id.clone(),
@@ -2269,8 +2369,7 @@ pub(crate) fn shutdown_session(app: &AppHandle) -> bool {
         thread::spawn(move || {
             stop_capture_discard_during_shutdown(stop_ctx, stop_app, session, move || {
                 crate::app::compare::release_compare_capture_reservation(&done_ctx, nonce);
-                let state = done_ctx.compare_state.lock().clone();
-                let _ = done_app.emit_to("main", "compare://state", state);
+                crate::app::compare::emit_compare(&done_app);
             });
         });
     }
@@ -2319,6 +2418,7 @@ fn shutdown_capture_cleanup_pending(ctx: &AppContext) -> bool {
         || ctx.meter_starting.load(Ordering::SeqCst)
         || transcriptions_pending
         || attempts_pending
+        || !ctx.pending_audio_writes.lock().is_empty()
 }
 
 fn request_transcription_cancel_for_shutdown(ctx: &AppContext) {
@@ -2328,7 +2428,7 @@ fn request_transcription_cancel_for_shutdown(ctx: &AppContext) {
     cancel_history_retries(ctx);
 }
 
-fn shutdown_session_exit_ready(ctx: &AppContext) -> bool {
+pub(super) fn shutdown_session_exit_ready(ctx: &AppContext) -> bool {
     ctx.shutdown_force_exit.load(Ordering::SeqCst) || !shutdown_capture_cleanup_pending(ctx)
 }
 
@@ -2379,6 +2479,27 @@ pub(crate) fn stop_capture_discard_during_shutdown<F>(
     }
 }
 
+fn spawn_shutdown_capture_stop(
+    ctx: Arc<AppContext>,
+    app: Option<AppHandle>,
+    session: CaptureSession,
+    recording_id: Option<String>,
+    join_bound: Duration,
+) -> thread::JoinHandle<()> {
+    ctx.capture_stopping.store(true, Ordering::SeqCst);
+    if let Some(id) = recording_id.as_ref() {
+        // Shutdown clears the live session before the native worker finishes.
+        // Keep its exact audio protected until completion or the late callback.
+        ctx.in_flight.lock().insert(id.clone());
+    }
+    thread::spawn(move || {
+        stop_capture_for_shutdown(&ctx, app.clone(), session, recording_id, join_bound);
+        if let Some(app) = app.as_ref() {
+            schedule_deferred_shutdown_exit(app, &ctx);
+        }
+    })
+}
+
 fn stop_capture_for_shutdown(
     ctx: &Arc<AppContext>,
     app: Option<AppHandle>,
@@ -2392,6 +2513,7 @@ fn stop_capture_for_shutdown(
     let outcome = session.stop_with_late_result_timeout(join_bound, move |result| {
         if let Some(recording_id) = late_id.as_deref() {
             persist_late_shutdown_capture(&late_ctx, recording_id, result);
+            late_ctx.in_flight.lock().remove(recording_id);
         }
         late_ctx.capture_stopping.store(false, Ordering::SeqCst);
         if let Some(app) = late_app.as_ref() {
@@ -2402,12 +2524,16 @@ fn stop_capture_for_shutdown(
         CaptureStopOutcome::Completed(Ok(result)) => {
             if let Some(id) = recording_id.as_deref() {
                 persist_late_shutdown_capture(ctx, id, Ok(result));
+                ctx.in_flight.lock().remove(id);
             }
             ctx.capture_stopping.store(false, Ordering::SeqCst);
         }
         CaptureStopOutcome::Completed(Err(err)) => {
             tracing::warn!(error = %err, "capture did not finish cleanly during shutdown");
             mark_shutdown_capture_interrupted(ctx, recording_id.as_deref());
+            if let Some(id) = recording_id.as_deref() {
+                ctx.in_flight.lock().remove(id);
+            }
             ctx.capture_stopping.store(false, Ordering::SeqCst);
         }
         CaptureStopOutcome::TimedOut(err) => {
@@ -2614,6 +2740,9 @@ fn salvage_raw_tmp(audio_root: &Path, rec: &mut crate::history::repository::Reco
 }
 
 fn begin_transcription(ctx: &AppContext, recording_id: &str) -> Result<(), AppError> {
+    if ctx.compare_running.load(Ordering::SeqCst) {
+        return Err(AppError::TranscriptionInProgress);
+    }
     // Settings can change after admission. Reserve the validated maximum so a
     // later snapshot cannot exceed the accounting capacity already promised.
     let reserved_attempts = (1 + crate::transcription::retry::MAX_ADDITIONAL_RETRIES) as usize;
@@ -2752,7 +2881,7 @@ fn persist_attempt(
     if result.is_err() {
         let mut pending = ctx.pending_attempts.lock();
         if pending.len() < MAX_PENDING_ATTEMPTS {
-            pending.push(PendingAttempt {
+            pending.push(PendingAttempt::Dictation {
                 row,
                 cost_usd,
                 model: model.to_string(),
@@ -2764,28 +2893,107 @@ fn persist_attempt(
     result
 }
 
-fn flush_pending_attempts(ctx: &AppContext) -> bool {
-    // Don't hold the admission/accounting mutex across SQLite I/O. Bound work
-    // per tick and stop on the first storage failure instead of retrying every
-    // pending row against a locked or unavailable database.
+pub(crate) fn ensure_compare_usage_capacity(
+    ctx: &AppContext,
+    maximum_attempts: usize,
+) -> Result<(), AppError> {
+    let pending = ctx.pending_attempts.lock();
+    let in_flight = ctx.in_flight.lock();
+    let reserved_dictation_attempts =
+        (1 + crate::transcription::retry::MAX_ADDITIONAL_RETRIES) as usize;
+    if pending
+        .len()
+        .saturating_add(in_flight.len().saturating_mul(reserved_dictation_attempts))
+        .saturating_add(maximum_attempts)
+        > MAX_PENDING_ATTEMPTS
+    {
+        return Err(AppError::StorageFailed(
+            "usage journal recovery is pending".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn persist_compare_attempt(
+    ctx: &AppContext,
+    usage: crate::history::repository::ApiAttemptUsage,
+    generation: &str,
+) -> Result<(), AppError> {
+    let result = ctx
+        .history
+        .lock()
+        .record_compare_attempt(&usage, generation);
+    if result.is_err() {
+        let mut pending = ctx.pending_attempts.lock();
+        let existing = pending.iter_mut().find(|entry| {
+            matches!(entry, PendingAttempt::Compare { usage: previous, generation: previous_generation, .. }
+                if previous_generation.as_str() == generation && previous.attempt_id == usage.attempt_id)
+        });
+        if let Some(PendingAttempt::Compare {
+            queue_id,
+            usage: previous,
+            ..
+        }) = existing
+        {
+            // Keep the first attempt timestamp and never overwrite a known price.
+            // A changed payload gets a new revision, so an older flush cannot
+            // dequeue a completion that arrived while its SQLite write ran.
+            if previous.cost_usd.is_none() && usage.cost_usd.is_some() {
+                previous.cost_usd = usage.cost_usd;
+                *queue_id = uuid::Uuid::new_v4().to_string();
+            }
+        } else if pending.len() < MAX_PENDING_ATTEMPTS {
+            pending.push(PendingAttempt::Compare {
+                queue_id: uuid::Uuid::new_v4().to_string(),
+                usage,
+                generation: generation.to_owned(),
+            });
+        } else {
+            // Admissions reserve the maximum attempt count before API work.
+            tracing::error!("compare usage recovery queue capacity exceeded");
+        }
+    }
+    result
+}
+
+pub(crate) fn compare_usage_is_pending(ctx: &AppContext, operation_id: &str) -> bool {
+    ctx.pending_attempts.lock().iter().any(|entry| {
+        matches!(entry, PendingAttempt::Compare { usage, .. } if usage.operation_id == operation_id)
+    })
+}
+
+pub(crate) fn flush_pending_attempts(ctx: &AppContext) -> bool {
+    flush_pending_attempts_with(ctx, |_| {})
+}
+
+fn flush_pending_attempts_with(
+    ctx: &AppContext,
+    mut after_persist: impl FnMut(&PendingAttempt),
+) -> bool {
+    // The canonical recovery worker drains the bounded queue immediately on
+    // shutdown, without making the deadline owner wait for storage. Ordinary
+    // ticks stay small. Don't hold the admission/accounting mutex across SQLite
+    // I/O, and stop at the first failure even after partial progress.
+    let budget = if ctx.shutdown_requested.load(Ordering::SeqCst) {
+        MAX_PENDING_ATTEMPTS
+    } else {
+        8
+    };
     let mut recovered = false;
-    for _ in 0..8 {
+    for _ in 0..budget {
         let Some(attempt) = ctx.pending_attempts.lock().first().cloned() else {
             return recovered;
         };
         // The transaction refuses absent/suppressed recordings. Delayed
         // accounting cannot recreate metrics after manual cancellation.
-        let result = ctx.history.lock().record_attempt_for_model(
-            &attempt.row,
-            attempt.cost_usd,
-            &attempt.model,
-        );
+        let result = attempt.persist(&ctx.history.lock());
         if result.is_err() {
             return recovered;
         }
+        after_persist(&attempt);
         ctx.pending_attempts
             .lock()
-            .retain(|pending| pending.row.id != attempt.row.id);
+            .retain(|pending| pending.queue_id() != attempt.queue_id());
         recovered = true;
     }
     recovered
@@ -2954,7 +3162,7 @@ fn apply_configured_retention_admitted(
         ctx.pending_attempts
             .lock()
             .iter()
-            .map(|attempt| attempt.row.recording_id.clone()),
+            .filter_map(|attempt| attempt.recording_id().map(str::to_owned)),
     );
     let audio = audio_dir(&ctx.data_dir);
     let names = crate::app::operations::protected_audio_names(ctx);
@@ -3042,15 +3250,22 @@ pub fn current_meter(app: &AppHandle) -> MeterSample {
 }
 
 pub fn release_meter_monitor(ctx: &AppContext) -> bool {
-    ctx.meter_generation.fetch_add(1, Ordering::SeqCst);
-    *ctx.meter_owner.lock() = None;
-    let session = ctx.meter_monitor.lock().take();
+    let session = take_meter_monitor_for_release(ctx);
     if let Some(session) = session {
-        ctx.meter_starting.store(true, Ordering::SeqCst);
         stop_meter_capture(ctx, session).is_ok()
     } else {
         !ctx.meter_starting.load(Ordering::SeqCst)
     }
+}
+
+pub(crate) fn take_meter_monitor_for_release(ctx: &AppContext) -> Option<CaptureSession> {
+    ctx.meter_generation.fetch_add(1, Ordering::SeqCst);
+    *ctx.meter_owner.lock() = None;
+    let session = ctx.meter_monitor.lock().take();
+    if session.is_some() {
+        ctx.meter_starting.store(true, Ordering::SeqCst);
+    }
+    session
 }
 
 pub fn stop_meter_capture(ctx: &AppContext, session: CaptureSession) -> Result<(), AppError> {
@@ -4136,6 +4351,83 @@ mod tests {
     }
 
     #[test]
+    fn compare_admission_blocks_dictation_without_reserving_phantom_recordings() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(directory.path().to_path_buf()).unwrap();
+        ctx.compare_running.store(true, Ordering::SeqCst);
+        assert!(crate::app::operations::system_busy(&ctx));
+        assert_eq!(
+            begin_transcription(&ctx, "must-not-start"),
+            Err(AppError::TranscriptionInProgress)
+        );
+        assert!(ctx.in_flight.lock().is_empty());
+        ctx.compare_running.store(false, Ordering::SeqCst);
+        assert!(!crate::app::operations::system_busy(&ctx));
+        begin_transcription(&ctx, "dictation").unwrap();
+        assert!(ctx.in_flight.lock().contains("dictation"));
+    }
+
+    #[test]
+    fn old_compare_flush_cannot_dequeue_a_new_confirmed_price_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(AppContext::initialize(directory.path().to_path_buf()).unwrap());
+        let injection = Connection::open(directory.path().join("history.sqlite")).unwrap();
+        injection.execute_batch("CREATE TRIGGER reject_compare_started BEFORE INSERT ON usage_attempts BEGIN SELECT RAISE(ABORT,'fixture started persistence failure'); END;").unwrap();
+        let generation = ctx.history.lock().compare_usage_generation().unwrap();
+        let usage = crate::history::repository::ApiAttemptUsage {
+            operation_id: "compare:revision".into(),
+            attempt_id: "compare:revision:slot:1".into(),
+            occurred_at: chrono::Utc::now(),
+            model: "model".into(),
+            cost_usd: None,
+        };
+        assert!(persist_compare_attempt(&ctx, usage.clone(), &generation).is_err());
+        injection
+            .execute_batch("DROP TRIGGER reject_compare_started;")
+            .unwrap();
+        let (persisted, received) = std::sync::mpsc::channel();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let worker_ctx = ctx.clone();
+        let worker = std::thread::spawn(move || {
+            let mut first = true;
+            flush_pending_attempts_with(&worker_ctx, |_| {
+                if first {
+                    first = false;
+                    persisted.send(()).unwrap();
+                    waiting.recv_timeout(Duration::from_secs(2)).unwrap();
+                }
+            })
+        });
+        received.recv_timeout(Duration::from_secs(2)).unwrap();
+        injection.execute_batch("CREATE TRIGGER reject_compare_finished BEFORE UPDATE OF cost_usd ON usage_attempts WHEN NEW.cost_usd IS NOT NULL BEGIN SELECT RAISE(ABORT,'fixture finished persistence failure'); END;").unwrap();
+        let mut finished = usage;
+        finished.cost_usd = Some(0.02);
+        assert!(persist_compare_attempt(&ctx, finished, &generation).is_err());
+        release.send(()).unwrap();
+        assert!(worker.join().unwrap());
+        assert!(compare_usage_is_pending(&ctx, "compare:revision"));
+        assert_eq!(ctx.pending_attempts.lock().len(), 1);
+        injection
+            .execute_batch("DROP TRIGGER reject_compare_finished;")
+            .unwrap();
+        assert!(flush_pending_attempts(&ctx));
+        assert!(!flush_pending_attempts(&ctx));
+        let now = chrono::Utc::now();
+        let statistics = ctx
+            .history
+            .lock()
+            .get_usage_statistics(
+                now - chrono::Duration::days(1),
+                now + chrono::Duration::days(1),
+            )
+            .unwrap();
+        assert_eq!(statistics.api_requests, 1);
+        assert_eq!(statistics.reported_cost_usd, 0.02);
+        assert_eq!(statistics.unpriced_attempts, 0);
+        assert!(shutdown_session_exit_ready(&ctx));
+    }
+
+    #[test]
     fn attempt_storage_failure_preserves_paid_text_and_recovers_cost_once() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
@@ -4373,6 +4665,55 @@ mod tests {
     }
 
     #[test]
+    fn meter_handoff_releases_ui_ownership_before_waiting_for_native_stop() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(AppContext::initialize(dir.path().to_path_buf()).unwrap());
+        let path = dir.path().join("handed-off-meter.wav");
+        let (release, wait) = std::sync::mpsc::channel();
+        let worker_path = path.clone();
+        let worker = thread::spawn(move || {
+            wait.recv().unwrap();
+            std::fs::write(&worker_path, b"late monitor audio").unwrap();
+            Ok(crate::audio::capture::CaptureResult {
+                path: worker_path,
+                duration_ms: 100,
+                sample_rate: SAMPLE_RATE,
+                samples: vec![0.1; 8],
+                truncated: false,
+                limit_reached: false,
+                capture_error: None,
+            })
+        });
+        *ctx.meter_monitor.lock() = Some(CaptureSession::from_test_worker(worker, path.clone()));
+        *ctx.meter_owner.lock() = Some("audio-page".into());
+        let (transferred, received) = std::sync::mpsc::channel();
+        let transfer_ctx = ctx.clone();
+        let transfer = thread::spawn(move || {
+            let _lifecycle = transfer_ctx.session_lifecycle.lock();
+            let _admission = crate::app::operations::lock_admission(&transfer_ctx);
+            transferred
+                .send(take_meter_monitor_for_release(&transfer_ctx).unwrap())
+                .unwrap();
+        });
+        // The driver is deliberately still blocked: handing off the device
+        // must complete independently, before a worker performs the join.
+        let session = received.recv_timeout(Duration::from_secs(2)).unwrap();
+        transfer.join().unwrap();
+        assert!(ctx.meter_starting.load(Ordering::SeqCst));
+        assert!(ctx.meter_monitor.lock().is_none());
+        assert!(ctx.meter_owner.lock().is_none());
+        assert!(crate::app::operations::system_busy(&ctx));
+        assert!(stop_meter_capture_with_timeout(&ctx, session, Duration::from_millis(20)).is_err());
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while ctx.meter_starting.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!ctx.meter_starting.load(Ordering::SeqCst));
+        assert!(!path.exists());
+    }
+
+    #[test]
     fn meter_stop_timeout_keeps_system_busy_until_native_capture_exits() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Arc::new(AppContext::initialize(dir.path().to_path_buf()).unwrap());
@@ -4439,8 +4780,13 @@ mod tests {
             generation,
             Ok(session),
             |_| panic!("cancelled meter capture must not publish"),
-            |session| stop_meter_capture_with_timeout(&ctx, session, Duration::from_millis(20),)
-                .is_ok()
+            |session| {
+                assert!(
+                    ctx.admission.try_lock().is_some(),
+                    "stale meter stop blocked UI admission"
+                );
+                stop_meter_capture_with_timeout(&ctx, session, Duration::from_millis(20)).is_ok()
+            }
         )
         .unwrap());
         assert!(ctx.meter_starting.load(Ordering::SeqCst));
@@ -4876,6 +5222,135 @@ mod tests {
     }
 
     #[test]
+    fn shutdown_completed_capture_preserves_history_and_releases_stop_reservations_on_success_and_error(
+    ) {
+        for fail in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = Arc::new(AppContext::initialize(dir.path().to_path_buf()).unwrap());
+            let mut rec = new_recording("openai/gpt-transcribe".into());
+            rec.status = RecordingStatus::Processing;
+            rec.raw_audio_path = Some(format!("{}.raw.wav", rec.id));
+            ctx.history.lock().insert(&rec).unwrap();
+            *ctx.session_recording_id.lock() = Some(rec.id.clone());
+            let path = audio_dir(&ctx.data_dir).join(rec.raw_audio_path.as_ref().unwrap());
+            write_pcm16_wav(&path, SAMPLE_RATE, &[0.2; 480]).unwrap();
+            let completed_path = path.clone();
+            let native = thread::spawn(move || {
+                if fail {
+                    Err(AppError::AudioCaptureFailed(
+                        "injected shutdown worker failure".into(),
+                    ))
+                } else {
+                    Ok(crate::audio::capture::CaptureResult {
+                        path: completed_path,
+                        duration_ms: 10,
+                        sample_rate: SAMPLE_RATE,
+                        samples: Vec::new(),
+                        truncated: false,
+                        limit_reached: false,
+                        capture_error: None,
+                    })
+                }
+            });
+            let session = CaptureSession::from_test_worker(native, path.clone());
+            let lifecycle = ctx.session_lifecycle.lock();
+            let admission = ctx.admission.lock();
+            let stopper = spawn_shutdown_capture_stop(
+                Arc::clone(&ctx),
+                None,
+                session,
+                Some(rec.id.clone()),
+                Duration::from_secs(2),
+            );
+            *ctx.session_recording_id.lock() = None;
+            drop(admission);
+            drop(lifecycle);
+            stopper.join().unwrap();
+            let saved = ctx.history.lock().get(&rec.id).unwrap().unwrap();
+            assert_eq!(saved.status, RecordingStatus::Interrupted);
+            assert_eq!(saved.raw_audio_path, rec.raw_audio_path);
+            if !fail {
+                assert_eq!(saved.duration_ms, 10);
+            }
+            assert!(path.is_file());
+            assert!(ctx.session_recording_id.lock().is_none());
+            assert!(!ctx.in_flight.lock().contains(&rec.id));
+            assert!(!ctx.capture_stopping.load(Ordering::SeqCst));
+            assert!(!shutdown_capture_cleanup_pending(&ctx));
+        }
+    }
+
+    #[test]
+    fn shutdown_native_join_releases_ui_locks_and_retains_audio_until_late_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(AppContext::initialize(dir.path().to_path_buf()).unwrap());
+        let mut rec = new_recording("openai/gpt-transcribe".into());
+        rec.status = RecordingStatus::Processing;
+        rec.raw_audio_path = Some(format!("{}.raw.wav", rec.id));
+        ctx.history.lock().insert(&rec).unwrap();
+        *ctx.session_recording_id.lock() = Some(rec.id.clone());
+        let path = audio_dir(&ctx.data_dir).join(rec.raw_audio_path.as_ref().unwrap());
+        let (release, wait) = std::sync::mpsc::channel();
+        let writer_path = path.clone();
+        let native = thread::spawn(move || {
+            wait.recv_timeout(Duration::from_secs(3)).unwrap();
+            write_pcm16_wav(&writer_path, SAMPLE_RATE, &[0.2; 480]).unwrap();
+            Ok(crate::audio::capture::CaptureResult {
+                path: writer_path,
+                duration_ms: 10,
+                sample_rate: SAMPLE_RATE,
+                samples: Vec::new(),
+                truncated: false,
+                limit_reached: false,
+                capture_error: None,
+            })
+        });
+        let session = CaptureSession::from_test_worker(native, path.clone());
+        let lifecycle = ctx.session_lifecycle.lock();
+        let admission = ctx.admission.lock();
+        let stopper = spawn_shutdown_capture_stop(
+            Arc::clone(&ctx),
+            None,
+            session,
+            Some(rec.id.clone()),
+            Duration::from_millis(20),
+        );
+        *ctx.session_recording_id.lock() = None;
+        drop(admission);
+        drop(lifecycle);
+        assert!(ctx.session_lifecycle.try_lock().is_some());
+        let admission = ctx
+            .admission
+            .try_lock()
+            .expect("shutdown join retained UI admission");
+        assert!(ctx.capture_stopping.load(Ordering::SeqCst));
+        assert!(crate::app::operations::history_recording_is_protected(
+            &ctx, &rec.id
+        ));
+        assert!(crate::app::operations::protected_audio_names(&ctx)
+            .contains(rec.raw_audio_path.as_ref().unwrap()));
+        drop(admission);
+        stopper.join().unwrap();
+        assert!(ctx.capture_stopping.load(Ordering::SeqCst));
+        assert!(ctx.in_flight.lock().contains(&rec.id));
+        release.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while ctx.capture_stopping.load(Ordering::SeqCst) {
+            assert!(
+                Instant::now() < deadline,
+                "shutdown capture completion was not released"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+        let saved = ctx.history.lock().get(&rec.id).unwrap().unwrap();
+        assert_eq!(saved.status, RecordingStatus::Interrupted);
+        assert_eq!(saved.duration_ms, 10);
+        assert!(path.is_file());
+        assert!(!ctx.in_flight.lock().contains(&rec.id));
+        assert!(!shutdown_capture_cleanup_pending(&ctx));
+    }
+
+    #[test]
     fn shutdown_timeout_persists_metadata_when_native_capture_finishes_late() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = Arc::new(AppContext::initialize(dir.path().to_path_buf()).unwrap());
@@ -5188,7 +5663,9 @@ mod tests {
         );
         let dir = tempfile::tempdir().unwrap();
         let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
-        ctx.overlay.lock().show();
+        ctx.overlay
+            .lock()
+            .show(ctx.session_generation.load(Ordering::SeqCst));
         let idle = ctx.state.lock().clone();
         assert_eq!(idle, SessionState::Idle);
         assert!(!ctx.overlay.lock().snapshot(idle).visible);
@@ -5261,7 +5738,7 @@ mod tests {
         let saved = ctx.history.lock().get(&rec.id).unwrap().unwrap();
         assert_eq!(saved.status, RecordingStatus::Processing);
         assert_eq!(saved.last_error_code, None);
-        let result = capture.stop().unwrap();
+        let result = capture.session.stop().unwrap();
         assert_eq!(result.path, audio_path);
         assert!(audio_path.exists());
         let after = ctx
@@ -5305,6 +5782,37 @@ mod tests {
     }
 
     #[test]
+    fn stop_context_survives_shutdown_between_capture_take_and_worker_completion() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = stop_target_fixture(dir.path());
+        let original_id = ctx.session_recording_id.lock().clone().unwrap();
+        let stop = take_capture_for_stop(&ctx, StopOrigin::Automatic, |_| unreachable!())
+            .unwrap()
+            .unwrap();
+        assert_eq!(stop.generation, 7);
+        assert_eq!(stop.recording_id.as_deref(), Some(original_id.as_str()));
+        {
+            let _lifecycle = ctx.session_lifecycle.lock();
+            ctx.shutdown_requested.store(true, Ordering::SeqCst);
+            ctx.session_generation.fetch_add(1, Ordering::SeqCst);
+            mark_shutdown_capture_interrupted(&ctx, Some(&original_id));
+            clear_live_session_locked(&ctx, &original_id);
+            *ctx.state.lock() = SessionState::Idle;
+        }
+        assert!(lock_current_session_generation(&ctx, stop.generation).is_none());
+        let result = stop.session.stop().unwrap();
+        discard_stale_capture_completion(&ctx, stop.recording_id.as_deref(), &result);
+        assert!(
+            result.path.exists(),
+            "shutdown completion deleted the retained WAV"
+        );
+        let recording = ctx.history.lock().get(&original_id).unwrap().unwrap();
+        assert_eq!(recording.status, RecordingStatus::Interrupted);
+        assert_eq!(recording.duration_ms, 10);
+        assert!(recording.raw_audio_path.is_some());
+    }
+
+    #[test]
     fn automatic_stop_and_stop_without_external_window_keep_start_target() {
         for origin in [StopOrigin::Automatic, StopOrigin::Explicit] {
             let dir = tempfile::tempdir().unwrap();
@@ -5325,7 +5833,7 @@ mod tests {
             .unwrap();
             assert_eq!(calls.get(), usize::from(origin == StopOrigin::Explicit));
             assert_eq!(*ctx.captured_target.lock(), Some(start));
-            capture.stop().unwrap();
+            capture.session.stop().unwrap();
         }
     }
 
@@ -5361,9 +5869,109 @@ mod tests {
         release_tx.send(()).unwrap();
         let capture = stopping.join().unwrap();
         cancelling.join().unwrap();
-        capture.stop().unwrap();
+        capture.session.stop().unwrap();
         assert_eq!(*ctx.captured_target.lock(), Some(next));
         assert_eq!(ctx.session_generation.load(Ordering::SeqCst), 8);
+    }
+
+    #[test]
+    fn overlay_snapshot_cannot_pair_a_previous_idle_state_with_a_new_recording_revision() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(AppContext::initialize(directory.path().to_path_buf()).unwrap());
+        let (read, captured) = std::sync::mpsc::channel();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let worker_ctx = Arc::clone(&ctx);
+        let reader = thread::spawn(move || {
+            worker_ctx.overlay_snapshot_with(|| {
+                read.send(()).unwrap();
+                waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            })
+        });
+        captured.recv_timeout(Duration::from_secs(5)).unwrap();
+        let competing_state = ctx.state.try_lock();
+        let serialized = competing_state.is_none();
+        if let Some(mut state) = competing_state {
+            // The old implementation allowed a new session into this exact
+            // gap, then attached its visible revision to the reader's Idle.
+            *state = SessionState::Recording;
+            ctx.session_generation.store(7, Ordering::SeqCst);
+            ctx.overlay.lock().show(7);
+        }
+        release.send(()).unwrap();
+        let previous = reader.join().unwrap();
+        assert!(
+            serialized,
+            "a snapshot released state before reading overlay"
+        );
+        assert_eq!(previous.state, SessionState::Idle);
+        assert!(!previous.visible);
+        assert_eq!(previous.generation, 0);
+
+        *ctx.state.lock() = SessionState::Recording;
+        ctx.session_generation.store(7, Ordering::SeqCst);
+        ctx.overlay.lock().show(7);
+        let current = ctx.overlay_snapshot();
+        assert_eq!(current.state, SessionState::Recording);
+        assert!(current.visible);
+        assert_eq!(current.generation, 7);
+        assert!(current.revision > previous.revision);
+    }
+
+    #[test]
+    fn delayed_error_dismissal_serializes_validation_and_rejects_new_generation_or_epoch() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(AppContext::initialize(directory.path().to_path_buf()).unwrap());
+        let failed = SessionState::Failed {
+            message: "previous failure".into(),
+            code: "StorageFailed".into(),
+        };
+        *ctx.state.lock() = failed.clone();
+        ctx.session_generation.store(7, Ordering::SeqCst);
+        ctx.overlay.lock().show(7);
+        let previous_epoch = ctx.overlay.lock().epoch;
+        let (checked, validated) = std::sync::mpsc::channel();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let worker_ctx = Arc::clone(&ctx);
+        let timer = thread::spawn(move || {
+            dismiss_error_overlay_if_current(&worker_ctx, 7, previous_epoch, || {
+                checked.send(()).unwrap();
+                waiting.recv_timeout(Duration::from_secs(5)).unwrap();
+            })
+        });
+        validated.recv_timeout(Duration::from_secs(5)).unwrap();
+        let competing_session = ctx.session_lifecycle.try_lock();
+        let serialized = competing_session.is_none();
+        if let Some(_lifecycle) = competing_session {
+            // Without lifecycle ownership the verified old timer could dismiss
+            // a different failed take that started before its mutation.
+            ctx.session_generation.store(8, Ordering::SeqCst);
+            *ctx.state.lock() = failed.clone();
+            ctx.overlay.lock().show(8);
+        }
+        release.send(()).unwrap();
+        let dismissed = timer.join().unwrap();
+        assert!(serialized, "a timer released its session before dismissal");
+        assert!(dismissed);
+        assert_eq!(*ctx.state.lock(), SessionState::Idle);
+
+        ctx.session_generation.store(8, Ordering::SeqCst);
+        *ctx.state.lock() = failed.clone();
+        ctx.overlay.lock().show(8);
+        let current_epoch = ctx.overlay.lock().epoch;
+        assert!(!dismiss_error_overlay_if_current(
+            &ctx,
+            7,
+            current_epoch,
+            || {}
+        ));
+        assert!(!dismiss_error_overlay_if_current(
+            &ctx,
+            8,
+            previous_epoch,
+            || {}
+        ));
+        assert_eq!(*ctx.state.lock(), failed);
+        assert!(ctx.overlay_snapshot().visible);
     }
 
     #[test]
@@ -5373,9 +5981,20 @@ mod tests {
         let _lifecycle = ctx.session_lifecycle.lock();
         ctx.session_generation.store(7, Ordering::SeqCst);
         *ctx.state.lock() = SessionState::Recording;
-        ctx.overlay.lock().show();
+        ctx.overlay
+            .lock()
+            .show(ctx.session_generation.load(Ordering::SeqCst));
         let epoch = ctx.overlay.lock().epoch;
         assert!(hud_cancel_ticket_matches(&ctx, (7, epoch)));
+        let published = ctx.overlay_snapshot();
+        assert_eq!((published.generation, published.epoch), (7, epoch));
+        ctx.session_generation.store(8, Ordering::SeqCst);
+        assert!(!hud_cancel_ticket_matches(&ctx, (8, epoch)));
+        assert!(!hud_cancel_ticket_matches(
+            &ctx,
+            (published.generation, published.epoch)
+        ));
+        ctx.session_generation.store(7, Ordering::SeqCst);
         assert!(!hud_cancel_ticket_matches(&ctx, (6, epoch)));
         assert!(!hud_cancel_ticket_matches(
             &ctx,
@@ -5384,7 +6003,9 @@ mod tests {
         ctx.overlay.lock().hide();
         let hidden_epoch = ctx.overlay.lock().epoch;
         assert!(!hud_cancel_ticket_matches(&ctx, (7, hidden_epoch)));
-        ctx.overlay.lock().show();
+        ctx.overlay
+            .lock()
+            .show(ctx.session_generation.load(Ordering::SeqCst));
         let next_epoch = ctx.overlay.lock().epoch;
         assert!(!hud_cancel_ticket_matches(&ctx, (7, epoch)));
         *ctx.state.lock() = SessionState::Completed;
@@ -6825,6 +7446,74 @@ mod tests {
             persisted.raw_audio_path.as_deref(),
             rec.raw_audio_path.as_deref()
         );
+    }
+
+    #[test]
+    fn stale_capture_lookup_failure_releases_history_before_session_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(AppContext::initialize(dir.path().to_path_buf()).unwrap());
+        let mut rec = new_recording("vendor/model".into());
+        rec.status = RecordingStatus::Processing;
+        rec.raw_audio_path = Some(format!("{}.raw.wav", rec.id));
+        ctx.history.lock().insert(&rec).unwrap();
+        let wav = audio_dir(&ctx.data_dir).join(rec.raw_audio_path.as_ref().unwrap());
+        write_pcm16_wav(&wav, SAMPLE_RATE, &[0.25; 480]).unwrap();
+        let original_audio = std::fs::read(&wav).unwrap();
+        *ctx.session_recording_id.lock() = Some(rec.id.clone());
+
+        let fault = Connection::open(ctx.data_dir.join("history.sqlite")).unwrap();
+        fault
+            .execute_batch("ALTER TABLE recordings RENAME TO unavailable_recordings")
+            .unwrap();
+        assert!(ctx.history.lock().get(&rec.id).is_err());
+
+        // Once the worker owns lifecycle it must wait at this inner lock. This
+        // is a deterministic barrier after lookup and before session cleanup,
+        // without sleeps standing in for the observed lock ownership.
+        let session_owner = ctx.session_recording_id.lock();
+        let worker_ctx = Arc::clone(&ctx);
+        let worker_id = rec.id.clone();
+        let result = crate::audio::capture::CaptureResult {
+            path: wav.clone(),
+            duration_ms: 10,
+            sample_rate: SAMPLE_RATE,
+            samples: Vec::new(),
+            truncated: false,
+            limit_reached: false,
+            capture_error: None,
+        };
+        let worker = thread::spawn(move || {
+            discard_stale_capture_completion(&worker_ctx, Some(&worker_id), &result);
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let reached_cleanup = loop {
+            if ctx.session_lifecycle.try_lock().is_none() {
+                break true;
+            }
+            if Instant::now() >= deadline {
+                break false;
+            }
+            thread::sleep(Duration::from_millis(1));
+        };
+        let history_released = reached_cleanup && ctx.history.try_lock().is_some();
+        // Always release the barrier before asserting, so the broken version
+        // fails an assertion rather than leaving a permanently blocked thread.
+        drop(session_owner);
+        worker.join().unwrap();
+        assert!(
+            reached_cleanup,
+            "stale completion never reached session cleanup"
+        );
+        assert!(
+            history_released,
+            "history must be unlocked before lifecycle cleanup"
+        );
+        assert!(ctx.session_recording_id.lock().is_none());
+        assert_eq!(std::fs::read(&wav).unwrap(), original_audio);
+        fault
+            .execute_batch("ALTER TABLE unavailable_recordings RENAME TO recordings")
+            .unwrap();
+        assert!(ctx.history.lock().get(&rec.id).unwrap().is_some());
     }
 
     #[test]

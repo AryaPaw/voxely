@@ -3,7 +3,26 @@ import { afterEach, expect, it, vi } from "vitest";
 import { AccentPicker } from "./AccentPicker";
 import { accentPreset } from "../../lib/accent";
 import { contrast } from "../../lib/accent-color";
+import { SettingsField } from "./SettingsField";
 afterEach(cleanup);
+it("keeps field label and help associated with the color controls", () => {
+  render(
+    <SettingsField label="Color" description="Shared app accent">
+      <AccentPicker onChange={vi.fn()} label="Color" shadeLabel="Shade" resetLabel="Reset color" />
+    </SettingsField>,
+  );
+  const selected = screen.getByRole("button", { name: "sky" });
+  expect(selected.id).not.toBe("");
+  expect(document.querySelector<HTMLLabelElement>(`label[for="${selected.id}"]`)?.control).toBe(
+    selected,
+  );
+  expect(screen.getByRole("group", { name: "Color" })).toHaveAccessibleDescription(
+    "Shared app accent",
+  );
+  expect(screen.getByRole("group", { name: "Shade" })).toHaveAccessibleDescription(
+    "Shared app accent",
+  );
+});
 it("shows the default choice and changes family and shade without discarding the other value", () => {
   const onChange = vi.fn();
   const { rerender } = render(

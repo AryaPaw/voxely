@@ -1,7 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { acceptSavedSettings, nextWriteSeq, shouldKeepOptimistic } from "./settings-persist";
+import {
+  acceptSavedSettings,
+  nextWriteSeq,
+  reconcileFailedSettings,
+  shouldKeepOptimistic,
+} from "./settings-persist";
 
 describe("settings persist protocol", () => {
+  it("restores an older persisted snapshot after its optimistic write failed", () => {
+    const persisted = { writeSeq: 1, theme: "dark" };
+    expect(reconcileFailedSettings({ writeSeq: 2, theme: "light" }, 2, persisted)).toBe(persisted);
+    expect(reconcileFailedSettings(null, 2, persisted)).toBe(persisted);
+  });
+
+  it("preserves a later draft while accepting newer authoritative rollback events", () => {
+    const draft = { writeSeq: 3, theme: "light" };
+    expect(reconcileFailedSettings(draft, 2, { writeSeq: 1, theme: "dark" })).toBe(draft);
+    expect(reconcileFailedSettings(draft, 2, { writeSeq: 4, theme: "system" })).toEqual({
+      writeSeq: 4,
+      theme: "system",
+    });
+  });
   it("accepts legacy snapshots without sequence metadata and preserves newer drafts", () => {
     const legacy: { writeSeq?: number; model: string } = { model: "legacy" };
     expect(acceptSavedSettings(null, legacy)).toBe(legacy);

@@ -16,6 +16,38 @@ pub(crate) fn with_admission_released<T>(
     action()
 }
 
+/// Register before releasing admission; maintenance snapshots these names under
+/// the same gate. Keep the reservation through rollback and release it only
+/// after all filesystem work has finished.
+pub(crate) struct AudioWriteReservation<'a> {
+    ctx: &'a AppContext,
+    names: Vec<String>,
+}
+
+impl<'a> AudioWriteReservation<'a> {
+    pub(crate) fn reserve(
+        ctx: &'a AppContext,
+        names: impl IntoIterator<Item = String>,
+    ) -> Result<Self, crate::error::AppError> {
+        let names: Vec<_> = names.into_iter().collect();
+        let mut pending = ctx.pending_audio_writes.lock();
+        if names.iter().any(|name| pending.contains(name)) {
+            return Err(crate::error::AppError::TranscriptionInProgress);
+        }
+        pending.extend(names.iter().cloned());
+        Ok(Self { ctx, names })
+    }
+}
+
+impl Drop for AudioWriteReservation<'_> {
+    fn drop(&mut self) {
+        let mut pending = self.ctx.pending_audio_writes.lock();
+        for name in &self.names {
+            pending.remove(name);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SessionLease {
     pub generation: u64,
@@ -64,6 +96,7 @@ pub fn system_busy(ctx: &AppContext) -> bool {
             .insert_in_flight
             .load(std::sync::atomic::Ordering::SeqCst)
         || !ctx.in_flight.lock().is_empty()
+        || !ctx.pending_audio_writes.lock().is_empty()
         || ctx
             .update_installing
             .load(std::sync::atomic::Ordering::SeqCst)
@@ -82,7 +115,7 @@ pub fn history_recording_is_protected(ctx: &AppContext, recording_id: &str) -> b
 }
 
 pub fn protected_audio_names(ctx: &AppContext) -> HashSet<String> {
-    let mut names = HashSet::new();
+    let mut names = ctx.pending_audio_writes.lock().clone();
     let in_flight = ctx.in_flight.lock().clone();
     for id in &in_flight {
         names.extend([
@@ -192,6 +225,25 @@ mod tests {
         assert!(hide_overlay_allowed(&SessionState::Idle, 2, 2));
         assert!(hide_overlay_allowed(&SessionState::Idle, 0, 0));
         assert!(!hide_overlay_allowed(&SessionState::Idle, 2, 3));
+    }
+
+    #[test]
+    fn pending_audio_write_names_stay_exclusive_and_protected_until_rollback_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let admission = lock_admission(&ctx);
+        let reservation = AudioWriteReservation::reserve(
+            &ctx,
+            ["candidate.wav".into(), "candidate.wav.tmp".into()],
+        )
+        .unwrap();
+        assert!(AudioWriteReservation::reserve(&ctx, ["candidate.wav".into()]).is_err());
+        drop(admission);
+        assert!(system_busy(&ctx));
+        assert!(protected_audio_names(&ctx).contains("candidate.wav.tmp"));
+        drop(reservation);
+        assert!(!system_busy(&ctx));
+        assert!(!protected_audio_names(&ctx).contains("candidate.wav.tmp"));
     }
 
     #[test]

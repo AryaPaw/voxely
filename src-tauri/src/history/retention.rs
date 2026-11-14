@@ -55,7 +55,7 @@ impl FilterPreviewLease {
             "Couldn't reserve unique filter preview paths".into(),
         ))
     }
-    fn names(&self) -> [String; 4] {
+    pub(crate) fn names(&self) -> [String; 4] {
         Self::names_for(self.revision)
     }
     fn names_for(revision: uuid::Uuid) -> [String; 4] {
@@ -109,10 +109,14 @@ impl FilterPreviewOwner {
     pub(crate) fn is_current(&self, generation: u64) -> bool {
         self.generation == generation
     }
-    pub(crate) fn publish(&mut self, lease: &Arc<FilterPreviewLease>, legacy: bool) {
+    pub(crate) fn publish(
+        &mut self,
+        lease: &Arc<FilterPreviewLease>,
+        legacy: bool,
+    ) -> Option<Arc<FilterPreviewLease>> {
         self.leases.retain(|lease| lease.strong_count() > 0);
         self.leases.push(Arc::downgrade(lease));
-        self.legacy = legacy.then(|| lease.clone());
+        std::mem::replace(&mut self.legacy, legacy.then(|| lease.clone()))
     }
     pub(crate) fn invalidate(&mut self) {
         self.reserve();
@@ -955,7 +959,7 @@ mod tests {
         std::fs::write(&original, b"original").unwrap();
         std::fs::write(&processed, b"processed").unwrap();
         let mut owner = FilterPreviewOwner::default();
-        owner.publish(&lease, false);
+        drop(owner.publish(&lease, false));
         let protected = owner.protected_names().into_iter().collect();
         std::fs::write(dir.path().join("filter-sample.wav"), b"sample").unwrap();
         std::fs::write(dir.path().join("filter-preview-user-note.wav"), b"unowned").unwrap();

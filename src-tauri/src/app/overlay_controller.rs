@@ -6,6 +6,8 @@ use crate::app::machine::SessionState;
 #[serde(rename_all = "camelCase")]
 pub struct OverlaySnapshot {
     pub revision: u64,
+    pub generation: u64,
+    pub epoch: u64,
     pub visible: bool,
     pub state: SessionState,
     #[serde(default)]
@@ -15,6 +17,7 @@ pub struct OverlaySnapshot {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct OverlayLifecycle {
     pub revision: u64,
+    pub generation: u64,
     pub epoch: u64,
     pub visible: bool,
     pub limit_reached: bool,
@@ -26,7 +29,8 @@ impl OverlayLifecycle {
         self.revision
     }
 
-    pub fn show(&mut self) -> u64 {
+    pub fn show(&mut self, generation: u64) -> u64 {
+        self.generation = generation;
         self.epoch = next_overlay_revision(self.epoch);
         self.visible = true;
         self.limit_reached = false;
@@ -40,12 +44,15 @@ impl OverlayLifecycle {
     }
 
     pub fn snapshot(&self, state: SessionState) -> OverlaySnapshot {
-        overlay_snapshot(
+        let mut snapshot = overlay_snapshot(
             self.revision,
             overlay_chrome_visible(self.visible, &state),
             state,
             self.limit_reached,
-        )
+        );
+        snapshot.generation = self.generation;
+        snapshot.epoch = self.epoch;
+        snapshot
     }
 
     pub fn set_limit_reached(&mut self, reached: bool) {
@@ -80,6 +87,8 @@ pub fn overlay_snapshot(
 ) -> OverlaySnapshot {
     OverlaySnapshot {
         revision,
+        generation: 0,
+        epoch: 0,
         visible,
         state,
         limit_reached,
@@ -142,7 +151,7 @@ mod tests {
     #[test]
     fn hud_status_publish_advances_revision_without_touching_epoch() {
         let mut life = OverlayLifecycle::default();
-        let shown = life.show();
+        let shown = life.show(7);
         assert_eq!(shown, 1);
         assert_eq!(life.epoch, 1);
         assert!(life.visible);
@@ -150,6 +159,10 @@ mod tests {
         let recording = life.snapshot(SessionState::Recording);
         let transcribing_rev = life.publish();
         let transcribing = life.snapshot(SessionState::Transcribing { attempt: 1 });
+        assert_eq!(recording.generation, 7);
+        assert_eq!(recording.epoch, life.epoch);
+        assert_eq!(transcribing.generation, recording.generation);
+        assert_eq!(transcribing.epoch, recording.epoch);
 
         assert!(accept_overlay_revision(
             recording.revision,
@@ -170,7 +183,7 @@ mod tests {
     #[test]
     fn error_hide_epoch_survives_failed_status_publish() {
         let mut life = OverlayLifecycle::default();
-        life.show();
+        life.show(7);
         let expected = life.epoch;
         life.publish();
         life.snapshot(SessionState::Failed {

@@ -1,6 +1,7 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { HotkeyCapture } from "./HotkeyCapture";
+import { SettingsField } from "./SettingsField";
 
 vi.mock("../../lib/api", () => ({
   api: {
@@ -11,6 +12,16 @@ vi.mock("../../lib/api", () => ({
 afterEach(() => cleanup());
 
 describe("HotkeyCapture", () => {
+  it("preserves the field label and help association on its button", () => {
+    render(
+      <SettingsField label="Global hotkey" description="Choose a recording shortcut">
+        <HotkeyCapture value="Ctrl+Shift+Space" prompt="Press keys" onChange={vi.fn()} />
+      </SettingsField>,
+    );
+    const button = screen.getByRole("button", { name: "Global hotkey" });
+    expect(screen.getByLabelText("Global hotkey")).toBe(button);
+    expect(button).toHaveAccessibleDescription("Choose a recording shortcut");
+  });
   it("keeps listening when the parent onChange identity changes", () => {
     const first = vi.fn();
     const { rerender } = render(

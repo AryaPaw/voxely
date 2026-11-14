@@ -7,11 +7,15 @@ describe("applyOverlaySnapshot", () => {
   it("BUG-HUD-R1 accepts a newer revision when HUD status changes without hide", () => {
     const recording: OverlaySnapshot = {
       revision: 1,
+      generation: 1,
+      epoch: 1,
       visible: true,
       state: { kind: "recording" },
     };
     const transcribing: OverlaySnapshot = {
       revision: 2,
+      generation: 1,
+      epoch: 1,
       visible: true,
       state: { kind: "transcribing", attempt: 1 },
     };
@@ -23,11 +27,15 @@ describe("applyOverlaySnapshot", () => {
   it("BUG-HUD-R1 ignores same-revision status so stale events cannot rewind HUD", () => {
     const recording: OverlaySnapshot = {
       revision: 4,
+      generation: 1,
+      epoch: 1,
       visible: true,
       state: { kind: "recording" },
     };
     const stale: OverlaySnapshot = {
       revision: 4,
+      generation: 1,
+      epoch: 1,
       visible: true,
       state: { kind: "transcribing", attempt: 1 },
     };

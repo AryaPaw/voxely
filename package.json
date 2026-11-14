@@ -20,9 +20,10 @@
     "winget:inspect": "pwsh -File scripts/winget-prepare.ps1 -Mode inspect",
     "winget:test-lib": "pwsh -File scripts/winget-lib.test.ps1",
     "verify": "pwsh -NoProfile -File scripts/verify.ps1",
-    "verify:checks": "bun run verify:preflight && bun run verify:frontend && bun run verify:rust:format && bun run verify:rust:lint && bun run verify:rust:tests && bun run verify:rust:coverage && bun run verify:metadata",
+    "verify:checks": "bun run verify:preflight && bun run verify:security && bun run verify:frontend && bun run verify:rust:format && bun run verify:rust:lint && bun run verify:rust:tests && bun run verify:rust:coverage && bun run verify:metadata",
     "docs:shots": "bun scripts/readme-shots/generate.ts",
     "verify:preflight": "bun scripts/check-preflight.ts && bun test ./scripts/check-preflight.bun.ts",
+    "verify:security": "bun scripts/check-dependencies.ts",
     "theme:generate": "bun scripts/generate-accent-presets.ts",
     "theme:check": "bun scripts/generate-accent-presets.ts --check",
     "verify:frontend": "bun run theme:check && bun run typecheck && bun run lint && bun run format:check && bun run coverage",
@@ -34,6 +35,9 @@
     "hooks:install": "bun scripts/check-preflight.ts --install-hooks"
   },
   "packageManager": "bun@1.4.2",
+  "overrides": {
+    "minimatch@>=7 <11.0.1": "11.0.1"
+  },
   "dependencies": {
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
@@ -73,5 +77,8 @@
     "typescript-eslint": "^8.71.0",
     "vite": "^8.3.5",
     "vitest": "^4.1.12"
+  },
+  "patchedDependencies": {
+    "deepmerge@4.3.1": "patches/deepmerge@4.3.1.patch"
   }
 }

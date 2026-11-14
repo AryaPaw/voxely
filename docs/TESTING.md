@@ -6,6 +6,12 @@ Frontend coverage includes all product `src` modules, including StatisticsPane, 
 
 `rust-toolchain.toml` is the canonical compiler/tooling version for local commands, verification CI and release packaging. Install it with `rustup toolchain install --no-self-update`; don't change the global default. Upgrade this pin deliberately and run the complete gate before publication. The independent MSRV check still reads `Cargo.toml` and uses an explicit `cargo +<MSRV>` so the repository pin cannot replace the minimum-version test.
 
+## Проверка зависимостей
+
+`bun run verify:security` входит в локальный gate и CI. Он проверяет JS-advisory через Bun и Cargo.lock по свежей базе RustSec. В CI устанавливается `cargo-audit` 0.22.2; локально допускается `.local/tools/bin/cargo-audit.exe`. Ошибки инструментов, сети и отчётов не считаются успешной проверкой. Уязвимости блокируют gate; информационные предупреждения RustSec выводятся отдельно.
+
+Для `deepmerge@4.3.1` upstream пока не выпустил исправление GHSA-gcqx-w48m-w2h4. Патч `patches/deepmerge@4.3.1.patch` применяется штатным Bun и блокирует перенос `__proto__` из обоих входов. Номер версии upstream остаётся прежним, поэтому обычный `bun audit` продолжает показывать advisory. Security gate признаёт устранённым только этот точный advisory и только после проверки установленного CJS/UMD-кода на контрпримерах, включая вложенные объекты и target без прототипа. Отсутствующий или неработающий патч, любой другой advisory и изменение версии требуют повторной оценки. После выхода исправленного upstream-релиза патч и специальную проверку следует удалить вместе с обновлением зависимости.
+
 ## Preventing local/CI drift
 
 `bun run verify:preflight` fails before expensive tests when the actual Rust/Bun version differs from the repository pins, a compiler override is active, a tracked Rust file contains CRLF, or Git attributes don't force LF. It also checks that CI uses the same `verify:*` commands as the local gate and that both workflows use the pinned Bun version. The guard's negative tests run locally and in CI.

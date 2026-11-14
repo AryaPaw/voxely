@@ -219,6 +219,7 @@ const meter: MeterSample = {
 
 const handlers = new Map<string, Set<(event: { payload: unknown }) => void>>();
 let compare: CompareState = {
+  revision: 0,
   recording: false,
   running: false,
   nonce: 0,
@@ -227,6 +228,10 @@ let compare: CompareState = {
   runId: null,
   slots: [],
 };
+function compareSnapshot(): CompareState {
+  compare.revision += 1;
+  return structuredClone(compare);
+}
 export function fixtureListen(event: string, handler: (event: { payload: unknown }) => void) {
   const listeners = handlers.get(event) ?? new Set();
   listeners.add(handler);
@@ -342,6 +347,8 @@ export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): P
     case "get_overlay_snapshot":
       return {
         revision: 1,
+        generation: 1,
+        epoch: 1,
         visible: window.location.search.includes("overlay"),
         state: sessionFromSearch(),
       } as T;
@@ -413,9 +420,10 @@ export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): P
       fixtureEmit("filter://sample", true);
       return undefined as T;
     case "get_model_compare":
-      return structuredClone(compare) as T;
+      return compareSnapshot() as T;
     case "start_model_compare":
       compare = {
+        revision: compare.revision,
         recording: true,
         running: false,
         nonce: compare.nonce + 1,
@@ -424,17 +432,20 @@ export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): P
         runId: null,
         slots: [],
       };
-      fixtureEmit("compare://state", compare);
-      return undefined as T;
+      fixtureEmit("compare://state", compareSnapshot());
+      return compare.nonce as T;
     case "stop_model_compare":
+      if (typeof _args?.nonce === "number" && _args.nonce !== compare.nonce) {
+        return compareSnapshot() as T;
+      }
       compare = {
         ...compare,
         recording: false,
         listenPath: fixtureAudioUrl(22),
         sttPath: fixtureAudioUrl(22),
       };
-      fixtureEmit("compare://state", compare);
-      return structuredClone(compare) as T;
+      fixtureEmit("compare://state", compareSnapshot());
+      return compareSnapshot() as T;
     case "run_model_compare":
       compare = {
         ...compare,
@@ -455,19 +466,20 @@ export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): P
           runId: `fixture-run-${compare.nonce}`,
         })),
       };
-      fixtureEmit("compare://state", compare);
-      return structuredClone(compare) as T;
+      fixtureEmit("compare://state", compareSnapshot());
+      return compareSnapshot() as T;
     case "clear_model_compare":
       compare = {
+        revision: compare.revision,
         recording: false,
         running: false,
-        nonce: 0,
+        nonce: compare.nonce,
         listenPath: null,
         sttPath: null,
         runId: null,
         slots: [],
       };
-      fixtureEmit("compare://state", compare);
+      fixtureEmit("compare://state", compareSnapshot());
       return undefined as T;
     case "cancel_model_compare":
       compare = {
@@ -478,8 +490,8 @@ export async function invoke<T>(cmd: string, _args?: Record<string, unknown>): P
           status: slot.status === "running" ? "cancelled" : slot.status,
         })),
       };
-      fixtureEmit("compare://state", compare);
-      return structuredClone(compare) as T;
+      fixtureEmit("compare://state", compareSnapshot());
+      return compareSnapshot() as T;
     case "play_cue":
     case "preview_error_notification":
     case "open_audio_dir":

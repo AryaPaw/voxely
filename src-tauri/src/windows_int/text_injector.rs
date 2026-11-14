@@ -65,8 +65,8 @@ pub mod native {
         VK_RMENU, VK_RSHIFT, VK_RWIN,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetForegroundWindow, GetPropW, GetWindowThreadProcessId, IsIconic, IsWindow, RemovePropW,
-        SetForegroundWindow, SetPropW,
+        CreateWindowExW, DestroyWindow, GetForegroundWindow, GetPropW, GetWindowThreadProcessId,
+        IsIconic, IsWindow, RemovePropW, SetForegroundWindow, SetPropW, HWND_MESSAGE, WINDOW_STYLE,
     };
 
     pub struct LiveWorld {
@@ -545,7 +545,10 @@ pub mod native {
 
     pub fn clipboard_copy(text: &str) -> Result<(), AppError> {
         unsafe {
-            open_clipboard()?;
+            // EmptyClipboard requires a real HWND owner. A message-only window
+            // stays on this worker and never activates or captures keyboard focus.
+            let owner = ClipboardOwner::new()?;
+            open_clipboard(owner.0)?;
             if let Err(err) = write_clipboard(text) {
                 CloseClipboard().ok();
                 return Err(err);
@@ -555,9 +558,40 @@ pub mod native {
         }
     }
 
-    unsafe fn open_clipboard() -> Result<(), AppError> {
+    struct ClipboardOwner(HWND);
+
+    impl ClipboardOwner {
+        unsafe fn new() -> Result<Self, AppError> {
+            CreateWindowExW(
+                Default::default(),
+                windows::core::w!("STATIC"),
+                windows::core::w!("Voxely Clipboard"),
+                WINDOW_STYLE::default(),
+                0,
+                0,
+                0,
+                0,
+                HWND_MESSAGE,
+                None,
+                None,
+                None,
+            )
+            .map(Self)
+            .map_err(|error| AppError::TextInsertionFailed(error.to_string()))
+        }
+    }
+
+    impl Drop for ClipboardOwner {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = DestroyWindow(self.0);
+            }
+        }
+    }
+
+    unsafe fn open_clipboard(owner: HWND) -> Result<(), AppError> {
         for _ in 0..20 {
-            if OpenClipboard(HWND::default()).is_ok() {
+            if OpenClipboard(owner).is_ok() {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -566,7 +600,6 @@ pub mod native {
     }
 
     unsafe fn write_clipboard(text: &str) -> Result<(), AppError> {
-        EmptyClipboard().map_err(|e| AppError::TextInsertionFailed(e.to_string()))?;
         let encoded: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
         let bytes = encoded.len() * 2;
         let handle = GlobalAlloc(GMEM_MOVEABLE, bytes)
@@ -580,6 +613,11 @@ pub mod native {
         }
         std::ptr::copy_nonoverlapping(encoded.as_ptr() as *const u8, ptr as *mut u8, bytes);
         GlobalUnlock(handle).ok();
+        // Allocation failure must leave the existing clipboard unchanged.
+        if let Err(error) = EmptyClipboard() {
+            free_hglobal(handle);
+            return Err(AppError::TextInsertionFailed(error.to_string()));
+        }
         if let Err(err) = SetClipboardData(13, HANDLE(handle.0)) {
             free_hglobal(handle);
             return Err(AppError::TextInsertionFailed(err.to_string()));
@@ -594,6 +632,83 @@ pub mod native {
         }
         unsafe {
             let _ = GlobalFree(handle.0);
+        }
+    }
+
+    #[cfg(test)]
+    mod clipboard_tests {
+        use super::*;
+
+        #[test]
+        #[ignore = "writes the clipboard only inside an explicitly enabled Windows Sandbox guest"]
+        fn native_clipboard_roundtrip_in_isolated_sandbox_only() {
+            assert_eq!(
+                std::env::var("VOXELY_SANDBOX_CLIPBOARD_TEST").as_deref(),
+                Ok("1")
+            );
+            assert_eq!(
+                std::env::var("USERNAME").as_deref(),
+                Ok("WDAGUtilityAccount")
+            );
+            // Check the OS identity too: environment overrides must never make
+            // this fixture write the host user's clipboard.
+            #[link(name = "advapi32")]
+            extern "system" {
+                fn GetUserNameW(buffer: *mut u16, length: *mut u32) -> i32;
+            }
+            let mut account = [0u16; 256];
+            let mut account_len = account.len() as u32;
+            assert_ne!(
+                unsafe { GetUserNameW(account.as_mut_ptr(), &mut account_len) },
+                0
+            );
+            assert_eq!(
+                String::from_utf16_lossy(&account[..account_len as usize - 1]),
+                "WDAGUtilityAccount"
+            );
+            unsafe {
+                // The control establishes actual Windows behavior separately
+                // from the documented NULL-owner contract. It never gates PASS.
+                open_clipboard(HWND::default()).unwrap();
+                let null_owner_accepted =
+                    write_clipboard("Voxely guest-only NULL owner control").is_ok();
+                CloseClipboard().unwrap();
+                println!("Guest NULL-owner write accepted: {null_owner_accepted}");
+            }
+            let expected = "Voxely: проверка буфера 👑🦀\r\nSecond line";
+            clipboard_copy(expected).unwrap();
+            unsafe {
+                open_clipboard(HWND::default()).unwrap();
+                let handle = windows::Win32::System::DataExchange::GetClipboardData(13).unwrap();
+                let global = windows::Win32::Foundation::HGLOBAL(handle.0);
+                let pointer = GlobalLock(global);
+                assert!(!pointer.is_null());
+                let length = expected.encode_utf16().count();
+                let stored = std::slice::from_raw_parts(pointer.cast::<u16>(), length + 1);
+                assert_eq!(
+                    &stored[..length],
+                    expected.encode_utf16().collect::<Vec<_>>()
+                );
+                assert_eq!(stored[length], 0);
+                GlobalUnlock(global).ok();
+                CloseClipboard().unwrap();
+            }
+        }
+
+        #[test]
+        fn clipboard_owner_window_is_hidden_owned_and_destroyed_without_clipboard_access() {
+            unsafe {
+                let owner = ClipboardOwner::new().unwrap();
+                let hwnd = owner.0;
+                assert!(IsWindow(hwnd).as_bool());
+                assert!(!windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool());
+                assert_eq!(
+                    GetWindowThreadProcessId(hwnd, None),
+                    windows::Win32::System::Threading::GetCurrentThreadId()
+                );
+                drop(owner);
+                assert!(!IsWindow(hwnd).as_bool());
+            }
         }
     }
 }

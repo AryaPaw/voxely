@@ -3,8 +3,8 @@ use crate::app::machine::SessionState;
 use crate::app::overlay::OverlayTimingReport;
 use crate::app::overlay_controller::OverlaySnapshot;
 use crate::app::session::{
-    current_meter, devices, release_meter_monitor, reserve_meter_monitor, start_meter_monitor,
-    stop_meter_capture, take_owned_meter_monitor, AppContext,
+    current_meter, devices, reserve_meter_monitor, start_meter_monitor, stop_meter_capture,
+    take_meter_monitor_for_release, take_owned_meter_monitor, AppContext,
 };
 use crate::audio::capture::{read_pcm16_wav, write_pcm16_wav, CaptureSession, CaptureStopOutcome};
 use crate::audio::devices::InputDeviceInfo;
@@ -481,23 +481,34 @@ pub fn delete_all_history(
     let mut result =
         crate::history::retention::delete_all_recordings(&ctx.history.lock(), &root, &protected)?;
     if !crate::app::operations::system_busy(ctx.inner()) {
-        let mut previews = ctx.filter_previews.lock();
-        previews.invalidate();
-        result
-            .failed
-            .extend(crate::history::retention::remove_filter_artifacts(&root));
-        drop(previews);
-        result
-            .failed
-            .extend(crate::app::compare::remove_compare_artifacts(&root));
-        *ctx.compare_state.lock() = crate::app::compare::CompareState::default();
-        let _ = app.emit_to("main", "compare://state", ctx.compare_state.lock().clone());
+        result.failed.extend(clear_idle_audio_after_history_delete(
+            ctx.inner(),
+            &root,
+            &_admission,
+        ));
+        crate::app::compare::emit_compare(&app);
     } else {
         result.failed.push("active audio samples".into());
     }
     clear_usage_after_delete_all(&ctx.history.lock(), &result, &protected)?;
     ctx.emit_history(&app);
     Ok(result)
+}
+
+fn clear_idle_audio_after_history_delete(
+    ctx: &AppContext,
+    root: &Path,
+    _admission: &parking_lot::MutexGuard<'_, ()>,
+) -> Vec<String> {
+    let mut previews = ctx.filter_previews.lock();
+    previews.invalidate();
+    let mut failed = crate::history::retention::remove_filter_artifacts(root);
+    drop(previews);
+    failed.extend(crate::app::compare::remove_compare_artifacts(root));
+    // Failed deletion can leave an older take on disk. Keep the monotonic
+    // nonce and publication revision so future takes never reuse its paths.
+    ctx.compare_state.lock().reset();
+    failed
 }
 
 fn clear_usage_after_delete_all(
@@ -583,28 +594,70 @@ fn publish_prepared_preview(
     metrics: crate::dsp::metrics::AudioMetrics,
     interest: Option<std::sync::Weak<()>>,
 ) -> Result<DspPreview, AppError> {
-    // Retention takes this same gate before collecting protected names and
-    // cleaning orphans. Keep file creation/publication inside that transaction;
-    // expensive DSP above deliberately doesn't hold admission.
-    let _admission = crate::app::operations::lock_admission(ctx);
+    publish_prepared_preview_with(ctx, generation, metrics, interest, |original, output| {
+        write_pcm16_wav(original, SAMPLE_RATE, &original_listen)?;
+        write_pcm16_wav(output, SAMPLE_RATE, &processed)
+    })
+}
+
+fn publish_prepared_preview_with(
+    ctx: &AppContext,
+    generation: u64,
+    metrics: crate::dsp::metrics::AudioMetrics,
+    interest: Option<std::sync::Weak<()>>,
+    write: impl FnOnce(&Path, &Path) -> Result<(), AppError>,
+) -> Result<DspPreview, AppError> {
     let audio_root = crate::history::repository::audio_dir(&ctx.data_dir);
-    let mut owner = ctx.filter_previews.lock();
+    // No file exists yet, so reserving collision-free names needs no UI gate.
+    let lease = crate::history::retention::FilterPreviewLease::new(&audio_root)?;
     let abandoned = || {
         interest
             .as_ref()
             .is_some_and(|interest| interest.strong_count() == 0)
     };
-    if abandoned() || !owner.is_current(generation) {
-        return Err(AppError::Cancelled);
-    }
-    let lease = crate::history::retention::FilterPreviewLease::new(&audio_root)?;
+    let reservation = {
+        let _admission = crate::app::operations::lock_admission(ctx);
+        if abandoned()
+            || !ctx.filter_previews.lock().is_current(generation)
+            || ctx
+                .shutdown_requested
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(AppError::Cancelled);
+        }
+        crate::app::operations::AudioWriteReservation::reserve(ctx, lease.names())?
+    };
     let (original_preview, processed_path) = lease.paths();
-    write_pcm16_wav(&original_preview, SAMPLE_RATE, &original_listen)?;
-    write_pcm16_wav(&processed_path, SAMPLE_RATE, &processed)?;
-    if abandoned() {
-        return Err(AppError::Cancelled);
-    }
-    owner.publish(&lease, interest.is_none());
+    let written = write(&original_preview, &processed_path);
+    let published = match written {
+        Ok(()) => {
+            let _admission = crate::app::operations::lock_admission(ctx);
+            let mut owner = ctx.filter_previews.lock();
+            if abandoned()
+                || !owner.is_current(generation)
+                || ctx
+                    .shutdown_requested
+                    .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(AppError::Cancelled)
+            } else {
+                // Return the retired lease: its destructor removes files and
+                // must run after releasing both owner and admission.
+                Ok(owner.publish(&lease, interest.is_none()))
+            }
+        }
+        Err(error) => Err(error),
+    };
+    let retired = match published {
+        Ok(retired) => retired,
+        Err(error) => {
+            drop(lease);
+            drop(reservation);
+            return Err(error);
+        }
+    };
+    drop(retired);
+    drop(reservation);
     Ok(DspPreview {
         original_path: original_preview.to_string_lossy().into_owned(),
         processed_path: processed_path.to_string_lossy().into_owned(),
@@ -630,7 +683,10 @@ fn finish_filter_start<T>(
         != generation
     {
         match started {
-            Ok(session) => discard(session),
+            Ok(session) => {
+                drop(_admission);
+                discard(session);
+            }
             Err(_) => {
                 ctx.filter_recording
                     .store(false, std::sync::atomic::Ordering::SeqCst);
@@ -675,22 +731,20 @@ pub async fn start_filter_sample(
     ctx: State<'_, Arc<AppContext>>,
 ) -> Result<(), AppError> {
     ctx.settings.lock().mic_tune.validate()?;
-    let generation = {
+    let (generation, previous_meter) = {
         let _admission = crate::app::operations::lock_admission(ctx.inner());
         if crate::app::operations::system_busy(ctx.inner()) {
-            return Err(AppError::TranscriptionInProgress);
-        }
-        if !release_meter_monitor(ctx.inner()) {
-            let _ = app.emit_to("main", "filter://sample", false);
             return Err(AppError::TranscriptionInProgress);
         }
         ctx.filter_recording
             .store(true, std::sync::atomic::Ordering::SeqCst);
         ctx.pending_native_capture_starts
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        ctx.filter_generation
+        let generation = ctx
+            .filter_generation
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-            + 1
+            + 1;
+        (generation, take_meter_monitor_for_release(ctx.inner()))
     };
     let dest = crate::history::repository::audio_dir(&ctx.data_dir).join("filter-sample.wav");
     let settings = ctx.settings.lock().clone();
@@ -705,7 +759,28 @@ pub async fn start_filter_sample(
     let started = tokio::task::spawn_blocking(move || {
         let late_ctx = worker_ctx.clone();
         let late_app = worker_app.clone();
-        let started =
+        let ready = previous_meter
+            .map(|session| stop_meter_capture(&worker_ctx, session))
+            .unwrap_or(Ok(()))
+            .and_then(|()| {
+                if worker_ctx
+                    .filter_generation
+                    .load(std::sync::atomic::Ordering::SeqCst)
+                    == generation
+                    && !worker_ctx
+                        .shutdown_requested
+                        .load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    Ok(())
+                } else {
+                    Err(AppError::Cancelled)
+                }
+            })
+            .map_err(|error| crate::audio::capture::CaptureStartFailure {
+                error,
+                native_worker_pending: false,
+            });
+        let started = ready.and_then(|()| {
             CaptureSession::start_with_late_completion(device.as_deref(), dest, move || {
                 let _admission = crate::app::operations::lock_admission(&late_ctx);
                 if late_ctx
@@ -731,7 +806,8 @@ pub async fn start_filter_sample(
                 }
                 drop(_admission);
                 crate::app::session::schedule_deferred_shutdown_exit(&late_app, &late_ctx);
-            });
+            })
+        });
         let native_worker_pending = started
             .as_ref()
             .err()
@@ -1014,6 +1090,19 @@ pub fn cancel_dictation(app: AppHandle) -> Result<(), AppError> {
 }
 
 #[tauri::command]
+pub async fn cancel_overlay_dictation(
+    app: AppHandle,
+    generation: u64,
+    epoch: u64,
+) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::app::session::cancel_recording_from_hud(&app, generation, epoch)
+    })
+    .await
+    .map_err(|error| AppError::AudioCaptureFailed(error.to_string()))?
+}
+
+#[tauri::command]
 pub fn set_hotkey_capture(app: AppHandle, capturing: bool) -> Result<(), AppError> {
     crate::app::shortcuts::set_hotkeys_suspended(&app, capturing)
 }
@@ -1273,13 +1362,22 @@ fn history_api_audio(
 }
 
 #[tauri::command]
-pub fn start_model_compare(app: AppHandle) -> Result<(), AppError> {
-    crate::app::compare::start_model_compare(&app)
+pub async fn start_model_compare(app: AppHandle) -> Result<u64, AppError> {
+    tauri::async_runtime::spawn_blocking(move || crate::app::compare::start_model_compare(&app))
+        .await
+        .map_err(|error| AppError::AudioCaptureFailed(error.to_string()))?
 }
 
 #[tauri::command]
-pub fn stop_model_compare(app: AppHandle) -> Result<crate::app::compare::CompareState, AppError> {
-    crate::app::compare::stop_model_compare(&app)
+pub async fn stop_model_compare(
+    app: AppHandle,
+    nonce: Option<u64>,
+) -> Result<crate::app::compare::CompareState, AppError> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::app::compare::stop_model_compare(&app, nonce)
+    })
+    .await
+    .map_err(|error| AppError::AudioCaptureFailed(error.to_string()))?
 }
 
 #[tauri::command]
@@ -1295,8 +1393,10 @@ pub fn get_model_compare(app: AppHandle) -> crate::app::compare::CompareState {
 }
 
 #[tauri::command]
-pub fn clear_model_compare(app: AppHandle) -> Result<(), AppError> {
-    crate::app::compare::clear_model_compare(&app)
+pub async fn clear_model_compare(app: AppHandle) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || crate::app::compare::clear_model_compare(&app))
+        .await
+        .map_err(|error| AppError::StorageFailed(error.to_string()))?
 }
 
 #[tauri::command]
@@ -1329,6 +1429,65 @@ pub fn preview_error_notification(app: AppHandle) -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_filter_start_discards_outside_admission_and_retains_native_reservation() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(AppContext::initialize(directory.path().to_path_buf()).unwrap());
+        ctx.filter_generation
+            .store(2, std::sync::atomic::Ordering::SeqCst);
+        ctx.filter_recording
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        ctx.pending_native_capture_starts
+            .store(1, std::sync::atomic::Ordering::SeqCst);
+        let (entered, received) = std::sync::mpsc::channel();
+        let (release, waiting) = std::sync::mpsc::channel();
+        let worker_ctx = ctx.clone();
+        let worker = std::thread::spawn(move || {
+            finish_filter_start(
+                &worker_ctx,
+                1,
+                Ok(()),
+                |_| panic!("stale capture published"),
+                |_| {
+                    entered.send(()).unwrap();
+                    waiting.recv().unwrap();
+                    worker_ctx
+                        .filter_recording
+                        .store(false, std::sync::atomic::Ordering::SeqCst);
+                    crate::app::session::release_pending_native_capture_start(&worker_ctx);
+                },
+            )
+        });
+        received
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        {
+            let _admission = ctx
+                .admission
+                .try_lock()
+                .expect("driver discard blocked UI admission");
+            assert!(crate::app::operations::system_busy(&ctx));
+            assert!(ctx
+                .filter_recording
+                .load(std::sync::atomic::Ordering::SeqCst));
+            assert_eq!(
+                ctx.pending_native_capture_starts
+                    .load(std::sync::atomic::Ordering::SeqCst),
+                1
+            );
+        }
+        release.send(()).unwrap();
+        assert_eq!(worker.join().unwrap().unwrap_err(), AppError::Cancelled);
+        assert!(!ctx
+            .filter_recording
+            .load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(
+            ctx.pending_native_capture_starts
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0
+        );
+    }
 
     struct CommandFixture {
         app: tauri::App<tauri::test::MockRuntime>,
@@ -2095,6 +2254,50 @@ mod tests {
     }
 
     #[test]
+    fn full_history_clear_preserves_compare_identity_after_partial_audio_cleanup() {
+        let directory = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(directory.path().to_path_buf()).unwrap();
+        let root = crate::history::repository::audio_dir(&ctx.data_dir);
+        let old_nonce = 1;
+        let blocked = root.join(crate::app::compare::compare_listen_name(old_nonce));
+        // A failed file removal is deterministic on both Windows and Unix.
+        // The production path must keep its generation even in this branch.
+        std::fs::create_dir(&blocked).unwrap();
+        *ctx.compare_state.lock() = crate::app::compare::CompareState {
+            nonce: old_nonce,
+            revision: 41,
+            listen_path: Some(blocked.to_string_lossy().into_owned()),
+            run_id: Some("retired-run".into()),
+            ..Default::default()
+        };
+
+        let admission = crate::app::operations::lock_admission(&ctx);
+        let failed = clear_idle_audio_after_history_delete(&ctx, &root, &admission);
+        assert_eq!(failed, vec![blocked.to_string_lossy().into_owned()]);
+        assert!(blocked.is_dir(), "failed deletion must remain explicit");
+        let state = ctx.compare_state.lock().clone();
+        assert_eq!(
+            state.nonce, old_nonce,
+            "history clear mustn't recycle take IDs"
+        );
+        assert_eq!(state.revision, 41, "history clear mustn't rewind snapshots");
+        assert!(state.listen_path.is_none());
+        assert!(state.run_id.is_none());
+        assert!(!state.running && !state.recording);
+        let next_take = state.nonce + 1;
+        for name in [
+            crate::app::compare::compare_raw_name(next_take),
+            crate::app::compare::compare_listen_name(next_take),
+            crate::app::compare::compare_stt_name(next_take),
+        ] {
+            assert!(
+                !root.join(name).exists(),
+                "future take reused a retired path"
+            );
+        }
+    }
+
+    #[test]
     fn partial_delete_all_preserves_protected_and_retained_unrelated_usage() {
         let dir = tempfile::tempdir().unwrap();
         let history =
@@ -2380,6 +2583,145 @@ mod tests {
             Path::new(&preview.original_path).is_file()
                 && Path::new(&preview.processed_path).is_file()
         );
+    }
+
+    #[test]
+    fn preview_partial_write_failure_rolls_back_candidates_and_preserves_previous_lease() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        let metrics = crate::dsp::metrics::metrics(&[0.1; 64]);
+        let previous_generation = ctx.filter_previews.lock().reserve();
+        let previous = publish_prepared_preview(
+            &ctx,
+            previous_generation,
+            vec![0.1; 64],
+            vec![0.2; 64],
+            metrics,
+            None,
+        )
+        .unwrap();
+        let previous_bytes = [
+            std::fs::read(&previous.original_path).unwrap(),
+            std::fs::read(&previous.processed_path).unwrap(),
+        ];
+        let generation = ctx.filter_previews.lock().reserve();
+        let failure = AppError::StorageFailed("injected second preview output failure".into());
+        let mut candidates = None;
+        let result =
+            publish_prepared_preview_with(&ctx, generation, metrics, None, |original, output| {
+                write_pcm16_wav(original, SAMPLE_RATE, &[0.3; 64])?;
+                std::fs::write(
+                    output.with_extension("wav.tmp"),
+                    b"unfinished processed preview",
+                )
+                .map_err(|error| AppError::StorageFailed(error.to_string()))?;
+                candidates = Some((original.to_path_buf(), output.to_path_buf()));
+                Err(failure.clone())
+            });
+        assert!(matches!(result, Err(error) if error == failure));
+        let (original, output) = candidates.expect("injected failure must follow the first write");
+        for candidate in [
+            &original,
+            &output,
+            &original.with_extension("wav.tmp"),
+            &output.with_extension("wav.tmp"),
+        ] {
+            assert!(!candidate.exists());
+        }
+        assert_eq!(
+            std::fs::read(&previous.original_path).unwrap(),
+            previous_bytes[0]
+        );
+        assert_eq!(
+            std::fs::read(&previous.processed_path).unwrap(),
+            previous_bytes[1]
+        );
+        let protected = ctx.filter_previews.lock().protected_names();
+        assert!(protected.contains(
+            &Path::new(&previous.original_path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        ));
+        assert!(protected.contains(
+            &Path::new(&previous.processed_path)
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        ));
+        assert!(ctx.pending_audio_writes.lock().is_empty());
+    }
+
+    #[test]
+    fn preview_disk_write_releases_admission_and_keeps_retention_safe_until_stale_cleanup() {
+        let dir = tempfile::tempdir().unwrap();
+        let ctx = Arc::new(AppContext::initialize(dir.path().to_path_buf()).unwrap());
+        let root = crate::history::repository::audio_dir(dir.path());
+        let generation = ctx.filter_previews.lock().reserve();
+        let metrics = crate::dsp::metrics::metrics(&[0.1; 64]);
+        let (writing, waiting) = std::sync::mpsc::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let worker_ctx = Arc::clone(&ctx);
+        let worker = std::thread::spawn(move || {
+            publish_prepared_preview_with(
+                &worker_ctx,
+                generation,
+                metrics,
+                None,
+                |original, output| {
+                    write_pcm16_wav(original, SAMPLE_RATE, &[0.1; 64])?;
+                    writing
+                        .send((original.to_path_buf(), output.to_path_buf()))
+                        .unwrap();
+                    resume
+                        .recv_timeout(std::time::Duration::from_secs(3))
+                        .unwrap();
+                    write_pcm16_wav(output, SAMPLE_RATE, &[0.2; 64])
+                },
+            )
+        });
+        let (stale_original, stale_output) = waiting
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let admission = ctx
+            .admission
+            .try_lock()
+            .expect("preview IO retained UI admission");
+        assert!(ctx.filter_previews.try_lock().is_some());
+        let protected = crate::app::operations::protected_audio_names(&ctx);
+        assert!(protected.contains(stale_output.file_name().unwrap().to_str().unwrap()));
+        assert!(protected.contains(
+            stale_output
+                .with_extension("wav.tmp")
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        ));
+        crate::history::retention::cleanup_orphans_except(&root, &ctx.history.lock(), &protected)
+            .unwrap();
+        assert!(stale_original.is_file());
+        let newer_generation = ctx.filter_previews.lock().reserve();
+        drop(admission);
+        let newer = publish_prepared_preview(
+            &ctx,
+            newer_generation,
+            vec![0.3; 64],
+            vec![0.4; 64],
+            metrics,
+            None,
+        )
+        .unwrap();
+        let newer_bytes = std::fs::read(&newer.processed_path).unwrap();
+        release.send(()).unwrap();
+        assert!(matches!(worker.join().unwrap(), Err(AppError::Cancelled)));
+        assert!(!stale_original.exists());
+        assert!(!stale_output.exists());
+        assert_eq!(std::fs::read(&newer.processed_path).unwrap(), newer_bytes);
+        assert!(Path::new(&newer.original_path).is_file());
+        assert!(ctx.pending_audio_writes.lock().is_empty());
     }
 
     #[test]

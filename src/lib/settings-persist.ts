@@ -12,3 +12,13 @@ export function shouldKeepOptimistic<T extends { writeSeq?: number }>(
 ): boolean {
   return Boolean(prev && (prev.writeSeq ?? 0) > failedSeq);
 }
+
+export function reconcileFailedSettings<T extends { writeSeq?: number }>(
+  prev: T | null,
+  failedSeq: number,
+  persisted: T,
+): T {
+  // A read-back after failure is authoritative for that draft even when its
+  // stored sequence is lower. A later local write still owns its own result.
+  return shouldKeepOptimistic(prev, failedSeq) ? acceptSavedSettings(prev, persisted) : persisted;
+}

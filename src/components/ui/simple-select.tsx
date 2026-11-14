@@ -5,21 +5,23 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import type { ComponentProps } from "react";
+import { cn } from "@/lib/utils";
 
 export function SimpleSelect({
   value,
   onValueChange,
   options,
-  "aria-label": ariaLabel,
+  className,
+  ...triggerProps
 }: {
   value: string;
   onValueChange: (value: string) => void;
   options: Array<{ value: string; label: string }>;
-  "aria-label"?: string;
-}) {
+} & Omit<ComponentProps<typeof SelectTrigger>, "value" | "onChange" | "children">) {
   return (
     <Select value={value} onValueChange={onValueChange}>
-      <SelectTrigger aria-label={ariaLabel} className="w-full">
+      <SelectTrigger {...triggerProps} className={cn("w-full", className)}>
         <SelectValue />
       </SelectTrigger>
       <SelectContent>

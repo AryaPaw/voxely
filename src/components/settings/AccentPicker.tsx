@@ -16,21 +16,32 @@ export function AccentPicker({
   label,
   shadeLabel,
   resetLabel,
+  id,
+  "aria-describedby": descriptionId,
 }: {
   value?: AccentColor;
   onChange: (value: AccentColor) => void;
   label: string;
   shadeLabel: string;
   resetLabel: string;
+  id?: string;
+  "aria-describedby"?: string;
 }) {
   return (
     <div className="space-y-3">
-      <div role="group" aria-label={label} className="flex flex-wrap gap-1.5">
+      <div
+        role="group"
+        aria-label={label}
+        aria-describedby={descriptionId}
+        className="flex flex-wrap gap-1.5"
+      >
         {ACCENT_FAMILIES.map((family) => {
           const selected = value.family === family;
           const color = accentPreset({ family, shade: value.shade }).color;
           return (
             <Button
+              id={selected ? id : undefined}
+              aria-describedby={descriptionId}
               type="button"
               key={family}
               variant="outline"
@@ -58,7 +69,12 @@ export function AccentPicker({
           );
         })}
       </div>
-      <div role="group" aria-label={shadeLabel} className="flex flex-wrap items-center gap-2">
+      <div
+        role="group"
+        aria-label={shadeLabel}
+        aria-describedby={descriptionId}
+        className="flex flex-wrap items-center gap-2"
+      >
         <span className="text-xs text-muted-foreground">{shadeLabel}</span>
         {ACCENT_SHADES.map((shade) => {
           const palette = accentPreset({ family: value.family, shade });

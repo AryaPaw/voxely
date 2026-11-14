@@ -69,6 +69,39 @@ impl OpenRouterTransport {
 }
 
 const PREWARM_BODY_LIMIT: usize = 256 * 1024;
+const STT_BODY_LIMIT: usize = 4 * 1024 * 1024;
+const ERROR_BODY_LIMIT: usize = 64 * 1024;
+const MODEL_CATALOG_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+#[derive(Debug)]
+enum ResponseBodyError {
+    Transport(reqwest::Error),
+    TooLarge,
+}
+
+async fn bounded_response_body(
+    mut response: reqwest::Response,
+    limit: usize,
+) -> Result<Vec<u8>, ResponseBodyError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > limit as u64)
+    {
+        return Err(ResponseBodyError::TooLarge);
+    }
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(ResponseBodyError::Transport)?
+    {
+        if chunk.len() > limit.saturating_sub(body.len()) {
+            return Err(ResponseBodyError::TooLarge);
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrewarmOutcome {
@@ -142,13 +175,9 @@ async fn send_prewarm(
 }
 
 async fn finish_prewarm_body(response: reqwest::Response) {
-    if let Some(len) = response.content_length() {
-        if len > PREWARM_BODY_LIMIT as u64 {
-            drop(response);
-            return;
-        }
-    }
-    let _ = response.bytes().await;
+    // Draining a small response permits connection reuse. A response of unknown
+    // length is still bounded; discard its connection as soon as it exceeds it.
+    let _ = bounded_response_body(response, PREWARM_BODY_LIMIT).await;
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -458,7 +487,33 @@ async fn one_attempt(
         .get("retry-after")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| parse_retry_after(v, chrono::Utc::now()));
-    let body = response.text().await.map_err(|e| classify_reqwest(&e))?;
+    let successful = (200..300).contains(&status);
+    let bytes = match bounded_response_body(
+        response,
+        if successful {
+            STT_BODY_LIMIT
+        } else {
+            ERROR_BODY_LIMIT
+        },
+    )
+    .await
+    {
+        Ok(bytes) => bytes,
+        Err(ResponseBodyError::Transport(error)) => return Err(classify_reqwest(&error)),
+        Err(ResponseBodyError::TooLarge) if !successful => {
+            return Err(classify_http(status, retry_after, ""));
+        }
+        Err(ResponseBodyError::TooLarge) => {
+            return Err(ClassifiedError {
+                class: RetryClass::Terminal,
+                error: AppError::ResponseMalformed,
+                http_status: Some(status),
+                retry_after: None,
+                cost_usd: None,
+            });
+        }
+    };
+    let body = String::from_utf8_lossy(&bytes);
     if !(200..300).contains(&status) {
         tracing::warn!(status, "stt http error");
         return Err(classify_http(status, retry_after, &body));
@@ -516,10 +571,18 @@ pub async fn list_transcription_models(
     if !response.status().is_success() {
         return Err(AppError::ProviderUnavailable);
     }
-    let json: serde_json::Value = response
-        .json()
+    parse_model_catalog(response).await
+}
+
+async fn parse_model_catalog(response: reqwest::Response) -> Result<Vec<SttModel>, AppError> {
+    let body = bounded_response_body(response, MODEL_CATALOG_BODY_LIMIT)
         .await
-        .map_err(|_| AppError::ResponseMalformed)?;
+        .map_err(|error| match error {
+            ResponseBodyError::Transport(error) => AppError::ConnectionFailed(error_chain(&error)),
+            ResponseBodyError::TooLarge => AppError::ResponseMalformed,
+        })?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| AppError::ResponseMalformed)?;
     let mut models = Vec::new();
     if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
         for item in data {
@@ -1059,5 +1122,198 @@ mod tests {
     fn fixture_writer() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         writeln!(f, "ok").unwrap();
+    }
+
+    async fn body_response_server(
+        body: Vec<u8>,
+        chunked: bool,
+        finish: bool,
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    ) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            let mut buffer = [0; 2048];
+            while !headers.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let count = stream.read(&mut buffer).await.unwrap();
+                if count == 0 {
+                    return;
+                }
+                headers.extend_from_slice(&buffer[..count]);
+            }
+            let length = if chunked {
+                "Transfer-Encoding: chunked".to_owned()
+            } else {
+                format!("Content-Length: {}", body.len() + usize::from(!finish))
+            };
+            let header = format!("HTTP/1.1 200 OK\r\n{length}\r\nConnection: close\r\n\r\n");
+            if stream.write_all(header.as_bytes()).await.is_err() {
+                return;
+            }
+            if chunked
+                && stream
+                    .write_all(format!("{:x}\r\n", body.len()).as_bytes())
+                    .await
+                    .is_err()
+            {
+                return;
+            }
+            if stream.write_all(&body).await.is_err() {
+                return;
+            }
+            if chunked {
+                if stream.write_all(b"\r\n").await.is_err() {
+                    return;
+                }
+                if finish {
+                    let _ = stream.write_all(b"0\r\n\r\n").await;
+                }
+            }
+            let _ = sent.send(());
+            if !finish {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        (format!("http://{address}"), task, received)
+    }
+
+    #[tokio::test]
+    async fn response_body_limits_cover_known_unknown_exact_and_truncated_lengths() {
+        for chunked in [false, true] {
+            let (url, task, _) = body_response_server(b"abcd".to_vec(), chunked, true).await;
+            let response = reqwest::get(url).await.unwrap();
+            assert_eq!(bounded_response_body(response, 4).await.unwrap(), b"abcd");
+            task.await.unwrap();
+            let (url, task, _) = body_response_server(vec![b'x'; 32], chunked, false).await;
+            let response = reqwest::get(url).await.unwrap();
+            let result =
+                tokio::time::timeout(Duration::from_secs(1), bounded_response_body(response, 16))
+                    .await;
+            assert!(matches!(result, Ok(Err(ResponseBodyError::TooLarge))));
+            task.abort();
+            let _ = task.await;
+        }
+        let (url, task, _) = body_response_server(vec![b'x'; 3], false, false).await;
+        let response = reqwest::get(url).await.unwrap();
+        task.abort();
+        let _ = task.await;
+        assert!(matches!(
+            bounded_response_body(response, 32).await,
+            Err(ResponseBodyError::Transport(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn prewarm_stops_at_cap_without_waiting_for_chunked_eof() {
+        let (url, task, _) =
+            body_response_server(vec![0; PREWARM_BODY_LIMIT + 1], true, false).await;
+        let response = reqwest::get(url).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), finish_prewarm_body(response))
+            .await
+            .unwrap();
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn stt_bounds_preserve_http_error_classification_and_reject_oversized_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = wav_fixture(dir.path());
+        for (status, length) in [(503, ERROR_BODY_LIMIT + 1), (200, STT_BODY_LIMIT + 1)] {
+            let server = MockServer::start();
+            server.mock(|when, then| {
+                when.method(POST).path("/audio/transcriptions");
+                then.status(status).body(vec![b'x'; length]);
+            });
+            let result = one_attempt(
+                &reqwest::Client::new(),
+                &server.base_url(),
+                "fixture-key",
+                "model",
+                None,
+                &path,
+                Duration::from_secs(1),
+                Duration::from_secs(2),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(result.http_status, Some(status));
+            assert_eq!(result.cost_usd, None);
+            if status == 503 {
+                assert_eq!(result.class, RetryClass::Retryable);
+            } else {
+                assert_eq!(result.error, AppError::ResponseMalformed);
+                assert_eq!(result.class, RetryClass::Terminal);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_transcription_aborts_an_unfinished_chunked_body() {
+        let (url, task, body_sent) =
+            body_response_server(b"{\"text\":\"pending\"}".to_vec(), true, false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = wav_fixture(dir.path());
+        let (cancel, receiver) = tokio::sync::watch::channel(false);
+        let client = reqwest::Client::new();
+        let request = transcribe_file(
+            &client,
+            &url,
+            "fixture-key",
+            "model",
+            None,
+            &path,
+            RetryPolicy::default(),
+            Duration::from_millis(100),
+            receiver,
+        );
+        let trigger = async {
+            body_sent.await.unwrap();
+            cancel.send_replace(true);
+        };
+        let (result, _) = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(request, trigger)
+        })
+        .await
+        .unwrap();
+        assert_eq!(result.unwrap_err(), AppError::Cancelled);
+        task.abort();
+        let _ = task.await;
+    }
+
+    #[tokio::test]
+    async fn catalog_parsing_bounds_response_and_rejects_malformed_json() {
+        for (body, valid) in [
+            (
+                br#"{"data":[{"id":"model","name":"Model"}]}"#.to_vec(),
+                true,
+            ),
+            (b"{".to_vec(), false),
+            (vec![b'x'; MODEL_CATALOG_BODY_LIMIT + 1], false),
+        ] {
+            let (url, task, _) = body_response_server(body, true, true).await;
+            let response = reqwest::get(url).await.unwrap();
+            let result = parse_model_catalog(response).await;
+            if valid {
+                assert_eq!(
+                    result.unwrap(),
+                    [SttModel {
+                        id: "model".into(),
+                        name: "Model".into()
+                    }]
+                );
+            } else {
+                assert_eq!(result.unwrap_err(), AppError::ResponseMalformed);
+            }
+            task.abort();
+            let _ = task.await;
+        }
     }
 }

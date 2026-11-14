@@ -30,92 +30,129 @@ pub fn resample_to_48k(input: &[f32], input_rate: u32) -> Result<Vec<f32>, AppEr
     Ok(resample_linear(input, input_rate, SAMPLE_RATE))
 }
 
-pub struct LinearStreamResampler {
-    input_rate: u64,
-    output_rate: u64,
+/// Stateful band-limited conversion for the WAV writer. Fixed internal chunks
+/// make the result independent of callback sizes; finish drains filter latency.
+pub struct StreamResampler {
+    input_rate: u32,
+    output_rate: u32,
     input_frames: u64,
-    output_frames: u64,
-    buffer_start: u64,
-    samples: Vec<f32>,
+    output_frames: usize,
+    engine: Option<SincFixedIn<f32>>,
+    pending: Vec<f32>,
+    delay_remaining: usize,
+    finished: bool,
 }
 
-impl LinearStreamResampler {
-    pub fn new(input_rate: u32, output_rate: u32) -> Self {
-        Self {
-            input_rate: u64::from(input_rate),
-            output_rate: u64::from(output_rate),
+impl StreamResampler {
+    pub fn new(input_rate: u32, output_rate: u32) -> Result<Self, AppError> {
+        if input_rate == 0 || output_rate == 0 {
+            return Err(AppError::AudioProcessingFailed(
+                "invalid streaming sample rate".into(),
+            ));
+        }
+        let engine = if input_rate == output_rate {
+            None
+        } else {
+            Some(
+                SincFixedIn::<f32>::new(
+                    f64::from(output_rate) / f64::from(input_rate),
+                    2.0,
+                    SincInterpolationParameters {
+                        sinc_len: 128,
+                        f_cutoff: 0.95,
+                        interpolation: SincInterpolationType::Linear,
+                        oversampling_factor: 128,
+                        window: WindowFunction::BlackmanHarris2,
+                    },
+                    512,
+                    1,
+                )
+                .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))?,
+            )
+        };
+        let delay_remaining = engine.as_ref().map_or(0, Resampler::output_delay);
+        Ok(Self {
+            input_rate,
+            output_rate,
             input_frames: 0,
             output_frames: 0,
-            buffer_start: 0,
-            samples: Vec::new(),
-        }
+            engine,
+            pending: Vec::new(),
+            delay_remaining,
+            finished: false,
+        })
     }
 
-    pub fn push(&mut self, input: &[f32]) -> Vec<f32> {
-        if input.is_empty() {
-            return Vec::new();
+    pub fn push(&mut self, input: &[f32]) -> Result<Vec<f32>, AppError> {
+        if self.finished {
+            return Err(AppError::AudioProcessingFailed(
+                "resampler already finished".into(),
+            ));
         }
-        if self.input_rate == 0 || self.output_rate == 0 || self.input_rate == self.output_rate {
-            self.input_frames = self.input_frames.saturating_add(input.len() as u64);
-            return input.to_vec();
-        }
-        self.samples.extend_from_slice(input);
         self.input_frames = self.input_frames.saturating_add(input.len() as u64);
-        self.produce(false)
-    }
-
-    pub fn finish(&mut self) -> Vec<f32> {
-        if self.input_frames == 0
-            || self.input_rate == 0
-            || self.output_rate == 0
-            || self.input_rate == self.output_rate
-        {
-            return Vec::new();
-        }
-        self.produce(true)
-    }
-
-    fn produce(&mut self, flush: bool) -> Vec<f32> {
-        let target_frames = if flush {
-            ((self.input_frames as f64 * self.output_rate as f64) / self.input_rate as f64)
-                .round()
-                .max(1.0) as u64
-        } else {
-            u64::MAX
+        let Some(engine) = self.engine.as_mut() else {
+            self.output_frames += input.len();
+            return Ok(input.to_vec());
         };
+        self.pending.extend_from_slice(input);
         let mut output = Vec::new();
-        while self.output_frames < target_frames {
-            let position_numerator = self.output_frames.saturating_mul(self.input_rate);
-            let source_index = position_numerator / self.output_rate;
-            if source_index >= self.input_frames {
-                break;
-            }
-            let next_index = source_index.saturating_add(1);
-            if !flush && next_index >= self.input_frames {
-                break;
-            }
-            let first = self.sample_at(source_index);
-            let second = self.sample_at(next_index.min(self.input_frames - 1));
-            let remainder = position_numerator % self.output_rate;
-            let fraction = remainder as f32 / self.output_rate as f32;
-            output.push(first * (1.0 - fraction) + second * fraction);
-            self.output_frames = self.output_frames.saturating_add(1);
+        let mut consumed = 0;
+        while self.pending.len() - consumed >= engine.input_frames_next() {
+            let needed = engine.input_frames_next();
+            let waves = engine
+                .process(&[&self.pending[consumed..consumed + needed]], None)
+                .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))?;
+            consumed += needed;
+            append_aligned_output(&waves[0], &mut self.delay_remaining, &mut output);
         }
-        if !flush {
-            let next_source_index =
-                self.output_frames.saturating_mul(self.input_rate) / self.output_rate;
-            let discard = next_source_index.saturating_sub(self.buffer_start) as usize;
-            if discard > 0 {
-                self.samples.drain(..discard.min(self.samples.len()));
-                self.buffer_start = self.buffer_start.saturating_add(discard as u64);
-            }
-        }
-        output
+        self.pending.drain(..consumed);
+        self.output_frames += output.len();
+        Ok(output)
     }
 
-    fn sample_at(&self, absolute_index: u64) -> f32 {
-        self.samples[(absolute_index - self.buffer_start) as usize]
+    pub fn finish(&mut self) -> Result<Vec<f32>, AppError> {
+        if self.finished {
+            return Ok(Vec::new());
+        }
+        self.finished = true;
+        if self.input_frames == 0 || self.engine.is_none() {
+            return Ok(Vec::new());
+        }
+        let expected = (self.input_frames as f64 * f64::from(self.output_rate)
+            / f64::from(self.input_rate))
+        .round()
+        .max(1.0) as usize;
+        let remaining = expected.saturating_sub(self.output_frames);
+        let engine = self.engine.as_mut().expect("non-identity resampler");
+        let mut output = Vec::new();
+        if !self.pending.is_empty() {
+            let waves = engine
+                .process_partial(Some(&[self.pending.as_slice()]), None)
+                .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))?;
+            self.pending.clear();
+            append_aligned_output(&waves[0], &mut self.delay_remaining, &mut output);
+        }
+        while output.len() < remaining {
+            let waves = engine
+                .process_partial::<&[f32]>(None, None)
+                .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))?;
+            if waves[0].is_empty() {
+                return Err(AppError::AudioProcessingFailed(
+                    "resampler failed to flush".into(),
+                ));
+            }
+            append_aligned_output(&waves[0], &mut self.delay_remaining, &mut output);
+        }
+        output.truncate(remaining);
+        self.output_frames = expected;
+        Ok(output)
     }
+}
+
+fn append_aligned_output(samples: &[f32], delay: &mut usize, output: &mut Vec<f32>) {
+    let discard = (*delay).min(samples.len());
+    *delay -= discard;
+    output.extend_from_slice(&samples[discard..]);
 }
 
 pub fn resample_sinc(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32> {
@@ -251,36 +288,76 @@ mod tests {
         assert_eq!(resample_to_48k(&samples, 48_000).unwrap(), samples);
     }
 
+    fn stream_resample(input: &[f32], rate: u32, chunk: usize) -> Vec<f32> {
+        let mut resampler = StreamResampler::new(rate, SAMPLE_RATE).unwrap();
+        let mut output = Vec::new();
+        for frame in input.chunks(chunk) {
+            output.extend(resampler.push(frame).unwrap());
+        }
+        output.extend(resampler.finish().unwrap());
+        assert!(resampler.finish().unwrap().is_empty());
+        assert!(resampler.push(&[0.0]).is_err());
+        output
+    }
+
     #[test]
     fn streaming_resample_is_independent_of_chunk_boundaries() {
-        for input_rate in [44_100, 96_000] {
-            let input = tone(input_rate as usize, 440.0, input_rate);
-            let expected = resample_linear(&input, input_rate, SAMPLE_RATE);
-            let mut resampler = LinearStreamResampler::new(input_rate, SAMPLE_RATE);
-            let mut actual = Vec::new();
-            for chunk in input.chunks(512) {
-                actual.extend(resampler.push(chunk));
+        for input_rate in [8_000, 16_000, 44_100, 48_000, 96_000, 192_000] {
+            let input = tone(input_rate as usize / 10 + 31, 440.0, input_rate);
+            let expected = stream_resample(&input, input_rate, input.len());
+            let expected_len = (input.len() as f64 * f64::from(SAMPLE_RATE) / f64::from(input_rate))
+                .round()
+                .max(1.0) as usize;
+            assert_eq!(expected.len(), expected_len);
+            for chunk in [1, 7, 113, 512, 770, 771, 1031] {
+                let actual = stream_resample(&input, input_rate, chunk);
+                assert_eq!(actual, expected, "rate={input_rate}, chunk={chunk}");
             }
-            actual.extend(resampler.finish());
-            assert_eq!(actual.len(), expected.len());
-            assert!(actual
-                .iter()
-                .zip(expected)
-                .all(|(actual, expected)| (actual - expected).abs() < 1e-6));
         }
     }
 
     #[test]
     fn streaming_resample_matches_one_shot_for_short_inputs() {
-        for input_rate in [96_000, 192_000] {
+        for input_rate in [44_100, 96_000, 192_000] {
             for len in 1..8 {
-                let input = vec![0.25; len];
-                let expected = resample_linear(&input, input_rate, SAMPLE_RATE);
-                let mut resampler = LinearStreamResampler::new(input_rate, SAMPLE_RATE);
-                let mut actual = resampler.push(&input);
-                actual.extend(resampler.finish());
+                let input: Vec<_> = (0..len).map(|i| (i as f32 + 1.0) / 8.0).collect();
+                let expected = stream_resample(&input, input_rate, input.len());
+                let actual = stream_resample(&input, input_rate, 1);
                 assert_eq!(actual, expected, "rate={input_rate}, frames={len}");
+                assert!(actual.iter().all(|sample| sample.is_finite()));
+                assert!(!actual.is_empty());
             }
+        }
+        assert!(StreamResampler::new(0, SAMPLE_RATE).is_err());
+        assert!(StreamResampler::new(SAMPLE_RATE, 0).is_err());
+        assert!(StreamResampler::new(96_000, SAMPLE_RATE)
+            .unwrap()
+            .finish()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn streaming_capture_rejects_ultrasonic_alias_and_preserves_voice_tail() {
+        for (rate, stop_frequency) in [(96_000, 42_000.0), (192_000, 90_000.0)] {
+            let pass = stream_resample(&tone(rate as usize, 1_000.0, rate), rate, 771);
+            let stop = stream_resample(&tone(rate as usize, stop_frequency, rate), rate, 771);
+            let pass_db = 10.0 * goertzel_power(&pass[512..], SAMPLE_RATE, 1_000.0).log10();
+            let alias_db = 10.0 * goertzel_power(&stop[512..], SAMPLE_RATE, 6_000.0).log10();
+            assert!(
+                alias_db <= pass_db - 40.0,
+                "rate={rate}, alias={alias_db}, pass={pass_db}"
+            );
+            let mut input = vec![0.0; rate as usize / 10];
+            input.extend(tone(rate as usize / 20, 1_000.0, rate));
+            let output = stream_resample(&input, rate, 770);
+            let tail = &output[output.len() - 480..];
+            let power = tail
+                .iter()
+                .map(|sample| f64::from(*sample).powi(2))
+                .sum::<f64>()
+                / tail.len() as f64;
+            assert!(power.sqrt() > 0.1, "voice tail missing at {rate} Hz");
         }
     }
 

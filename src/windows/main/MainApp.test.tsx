@@ -101,6 +101,7 @@ async function defaultInvoke(cmd: string, args?: Parameters<typeof invoke>[1]) {
   }
   if (cmd === "get_model_compare") {
     return {
+      revision: 1,
       recording: false,
       running: false,
       nonce: 0,
@@ -203,6 +204,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     }
     if (cmd === "get_model_compare") {
       return {
+        revision: 1,
         recording: false,
         running: false,
         nonce: 0,
@@ -262,6 +264,29 @@ afterEach(() => {
 });
 
 describe("MainApp", () => {
+  it("does not reapply stale theme and locale from a late initial settings read", async () => {
+    const pending = deferred<typeof settingsPayload>();
+    vi.mocked(invoke).mockImplementation((cmd, args) =>
+      cmd === "get_settings" ? pending.promise : defaultInvoke(cmd, args),
+    );
+    render(<MainApp />);
+    await waitFor(() => expect(listeners.get("settings://changed")?.length).toBeGreaterThan(0));
+    await act(async () => {
+      listeners.get("settings://changed")?.[0]({
+        payload: { ...settingsPayload, writeSeq: 2, theme: "dark", uiLanguage: "en" },
+      });
+    });
+    await screen.findByRole("heading", { name: "History" });
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(document.documentElement.lang).toBe("en");
+    await act(async () => {
+      pending.resolve({ ...settingsPayload, writeSeq: 1, theme: "light", uiLanguage: "ru" });
+    });
+    expect(screen.getByRole("heading", { name: "History" })).toBeInTheDocument();
+    expect(document.documentElement.dataset.theme).toBe("dark");
+    expect(document.documentElement.lang).toBe("en");
+  });
+
   it("keeps the custom header mounted while settings finish loading", async () => {
     nativeFrame.enabled = true;
     const pending = deferred<typeof settingsPayload>();
@@ -885,6 +910,78 @@ describe("MainApp", () => {
       expect(toast.warning).toHaveBeenCalledWith("Удалено записей: 2. Не удалось обработать: 1.");
       expect(historyLoads).toBeGreaterThan(beforeApply);
     });
+  });
+
+  it("rolls back a rejected setting after successful read-back before the next save", async () => {
+    vi.mocked(reportError).mockClear();
+    const saves: Record<string, unknown>[] = [];
+    vi.mocked(invoke).mockImplementation((cmd, args) => {
+      if (cmd === "save_settings") {
+        const snapshot = objectArgs(args).settings as Record<string, unknown>;
+        saves.push(snapshot);
+        if (saves.length === 1) return Promise.reject(new Error("disk full"));
+        return Promise.resolve(snapshot);
+      }
+      return defaultInvoke(cmd, args);
+    });
+    render(<MainApp />);
+    await screen.findByRole("heading", { name: "История" });
+    fireEvent.click(screen.getByRole("button", { name: /Общие/ }));
+    fireEvent.click(screen.getByRole("radio", { name: "Светлая" }));
+    await waitFor(() => expect(reportError).toHaveBeenCalledOnce());
+    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
+    expect(screen.getByRole("radio", { name: "Тёмная" })).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(screen.getByRole("switch", { name: "Уведомления Windows" }));
+    await waitFor(() => expect(saves).toHaveLength(2));
+    expect(saves[1].theme).toBe("dark");
+    expect(saves[1].notifications).toBe(false);
+  });
+
+  it("restores the last confirmed settings after overlapping saves and read-backs fail", async () => {
+    const first = deferred<object>();
+    const second = deferred<object>();
+    let saves = 0;
+    vi.mocked(invoke).mockImplementation((cmd, args) => {
+      if (cmd === "save_settings") return ++saves === 1 ? first.promise : second.promise;
+      if (cmd === "get_settings" && saves > 0) return Promise.reject(new Error("read-back failed"));
+      return defaultInvoke(cmd, args);
+    });
+    render(<MainApp />);
+    await screen.findByRole("heading", { name: "История" });
+    fireEvent.click(screen.getByRole("button", { name: /Общие/ }));
+    fireEvent.click(screen.getByRole("radio", { name: "Системная" }));
+    await waitFor(() => expect(saves).toBe(1));
+    fireEvent.click(screen.getByRole("radio", { name: "Светлая" }));
+    await waitFor(() => expect(saves).toBe(2));
+    await act(async () => first.reject(new Error("first save failed")));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    await act(async () => second.reject(new Error("second save failed")));
+    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
+  });
+
+  it("associates speech language labels and help with their select trigger", async () => {
+    render(<MainApp />);
+    await screen.findByRole("heading", { name: "История" });
+    fireEvent.click(screen.getByRole("button", { name: /Расшифровка/ }));
+    const select = screen.getByRole("combobox", { name: "Язык речи" });
+    expect(select.id).not.toBe("");
+    expect(screen.getByLabelText("Язык речи")).toBe(select);
+    expect(select).toHaveAccessibleDescription(/Язык того/);
+  });
+
+  it("starts each destination page at the top without resetting on settings edits", async () => {
+    render(<MainApp />);
+    await screen.findByRole("heading", { name: "История" });
+    fireEvent.click(screen.getByRole("button", { name: /Общие/ }));
+    const pane = document.querySelector<HTMLElement>(".app-content > .overflow-auto")!;
+    pane.scrollTop = 320;
+    fireEvent.click(screen.getByRole("switch", { name: "Уведомления Windows" }));
+    expect(document.querySelector(".app-content > .overflow-auto")).toBe(pane);
+    expect(pane.scrollTop).toBe(320);
+    fireEvent.click(screen.getByRole("button", { name: /Расшифровка/ }));
+    const next = document.querySelector<HTMLElement>(".app-content > .overflow-auto")!;
+    expect(next).not.toBe(pane);
+    expect(next.scrollTop).toBe(0);
   });
 
   it("shows a load error and retries", async () => {
