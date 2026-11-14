@@ -31,7 +31,7 @@
     "verify:rust:lint": "cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets --all-features -- -D warnings",
     "verify:rust:tests": "pwsh -File scripts/check-critical-tests.ps1",
     "verify:rust:coverage": "pwsh -File scripts/check-rust-coverage.ps1",
-    "verify:metadata": "pwsh -File scripts/check-version.ps1 && pwsh -File scripts/check-diagnostics.ps1 && pwsh -File scripts/winget-lib.test.ps1 && pwsh -File scripts/release-lib.test.ps1 && pwsh -NoProfile -File scripts/perf/Invoke-VoxelyPerfCampaign.ps1 -SelfTest && pwsh -File scripts/check-icons.ps1 && pwsh -NoProfile -File scripts/rust-build-cache.test.ps1 && pwsh -NoProfile -File scripts/rust-build-cache.native.test.ps1",
+    "verify:metadata": "pwsh -File scripts/check-version.ps1 && pwsh -NoProfile -File scripts/check-build-date.ps1 && pwsh -File scripts/check-diagnostics.ps1 && pwsh -File scripts/winget-lib.test.ps1 && pwsh -File scripts/release-lib.test.ps1 && pwsh -NoProfile -File scripts/perf/Invoke-VoxelyPerfCampaign.ps1 -SelfTest && pwsh -File scripts/check-icons.ps1 && pwsh -NoProfile -File scripts/rust-build-cache.test.ps1 && pwsh -NoProfile -File scripts/rust-build-cache.native.test.ps1",
     "hooks:install": "bun scripts/check-preflight.ts --install-hooks"
   },
   "packageManager": "bun@1.4.2",

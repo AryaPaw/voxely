@@ -20,6 +20,8 @@ Run `bun run hooks:install` once per clone. It enables the tracked `.githooks/pr
 
 Git hooks aren't server enforcement and aren't copied automatically into new clones. CI remains mandatory. MSRV compilation, release compilation, installer and native checks remain separate evidence; the preflight doesn't establish that those passed.
 
+`pwsh -NoProfile -File scripts/check-build-date.ps1` входит в `verify:metadata` локально и в CI. Изолированный Git/Cargo-стенд подключает настоящий модуль даты из `build_support/build_date.rs` и проверяет обновление даты без изменения исходников: коммит в текущую ветку, упакованные refs, detached HEAD и Git worktree. Повторная сборка без изменений должна использовать кэш. Проверка не меняет рабочую историю Voxely; временные данные удаляются только после сохранения диагностического архива в `.local`.
+
 ## Experimental native HUD
 
 `pwsh -NoProfile -File scripts/rebuild-local-app.ps1 -StopRunning -NativeHud` builds and starts the opt-in Rust/Win32 HUD without an overlay WebView. The main window stays on React. No setting is persisted: starting without `-NativeHud` restores the standard HUD. A failed native window initialization falls back to the standard renderer and logs the error. The experiment uses existing theme tokens and HUD translations; no microphone, API, or persistence code is replaced.
