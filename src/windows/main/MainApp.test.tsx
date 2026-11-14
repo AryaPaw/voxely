@@ -849,7 +849,7 @@ describe("MainApp", () => {
     );
   });
 
-  it("previews and confirms retention changes, then refreshes history and reports partial results", async () => {
+  it("keeps retention writes ordered after rollback, confirms changes and refreshes history", async () => {
     scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(
       HTMLElement.prototype,
       "scrollIntoView",
@@ -862,6 +862,7 @@ describe("MainApp", () => {
     let historyLoads = 0;
     vi.mocked(invoke).mockImplementation((cmd: string, args?: Parameters<typeof invoke>[1]) => {
       const payload = objectArgs(args);
+      if (cmd === "save_settings") return Promise.reject(new Error("disk full"));
       if (cmd === "preview_retention_settings") {
         return Promise.resolve({
           entriesToDelete: 4,
@@ -876,7 +877,7 @@ describe("MainApp", () => {
       if (cmd === "apply_retention_settings") {
         const next = payload.settings as object;
         return Promise.resolve({
-          settings: { ...next, writeSeq: 2 },
+          settings: next,
           deleted: ["one", "two"],
           failed: ["three"],
         });
@@ -887,6 +888,9 @@ describe("MainApp", () => {
     render(<MainApp />);
     await screen.findByRole("heading", { name: "История" });
     await waitFor(() => expect(historyLoads).toBeGreaterThan(0));
+    fireEvent.click(screen.getByRole("button", { name: /Общие/ }));
+    fireEvent.click(screen.getByRole("radio", { name: "Светлая" }));
+    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
     const beforeApply = historyLoads;
     fireEvent.click(screen.getByRole("button", { name: /Хранение/ }));
     fireEvent.click(screen.getByRole("combobox", { name: "Хранить записи" }));
@@ -904,7 +908,7 @@ describe("MainApp", () => {
           expectedPreview: expect.objectContaining({
             recordingIdsToDelete: ["one", "two", "three", "four"],
           }),
-          settings: expect.objectContaining({ retention: "1d" }),
+          settings: expect.objectContaining({ retention: "1d", writeSeq: 3 }),
         }),
       );
       expect(toast.warning).toHaveBeenCalledWith("Удалено записей: 2. Не удалось обработать: 1.");
@@ -957,6 +961,48 @@ describe("MainApp", () => {
     expect(document.documentElement.dataset.theme).toBe("light");
     await act(async () => second.reject(new Error("second save failed")));
     await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
+  });
+
+  it("keeps later edits when an older failure read-back arrives after rollback", async () => {
+    const firstReadback = deferred<typeof settingsPayload>();
+    const thirdSave = deferred<object>();
+    const saves: Record<string, unknown>[] = [];
+    let readbacks = 0;
+    vi.mocked(invoke).mockImplementation((cmd, args) => {
+      if (cmd === "save_settings") {
+        const next = objectArgs(args).settings as Record<string, unknown>;
+        saves.push(next);
+        if (saves.length <= 2) return Promise.reject(new Error("disk full"));
+        return saves.length === 3 ? thirdSave.promise : Promise.resolve(next);
+      }
+      if (cmd === "get_settings" && saves.length > 0) {
+        return ++readbacks === 1 ? firstReadback.promise : Promise.resolve(settingsPayload);
+      }
+      return defaultInvoke(cmd, args);
+    });
+    render(<MainApp />);
+    await screen.findByRole("heading", { name: "История" });
+    fireEvent.click(screen.getByRole("button", { name: /Общие/ }));
+    fireEvent.click(screen.getByRole("radio", { name: "Системная" }));
+    await waitFor(() => expect(readbacks).toBe(1));
+    fireEvent.click(screen.getByRole("radio", { name: "Светлая" }));
+    await waitFor(() => expect(readbacks).toBe(2));
+    await waitFor(() => expect(document.documentElement.dataset.theme).toBe("dark"));
+    fireEvent.click(screen.getByRole("radio", { name: "Светлая" }));
+    await waitFor(() => expect(saves).toHaveLength(3));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    await act(async () => firstReadback.resolve(settingsPayload));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    fireEvent.click(screen.getByRole("switch", { name: "Уведомления Windows" }));
+    await waitFor(() => expect(saves).toHaveLength(4));
+    expect(saves[3]).toMatchObject({ theme: "light", notifications: false });
+    expect(saves.map((value) => value.writeSeq)).toEqual([2, 3, 4, 5]);
+    await act(async () => thirdSave.resolve(saves[2]));
+    expect(document.documentElement.dataset.theme).toBe("light");
+    expect(screen.getByRole("switch", { name: "Уведомления Windows" })).toHaveAttribute(
+      "aria-checked",
+      "false",
+    );
   });
 
   it("associates speech language labels and help with their select trigger", async () => {

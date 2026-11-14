@@ -79,9 +79,22 @@ export function MainApp() {
   const settingsRef = useRef<AppSettings | null>(null);
   settingsRef.current = settings;
   const persistedSettingsRef = useRef<AppSettings | null>(null);
+  const issuedSettingsSeqRef = useRef(0);
   const acceptPersistedSettings = useCallback((saved: AppSettings) => {
+    issuedSettingsSeqRef.current = Math.max(issuedSettingsSeqRef.current, saved.writeSeq ?? 0);
     persistedSettingsRef.current = acceptSavedSettings(persistedSettingsRef.current, saved);
     setSettings((prev) => acceptSavedSettings(prev, saved));
+  }, []);
+  const reserveSettingsWriteSeq = useCallback(() => {
+    const seq = nextWriteSeq(
+      Math.max(
+        issuedSettingsSeqRef.current,
+        settingsRef.current?.writeSeq ?? 0,
+        persistedSettingsRef.current?.writeSeq ?? 0,
+      ),
+    );
+    issuedSettingsSeqRef.current = seq;
+    return seq;
   }, []);
 
   const refreshHistory = useCallback(
@@ -361,7 +374,7 @@ export function MainApp() {
   const currentSettings = settings;
 
   async function persist(next: AppSettings) {
-    const seq = nextWriteSeq(currentSettings.writeSeq ?? 0);
+    const seq = reserveSettingsWriteSeq();
     const outgoing = { ...next, writeSeq: seq };
     setSettings(outgoing);
     applyTheme(outgoing.theme, outgoing.accentColor);
@@ -518,7 +531,7 @@ export function MainApp() {
                   try {
                     const outgoing = {
                       ...nextSettings,
-                      writeSeq: nextWriteSeq(currentSettings.writeSeq ?? 0),
+                      writeSeq: reserveSettingsWriteSeq(),
                     };
                     const result = await api.applyRetentionSettings(outgoing, expectedPreview);
                     acceptPersistedSettings(result.settings);
