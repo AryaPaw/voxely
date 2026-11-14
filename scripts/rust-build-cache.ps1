@@ -174,7 +174,7 @@ function Remove-VoxelyCacheDirectory {
             }
             foreach ($artifactRoot in $artifactRoots) {
                 foreach ($file in @(Get-ChildItem -LiteralPath $artifactRoot -File -Force)) {
-                    if ($file.Name -ne '.cargo-lock') { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop }
+                    if ($file.Name -notin @('.cargo-lock', 'CACHEDIR.TAG')) { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction Stop }
                 }
             }
         } else {

@@ -34,7 +34,7 @@ function Write-NativeSentinel([string]$Root) {
     'owned sentinel' | Set-Content -LiteralPath $path
     return $path
 }
-function Start-NativeCargo([string]$Name, [string]$Target) {
+function Start-NativeCargo([string]$Name, [string]$Target, [string[]]$CargoArguments = @('build')) {
     $gate = Join-Path $temporary ('gate-' + $Name)
     New-Item -ItemType Directory -Path $gate -Force | Out-Null
     $start = [Diagnostics.ProcessStartInfo]::new((Get-Command cargo -ErrorAction Stop).Source)
@@ -43,7 +43,7 @@ function Start-NativeCargo([string]$Name, [string]$Target) {
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    foreach ($argument in @('build', '--offline', '--locked', '--manifest-path', (Join-Path $project 'Cargo.toml'), '--target-dir', $Target)) {
+    foreach ($argument in @($CargoArguments) + @('--offline', '--locked', '--manifest-path', (Join-Path $project 'Cargo.toml'), '--target-dir', $Target)) {
         $start.ArgumentList.Add($argument)
     }
     foreach ($nameToRemove in @('CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR', 'VOXELY_BUILD_CACHE_SESSION', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER')) {
@@ -163,6 +163,32 @@ fn main() {
     }
 }
 '@ | Set-Content -LiteralPath (Join-Path $project 'build.rs')
+
+    foreach ($freshScaffold in @($false, $true)) {
+        Invoke-NativeCase "Cargo clean accepts retained nested target tags, freshManagedScaffold=$freshScaffold" {
+            $caseName = "cache-tag-$freshScaffold"
+            $root = New-NativeRoot $caseName
+            $sentinel = Join-Path $root 'src-tauri/target/release/voxely.exe'
+            $sentinelHash = (Get-FileHash -LiteralPath $sentinel).Hash
+            $target = Join-Path $root 'src-tauri/target/llvm-cov/llvm-cov-target'
+            $tag = Join-Path $target 'CACHEDIR.TAG'
+            if ($freshScaffold) {
+                Invoke-VoxelyBuildCache -RepoRoot $root -Action { }
+                Assert-Native (Test-Path -LiteralPath (Join-Path $root 'src-tauri/target/debug/.cargo-lock')) 'Fresh managed cleanup must create its main target lock scaffold.'
+                Assert-Native (-not (Test-Path -LiteralPath $target)) 'Fresh managed cleanup must leave the future nested Cargo target absent.'
+            }
+            $build = Start-NativeCargo ($caseName + '-build') $target
+            Release-NativeCargo $build
+            Complete-NativeCargo $build
+            Assert-Native (Test-Path -LiteralPath $tag) 'Cargo did not create its own cache tag on the first build.'
+            $tagHash = (Get-FileHash -LiteralPath $tag).Hash
+            Invoke-VoxelyBuildCache -RepoRoot $root -Action { }
+            $clean = Start-NativeCargo ($caseName + '-clean') $target @('clean', '--package', 'voxely_cache_native_fixture')
+            Complete-NativeCargo $clean
+            Assert-Native ((Get-FileHash -LiteralPath $tag).Hash -ceq $tagHash) 'Managed cleanup changed the Cargo-generated cache tag.'
+            Assert-Native ((Get-FileHash -LiteralPath $sentinel).Hash -ceq $sentinelHash) 'Cleanup or cargo clean changed the daily-driver sentinel.'
+        }
+    }
 
     Invoke-NativeCase 'foreign Cargo target does not block Voxely cleanup' {
         $root = New-NativeRoot 'foreign-case'

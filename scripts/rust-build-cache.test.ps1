@@ -84,7 +84,7 @@ function Write-CacheFixture([string]$Root, [string]$Relative, [int]$Bytes = 16) 
 }
 function Get-CacheArtifactCount([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return 0 }
-    return @(Get-ChildItem -LiteralPath $Path -File -Recurse -Force | Where-Object Name -ne '.cargo-lock').Count
+    return @(Get-ChildItem -LiteralPath $Path -File -Recurse -Force | Where-Object { $_.Name -notin @('.cargo-lock', 'CACHEDIR.TAG') }).Count
 }
 function Get-TemporaryArtifactCount([string]$Root, [string]$Pattern) {
     $count = 0
@@ -126,28 +126,47 @@ try {
     $instrumented = Join-Path $fixture 'src-tauri/target/llvm-cov'
     $outsideInstrumentation = Write-CacheFixture $fixture 'owner-data/keep.profraw' 64
     $outsideInstrumentationHash = (Get-FileHash -LiteralPath $outsideInstrumentation).Hash
+    $cacheTags = @{}
     Invoke-VoxelyBuildCache -RepoRoot $fixture -Action {
         # Real cargo-llvm-cov keeps its profile below llvm-cov-target and its
         # instrumentation/metadata files beside that profile, not inside it.
         $null = Write-CacheFixture $fixture 'llvm-cov/llvm-cov-target/debug/.cargo-lock' 0
+        foreach ($relative in @('llvm-cov/CACHEDIR.TAG', 'llvm-cov/llvm-cov-target/CACHEDIR.TAG')) {
+            $tag = Write-CacheFixture $fixture $relative 128
+            [IO.File]::WriteAllText($tag, "Signature: 8a477f597d28d172789f06886806bc55`n# fixture-owned cache tag: $relative`n")
+            $cacheTags[$tag] = (Get-FileHash -LiteralPath $tag).Hash
+        }
         foreach ($artifact in @(
             'llvm-cov/top-level.profraw', 'llvm-cov/top-level.profdata', 'llvm-cov/top-level.json',
             'llvm-cov/llvm-cov-target/unit-1.profraw', 'llvm-cov/llvm-cov-target/unit-2.profraw',
             'llvm-cov/llvm-cov-target/unit-3.profraw', 'llvm-cov/llvm-cov-target/merged.profdata',
             'llvm-cov/llvm-cov-target/coverage.json', 'llvm-cov/llvm-cov-target/.rustc_info.json',
             'llvm-cov/llvm-cov-target/debug/deps/fixture.rlib',
+            'llvm-cov/llvm-cov-target/debug/build/disposable/CACHEDIR.TAG',
             'llvm-cov/llvm-cov-target/debug/.fingerprint/fixture/hash'
         )) { $null = Write-CacheFixture $fixture $artifact 64 }
     }
     Assert-Cache ((Get-CacheArtifactCount $instrumented) -eq 0) 'Nested coverage cleanup must remove profraw/profdata and metadata beside the locked profile'
+    Assert-Cache (-not (Test-Path -LiteralPath (Join-Path $instrumented 'llvm-cov-target/debug/build/disposable/CACHEDIR.TAG'))) 'A cache tag inside disposable build artifacts must not protect that directory'
     $instrumentedLocks = @(Get-ChildItem -LiteralPath $instrumented -File -Recurse -Force)
-    Assert-Cache ($instrumentedLocks.Count -ge 3 -and @($instrumentedLocks | Where-Object { $_.Name -ne '.cargo-lock' -or $_.Length -ne 0 }).Count -eq 0) 'Nested coverage cleanup must leave only zero-length Cargo locks'
+    foreach ($tag in $cacheTags.Keys) {
+        Assert-Cache (Test-Path -LiteralPath $tag) 'Coverage cleanup must preserve an existing target cache tag'
+        Assert-Cache ((Get-FileHash -LiteralPath $tag).Hash -ceq $cacheTags[$tag]) 'Coverage cleanup must preserve cache tag bytes'
+    }
+    Assert-Cache (@($instrumentedLocks | Where-Object Name -eq '.cargo-lock').Count -ge 3 -and @($instrumentedLocks | Where-Object Name -eq 'CACHEDIR.TAG').Count -eq $cacheTags.Count -and @($instrumentedLocks | Where-Object { $_.Name -notin @('.cargo-lock', 'CACHEDIR.TAG') -or ($_.Name -eq '.cargo-lock' -and $_.Length -ne 0) }).Count -eq 0) 'Nested coverage cleanup must leave only zero-length Cargo locks and existing target tags'
     Assert-Cache (Test-Path -LiteralPath $exe) 'Nested instrumentation cleanup must preserve the daily driver'
     Assert-Cache ((Get-FileHash -LiteralPath $outsideInstrumentation).Hash -ceq $outsideInstrumentationHash) 'Cleanup must preserve same-extension files outside its private temporary namespace'
     Invoke-VoxelyBuildCache -RepoRoot $fixture -Action {
         $null = Write-CacheFixture $fixture 'llvm-cov/llvm-cov-target/next-run.profraw' 64
     }
     Assert-Cache ((Get-CacheArtifactCount $instrumented) -eq 0) 'Reusing the bounded coverage namespace must not accumulate parent instrumentation files'
+    foreach ($tag in $cacheTags.Keys) {
+        Assert-Cache ((Get-FileHash -LiteralPath $tag).Hash -ceq $cacheTags[$tag]) 'Repeated coverage cleanup must retain existing cache tags'
+    }
+    $fixture = New-CacheFixture
+    $null = Write-CacheFixture $fixture 'llvm-cov/debug/deps/first.rlib'
+    Invoke-VoxelyBuildCache -RepoRoot $fixture -Action { }
+    Assert-Cache (-not (Test-Path -LiteralPath (Join-Path $fixture 'src-tauri/target/llvm-cov/CACHEDIR.TAG'))) 'Cleanup must not synthesize missing cache tags'
 
     $fixture = New-CacheFixture
     $null = Write-CacheFixture $fixture 'llvm-cov/llvm-cov-target/debug/.cargo-lock' 0
