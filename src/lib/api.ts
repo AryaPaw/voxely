@@ -78,6 +78,7 @@ export interface RetrySettings {
 }
 
 export interface TextReplacementRule {
+  alternatives?: string[];
   from: string;
   to: string;
   caseSensitive: boolean;

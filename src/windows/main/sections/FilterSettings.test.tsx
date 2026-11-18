@@ -445,6 +445,46 @@ describe("compact replacement editor", () => {
     expect(screen.getByLabelText("Find 100")).toHaveValue("");
     for (const button of screen.getAllByText("Add rule")) expect(button).toBeDisabled();
   });
+  it("confirms variant deletion and keeps the other variant's field", async () => {
+    const initial = settings();
+    initial.textReplacements.groups[0].rules = [
+      { from: "Versel", alternatives: ["Versal"], to: "Vercel", caseSensitive: false },
+    ];
+    const onChange = vi.fn();
+    const view = render(<ReplacementHarness initial={initial} onChange={onChange} />);
+    fireEvent.click(screen.getByRole("button", { name: "Add search variant" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Search variant 3, rule 1" }), {
+      target: { value: "Versell" },
+    });
+    const saved = onChange.mock.lastCall![0] as AppSettings;
+    expect(saved.textReplacements.groups[0].rules).toEqual([
+      { from: "Versel", alternatives: ["Versal", "Versell"], to: "Vercel", caseSensitive: false },
+    ]);
+    view.unmount();
+    render(<ReplacementHarness initial={saved} onChange={onChange} />);
+    const survivor = screen.getByRole("textbox", { name: "Search variant 3, rule 1" });
+    const remove = screen.getByRole("button", { name: "Remove search variant 2, rule 1" });
+    onChange.mockClear();
+    fireEvent.click(remove);
+    const dialog = screen.getByRole("alertdialog", { name: "Delete search variant?" });
+    expect(dialog).toHaveTextContent("Versal");
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    await waitFor(() => expect(remove).toHaveFocus());
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("textbox", { name: "Search variant 2, rule 1" })).toHaveValue("Versal");
+    fireEvent.click(remove);
+    fireEvent.click(
+      within(screen.getByRole("alertdialog")).getByRole("button", { name: "Delete" }),
+    );
+    expect(screen.getByRole("textbox", { name: "Search variant 2, rule 1" })).toBe(survivor);
+    expect(survivor).toHaveValue("Versell");
+    await waitFor(() => expect(screen.getByRole("textbox", { name: "Find 1" })).toHaveFocus());
+    expect(onChange.mock.lastCall![0].textReplacements.groups[0].rules).toEqual([
+      { from: "Versel", alternatives: ["Versell"], to: "Vercel", caseSensitive: false },
+    ]);
+  });
+
   function sortableRules() {
     const initial = settings();
     initial.textReplacements.groups[0].rules! = [

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   DndContext,
   KeyboardSensor,
@@ -23,6 +23,7 @@ import {
   GripVertical,
   Plus,
   Trash2,
+  X,
 } from "lucide-react";
 import type { AppSettings, ReplacementGroup, TextReplacementRule } from "../../../lib/api";
 import type { Messages } from "../../../lib/i18n";
@@ -427,6 +428,9 @@ function CustomRules({
   );
 }
 
+const replacementInputFocus =
+  "transition-none focus-visible:ring-0 focus-visible:inset-ring-2 focus-visible:inset-ring-ring";
+
 function ReplacementRow({
   id,
   rule,
@@ -442,6 +446,14 @@ function ReplacementRow({
   onChange: (patch: Partial<TextReplacementRule>) => void;
   onRemove: () => void;
 }) {
+  const alternatives = rule.alternatives ?? [];
+  const ruleNumber = String(index + 1);
+  const [variantIds, setVariantIds] = useState(() => alternatives.map(() => crypto.randomUUID()));
+  if (variantIds.length !== alternatives.length) {
+    setVariantIds(alternatives.map((_, i) => variantIds[i] ?? crypto.randomUUID()));
+  }
+  const primaryInputRef = useRef<HTMLInputElement>(null);
+  const confirmedVariantRef = useRef<string | null>(null);
   const {
     attributes,
     listeners,
@@ -455,7 +467,7 @@ function ReplacementRow({
     <li
       ref={setNodeRef}
       style={{ transform: CSS.Transform.toString(transform), transition }}
-      className={`relative grid grid-cols-[1.75rem_minmax(0,1fr)_minmax(0,1fr)_1.75rem_1.75rem] items-center gap-2 rounded-lg p-1 transition-colors hover:bg-muted/50 ${isDragging ? "z-10 bg-muted shadow-md" : ""}`}
+      className={`relative grid grid-cols-[1.75rem_minmax(0,1fr)_minmax(0,1fr)_1.75rem_1.75rem] items-start gap-2 rounded-lg p-1 transition-colors hover:bg-muted/50 ${isDragging ? "z-10 bg-muted shadow-md" : ""}`}
     >
       <Button
         type="button"
@@ -469,16 +481,109 @@ function ReplacementRow({
       >
         <GripVertical />
       </Button>
+      <div className="min-w-0 space-y-1">
+        <div className="flex items-center gap-1">
+          <Input
+            className={replacementInputFocus}
+            ref={primaryInputRef}
+            aria-label={copy.textReplacementFrom.replace("{index}", ruleNumber)}
+            placeholder={copy.textReplacementFindLabel}
+            maxLength={200}
+            autoComplete="off"
+            spellCheck={false}
+            value={rule.from}
+            onChange={(event) => onChange({ from: event.target.value })}
+          />
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label={copy.textReplacementAddVariant}
+            title={copy.textReplacementAddVariant}
+            disabled={alternatives.length >= 7}
+            onClick={() => {
+              setVariantIds([...variantIds, crypto.randomUUID()]);
+              onChange({ alternatives: [...alternatives, ""] });
+            }}
+          >
+            <Plus />
+          </Button>
+        </div>
+        {alternatives.map((variant, variantIndex) => {
+          const variantNumber = String(variantIndex + 2);
+          const variantId = variantIds[variantIndex];
+          return (
+            <div className="flex items-center gap-1" key={variantId}>
+              <Input
+                className={replacementInputFocus}
+                aria-label={copy.textReplacementVariant
+                  .replace("{index}", ruleNumber)
+                  .replace("{variant}", variantNumber)}
+                placeholder={copy.textReplacementFindLabel}
+                maxLength={200}
+                autoComplete="off"
+                spellCheck={false}
+                value={variant}
+                onChange={(event) =>
+                  onChange({
+                    alternatives: alternatives.map((item, i) =>
+                      i === variantIndex ? event.target.value : item,
+                    ),
+                  })
+                }
+              />
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="icon-sm"
+                    aria-label={copy.textReplacementRemoveVariant
+                      .replace("{index}", ruleNumber)
+                      .replace("{variant}", variantNumber)}
+                  >
+                    <X />
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent
+                  onCloseAutoFocus={(event) => {
+                    if (confirmedVariantRef.current !== variantId) return;
+                    confirmedVariantRef.current = null;
+                    event.preventDefault();
+                    primaryInputRef.current?.focus({ preventScroll: true });
+                  }}
+                >
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>{copy.textReplacementDeleteVariant}</AlertDialogTitle>
+                    <AlertDialogDescription className="min-w-0 wrap-anywhere">
+                      {variant.trim()
+                        ? copy.textReplacementDeleteVariantHint.replace("{value}", () => variant)
+                        : copy.textReplacementDeleteEmptyVariantHint}
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>{copy.cancel}</AlertDialogCancel>
+                    <AlertDialogAction
+                      variant="destructive"
+                      onClick={() => {
+                        confirmedVariantRef.current = variantId;
+                        setVariantIds(variantIds.filter((_, i) => i !== variantIndex));
+                        onChange({
+                          alternatives: alternatives.filter((_, i) => i !== variantIndex),
+                        });
+                      }}
+                    >
+                      {copy.delete}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            </div>
+          );
+        })}
+      </div>
       <Input
-        aria-label={copy.textReplacementFrom.replace("{index}", String(index + 1))}
-        placeholder={copy.textReplacementFindLabel}
-        maxLength={200}
-        autoComplete="off"
-        spellCheck={false}
-        value={rule.from}
-        onChange={(event) => onChange({ from: event.target.value })}
-      />
-      <Input
+        className={replacementInputFocus}
         aria-label={copy.textReplacementTo.replace("{index}", String(index + 1))}
         placeholder={copy.textReplacementReplaceLabel}
         maxLength={200}

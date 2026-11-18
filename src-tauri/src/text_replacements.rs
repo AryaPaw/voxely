@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
 const MAX_RULES: usize = 100;
+const MAX_ALTERNATIVES: usize = 7;
 const MAX_TERM_CHARS: usize = 200;
 const MAX_REPLACED_TEXT_BYTES: usize = 16 * 1024 * 1024;
 const RUSSIAN_FORMAL_RULES: &str = include_str!("../../src/lib/text-replacement-presets.json");
@@ -13,6 +14,8 @@ static WORD_CHARACTER: LazyLock<Regex> =
 #[serde(rename_all = "camelCase")]
 pub struct TextReplacementRule {
     pub from: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alternatives: Vec<String>,
     pub to: String,
     #[serde(default)]
     pub case_sensitive: bool,
@@ -199,13 +202,15 @@ impl TextReplacementSettings {
             {
                 return Err("custom replacement group names must be 1-80 characters");
             }
-            if group.rules.iter().any(|rule| {
-                rule.from.chars().count() > MAX_TERM_CHARS
-                    || rule.to.chars().count() > MAX_TERM_CHARS
-                    || rule.from.chars().any(char::is_control)
-                    || rule.to.chars().any(char::is_control)
-            }) {
-                return Err("text replacement terms must be at most 200 characters and contain no control characters");
+            for rule in &group.rules {
+                if rule.alternatives.len() > MAX_ALTERNATIVES {
+                    return Err("text replacement rules must have at most 8 search variants");
+                }
+                if search_terms(rule).chain([rule.to.as_str()]).any(|term| {
+                    term.chars().count() > MAX_TERM_CHARS || term.chars().any(char::is_control)
+                }) {
+                    return Err("text replacement terms must be at most 200 characters and contain no control characters");
+                }
             }
         }
         Ok(())
@@ -234,7 +239,6 @@ pub fn apply_text_replacements(mut text: String, settings: &TextReplacementSetti
                 group.rules.as_slice()
             }
         })
-        .filter(|rule| !rule.from.trim().is_empty())
     {
         match replace_rule(&text, rule) {
             RuleApplication::Unchanged => {}
@@ -253,17 +257,23 @@ enum RuleApplication {
     OutputLimitExceeded,
 }
 
-fn replace_rule(text: &str, rule: &TextReplacementRule) -> RuleApplication {
-    let pattern = regex::escape(&rule.from);
-    let regex = RegexBuilder::new(&pattern)
-        .case_insensitive(!rule.case_sensitive)
-        .build()
-        .expect("escaped text replacement pattern must compile");
+fn search_terms(rule: &TextReplacementRule) -> impl Iterator<Item = &str> {
+    std::iter::once(rule.from.as_str()).chain(rule.alternatives.iter().map(String::as_str))
+}
 
+fn replace_rule(text: &str, rule: &TextReplacementRule) -> RuleApplication {
+    let patterns: Vec<_> = search_terms(rule)
+        .filter(|term| !term.trim().is_empty())
+        .map(|term| {
+            RegexBuilder::new(&regex::escape(term))
+                .case_insensitive(!rule.case_sensitive)
+                .build()
+                .expect("escaped text replacement pattern must compile")
+        })
+        .collect();
     let mut projected_len = text.len();
     let mut found_match = false;
-    let mut search_at = 0;
-    while let Some(matched) = next_word_match(&regex, text, search_at) {
+    for matched in rule_matches(&patterns, text) {
         found_match = true;
         let Some(next_len) = projected_len
             .checked_sub(matched.len())
@@ -271,11 +281,10 @@ fn replace_rule(text: &str, rule: &TextReplacementRule) -> RuleApplication {
         else {
             return RuleApplication::OutputLimitExceeded;
         };
-        if next_len > MAX_REPLACED_TEXT_BYTES {
-            return RuleApplication::OutputLimitExceeded;
-        }
         projected_len = next_len;
-        search_at = matched.end();
+    }
+    if projected_len > MAX_REPLACED_TEXT_BYTES {
+        return RuleApplication::OutputLimitExceeded;
     }
     if !found_match {
         return RuleApplication::Unchanged;
@@ -283,15 +292,38 @@ fn replace_rule(text: &str, rule: &TextReplacementRule) -> RuleApplication {
 
     let mut result = String::with_capacity(projected_len);
     let mut copied_until = 0;
-    search_at = 0;
-    while let Some(matched) = next_word_match(&regex, text, search_at) {
+    for matched in rule_matches(&patterns, text) {
         result.push_str(&text[copied_until..matched.start()]);
         result.push_str(&rule.to);
         copied_until = matched.end();
-        search_at = matched.end();
     }
     result.push_str(&text[copied_until..]);
     RuleApplication::Replaced(result)
+}
+
+fn rule_matches<'a>(
+    patterns: &'a [Regex],
+    text: &'a str,
+) -> impl Iterator<Item = regex::Match<'a>> {
+    let mut pending: Vec<_> = patterns
+        .iter()
+        .map(|pattern| next_word_match(pattern, text, 0))
+        .collect();
+    std::iter::from_fn(move || {
+        // Match only against the original text. At the same position
+        // prefer the longest variant that satisfies both word boundaries.
+        let matched = pending
+            .iter()
+            .flatten()
+            .copied()
+            .min_by_key(|matched| (matched.start(), std::cmp::Reverse(matched.len())))?;
+        for (pattern, next) in patterns.iter().zip(&mut pending) {
+            if next.is_some_and(|next| next.start() < matched.end()) {
+                *next = next_word_match(pattern, text, matched.end());
+            }
+        }
+        Some(matched)
+    })
 }
 
 fn next_word_match<'a>(
@@ -333,6 +365,7 @@ mod tests {
     fn rule(from: &str, to: &str, case_sensitive: bool) -> TextReplacementRule {
         TextReplacementRule {
             from: from.into(),
+            alternatives: Vec::new(),
             to: to.into(),
             case_sensitive,
         }
@@ -417,6 +450,53 @@ mod tests {
             apply_text_replacements("[test] test".into(), &config),
             "$name test"
         );
+    }
+
+    #[test]
+    fn variants_round_trip_and_match_once_with_word_boundaries() {
+        let grouped: TextReplacementRule = serde_json::from_str(
+            r#"{"from":"ChatCN","alternatives":["ChatCN UI","Chat CN UI","C++",""],"to":"C++","caseSensitive":false}"#,
+        )
+        .unwrap();
+        let mut config = settings(vec![grouped]);
+        config.groups.push(ReplacementGroup::system(false));
+        config.validate().unwrap();
+        let restored = serde_json::from_str(&serde_json::to_string(&config).unwrap()).unwrap();
+        assert_eq!(config, restored);
+        assert_eq!(
+            apply_text_replacements(
+                "CHATCN UI, Chat CN UI; xChatCN C++Builder C++!".into(),
+                &restored
+            ),
+            "C++, C++; xChatCN C++Builder C++!"
+        );
+        let mut config = settings(vec![rule("A", "B", true)]);
+        config.custom_rules_mut()[0].alternatives = vec!["B C".into()];
+        assert_eq!(
+            apply_text_replacements("A C / B C / b c".into(), &config),
+            "B C / B / b c"
+        );
+    }
+
+    #[test]
+    fn variant_limits_are_validated_with_other_rule_terms() {
+        let mut config = settings(vec![rule("A", "B", false)]);
+        config.custom_rules_mut()[0].alternatives = vec!["ok".into(); MAX_ALTERNATIVES + 1];
+        assert!(config.validate().is_err());
+        config.custom_rules_mut()[0].alternatives = vec!["line\nbreak".into()];
+        assert!(config.validate().is_err());
+        config.custom_rules_mut()[0].alternatives = vec!["я".repeat(MAX_TERM_CHARS + 1)];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn variant_output_limit_uses_the_final_size() {
+        let mut config = settings(vec![rule("A", "BB", true)]);
+        config.custom_rules_mut()[0].alternatives = vec!["LONG".into()];
+        let text = format!("{} A LONG", "x".repeat(MAX_REPLACED_TEXT_BYTES - 7));
+        let result = apply_text_replacements(text, &config);
+        assert_eq!(result.len(), MAX_REPLACED_TEXT_BYTES - 1);
+        assert!(result.ends_with(" BB BB"));
     }
 
     #[test]
