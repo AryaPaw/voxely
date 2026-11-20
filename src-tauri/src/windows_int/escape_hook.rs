@@ -59,7 +59,7 @@ pub fn install(app: &AppHandle) -> Result<(), AppError> {
                 return Err(AppError::HotkeyFailed(error.to_string()));
             }
         };
-        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), module, 0) {
+        match SetWindowsHookExW(WH_KEYBOARD_LL, Some(ll_proc), Some(module.into()), 0) {
             Ok(hook) => {
                 *guard = Some(Hook {
                     raw: hook.0 as isize,

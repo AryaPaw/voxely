@@ -29,7 +29,7 @@ pub fn stt_http_options() -> SttHttpOptions {
 pub fn build_stt_client(connect_timeout: Duration) -> Result<reqwest::Client, AppError> {
     let opts = stt_http_options();
     let mut builder = reqwest::Client::builder()
-        .use_rustls_tls()
+        .tls_backend_rustls()
         .pool_max_idle_per_host(opts.pool_max_idle_per_host)
         .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(connect_timeout);
@@ -729,15 +729,11 @@ mod tests {
             when.method(POST)
                 .path("/v1/audio/transcriptions")
                 .header("authorization", "Bearer openai-fixture-key")
-                .matches(|request| {
-                    request.headers.iter().flatten().all(|(name, _)| {
-                        !name.eq_ignore_ascii_case("x-title")
-                            && !name.eq_ignore_ascii_case("http-referer")
-                    })
-                })
-                .body_contains(expected_body)
-                .body_contains(OPENAI_MODEL)
-                .body_contains("ru");
+                .header_missing("http-referer")
+                .header_missing("x-title")
+                .body_includes(expected_body)
+                .body_includes(OPENAI_MODEL)
+                .body_includes("ru");
             then.status(200).json_body(serde_json::json!({
                 "text": "Привет",
                 "usage": { "type": "tokens", "input_tokens": 12, "cost": 99.0 }
@@ -812,8 +808,8 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(result.http_status, Some(303));
-        redirect.assert_hits(1);
-        unexpected.assert_hits(0);
+        redirect.assert_calls(1);
+        unexpected.assert_calls(0);
     }
 
     #[test]
@@ -945,7 +941,7 @@ mod tests {
         );
         let switch = async {
             loop {
-                if busy.hits() >= 1 {
+                if busy.calls() >= 1 {
                     busy.delete();
                     server.mock(|when, then| {
                         when.method(POST).path("/audio/transcriptions");
@@ -994,7 +990,7 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err, AppError::InvalidApiKey);
-        mock.assert_hits(1);
+        mock.assert_calls(1);
     }
 
     #[tokio::test]
@@ -1027,7 +1023,7 @@ mod tests {
         );
         let switch = async {
             loop {
-                if busy.hits() >= 1 {
+                if busy.calls() >= 1 {
                     busy.delete();
                     server.mock(|when, then| {
                         when.method(POST).path("/audio/transcriptions");
@@ -1229,7 +1225,7 @@ mod tests {
             )
             .await;
             assert_eq!(result.unwrap_err(), AppError::ResponseMalformed);
-            mock.assert_hits(1);
+            mock.assert_calls(1);
             let finished = events
                 .iter()
                 .find_map(|event| match event {

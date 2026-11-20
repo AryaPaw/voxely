@@ -105,17 +105,27 @@ export function OverlayApp() {
     });
   }, []);
 
+  const hoverContext = JSON.stringify([
+    busy,
+    snapshot.visible,
+    snapshot.generation,
+    snapshot.epoch,
+  ]);
+  const clockGeneration = recording ? snapshot.generation : null;
+  const [previousHoverContext, setPreviousHoverContext] = useState(hoverContext);
+  const [previousClockGeneration, setPreviousClockGeneration] = useState(clockGeneration);
+  if (previousHoverContext !== hoverContext) {
+    setPreviousHoverContext(hoverContext);
+    setCancelHover(false);
+  }
+  if (previousClockGeneration !== clockGeneration) {
+    setPreviousClockGeneration(clockGeneration);
+    if (clockGeneration !== null) setElapsed(0);
+  }
   useLayoutEffect(() => {
     hoverEpoch.current += 1;
     hoverCheckInFlight.current = false;
-    setCancelHover(false);
-  }, [busy, snapshot.visible, snapshot.generation, snapshot.epoch]);
-
-  useEffect(() => {
-    if (recording) {
-      setElapsed(0);
-    }
-  }, [recording, snapshot.generation]);
+  }, [hoverContext]);
 
   useEffect(() => {
     if (!recording) {

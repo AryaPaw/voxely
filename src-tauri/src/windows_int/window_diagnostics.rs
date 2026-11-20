@@ -125,14 +125,8 @@ mod native {
                 )
                 .unwrap();
                 assert!(install(hwnd));
-                assert_eq!(
-                    SendMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0)),
-                    LRESULT(73)
-                );
-                assert_eq!(
-                    SendMessageW(hwnd, WM_APP, WPARAM(0), LPARAM(0)),
-                    LRESULT(73)
-                );
+                assert_eq!(SendMessageW(hwnd, WM_CLOSE, None, None), LRESULT(73));
+                assert_eq!(SendMessageW(hwnd, WM_APP, None, None), LRESULT(73));
                 let mut reference = 1;
                 assert!(
                     GetWindowSubclass(hwnd, Some(observe), SUBCLASS_ID, Some(&mut reference))

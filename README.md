@@ -127,7 +127,7 @@ Read more: [Security](docs/SECURITY.md), [OpenRouter](docs/OPENROUTER.md), [Diag
 
 ## For developers
 
-Built with **Tauri 2, Rust, React, TypeScript, shadcn/ui, and Tailwind CSS**. Tool versions are pinned in `rust-toolchain.toml` and the `packageManager` field in `package.json`. Windows development requires Visual Studio Build Tools with C++ and WebView2.
+Built with **Tauri 2, Rust, React, TypeScript, shadcn/ui, and Tailwind CSS**. Use the Rust toolchain pinned in `rust-toolchain.toml` and the Bun and Node versions pinned in `package.json`. Windows development requires Visual Studio Build Tools with C++ and WebView2.
 
 ```powershell
 bun install --frozen-lockfile
@@ -137,7 +137,7 @@ bun run --bun tauri dev
 Run the full automated verification:
 
 ```powershell
-bun run --bun verify
+bun run verify
 ```
 
 ### Refresh screenshots with one command

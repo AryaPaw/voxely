@@ -75,7 +75,9 @@ impl AppError {
             Self::OpenRouterServerError => "Ошибка сервера провайдера транскрибации".into(),
             Self::ResponseMalformed => "Некорректный ответ".into(),
             Self::RecordingTooLarge => "Размер записи превышает лимит отправки".into(),
-            Self::RecordingTruncated => "Запись обрезана из-за лимита размера или буфера".into(),
+            Self::RecordingTruncated => {
+                "Часть аудио могла потеряться из-за сбоя захвата или лимита размера".into()
+            }
             Self::RetryDeadlineExceeded => "Истекло время повторов".into(),
             Self::TextInsertionFailed(_) => "Не удалось вставить текст".into(),
             Self::Cancelled => "Отменено".into(),

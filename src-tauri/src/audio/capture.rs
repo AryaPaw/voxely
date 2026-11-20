@@ -472,6 +472,7 @@ struct BuiltCapture {
     consumer: rtrb::Consumer<f32>,
     input_rate: u32,
     overflow: Arc<AtomicU32>,
+    stream_discontinuity: Arc<AtomicBool>,
     stream_error: Arc<Mutex<Option<String>>>,
 }
 
@@ -487,9 +488,9 @@ fn start_stream_inner(
         .default_input_config()
         .map_err(|e| AppError::AudioCaptureFailed(e.to_string()))?;
     let sample_format = supported.sample_format();
-    let config: StreamConfig = supported.clone().into();
+    let config: StreamConfig = supported.into();
     let channels = config.channels as usize;
-    let input_rate = config.sample_rate.0;
+    let input_rate = config.sample_rate;
     let (mut producer, consumer) = RingBuffer::<f32>::new(capture_queue_capacity(input_rate));
     let overflow = Arc::new(AtomicU32::new(0));
     let overflow_cb = overflow.clone();
@@ -497,58 +498,55 @@ fn start_stream_inner(
     let hop = meter_hop(input_rate);
 
     let stream_error = Arc::new(Mutex::new(None));
+    let stream_discontinuity = Arc::new(AtomicBool::new(false));
+    let on_error = {
+        let stream_error = Arc::clone(&stream_error);
+        let stream_discontinuity = Arc::clone(&stream_discontinuity);
+        move |err| record_stream_error(&stream_error, &stream_discontinuity, err)
+    };
 
     let stream = match sample_format {
-        SampleFormat::F32 => {
-            let stream_error = Arc::clone(&stream_error);
-            device.build_input_stream(
-                &config,
-                move |data: &[f32], _| {
-                    push_frames(&mut producer, data, channels, &meter_cb, &overflow_cb, hop)
-                },
-                move |err: cpal::StreamError| record_stream_error(&stream_error, err),
-                None,
-            )
-        }
-        SampleFormat::I16 => {
-            let stream_error = Arc::clone(&stream_error);
-            device.build_input_stream(
-                &config,
-                move |data: &[i16], _| {
-                    let converted = i16_to_f32(data);
-                    push_frames(
-                        &mut producer,
-                        &converted,
-                        channels,
-                        &meter_cb,
-                        &overflow_cb,
-                        hop,
-                    )
-                },
-                move |err: cpal::StreamError| record_stream_error(&stream_error, err),
-                None,
-            )
-        }
-        SampleFormat::U16 => {
-            let stream_error = Arc::clone(&stream_error);
-            device.build_input_stream(
-                &config,
-                move |data: &[u16], _| {
-                    let converted: Vec<f32> =
-                        data.iter().map(|s| (*s as f32 / 32768.0) - 1.0).collect();
-                    push_frames(
-                        &mut producer,
-                        &converted,
-                        channels,
-                        &meter_cb,
-                        &overflow_cb,
-                        hop,
-                    )
-                },
-                move |err: cpal::StreamError| record_stream_error(&stream_error, err),
-                None,
-            )
-        }
+        SampleFormat::F32 => device.build_input_stream(
+            config,
+            move |data: &[f32], _| {
+                push_frames(&mut producer, data, channels, &meter_cb, &overflow_cb, hop)
+            },
+            on_error,
+            None,
+        ),
+        SampleFormat::I16 => device.build_input_stream(
+            config,
+            move |data: &[i16], _| {
+                let converted = i16_to_f32(data);
+                push_frames(
+                    &mut producer,
+                    &converted,
+                    channels,
+                    &meter_cb,
+                    &overflow_cb,
+                    hop,
+                )
+            },
+            on_error,
+            None,
+        ),
+        SampleFormat::U16 => device.build_input_stream(
+            config,
+            move |data: &[u16], _| {
+                let converted: Vec<f32> =
+                    data.iter().map(|s| (*s as f32 / 32768.0) - 1.0).collect();
+                push_frames(
+                    &mut producer,
+                    &converted,
+                    channels,
+                    &meter_cb,
+                    &overflow_cb,
+                    hop,
+                )
+            },
+            on_error,
+            None,
+        ),
         other => {
             return Err(AppError::AudioCaptureFailed(format!(
                 "unsupported sample format {other:?}"
@@ -564,11 +562,21 @@ fn start_stream_inner(
         consumer,
         input_rate,
         overflow,
+        stream_discontinuity,
         stream_error,
     })
 }
 
-fn record_stream_error(target: &Arc<Mutex<Option<String>>>, err: cpal::StreamError) {
+fn record_stream_error(
+    target: &Mutex<Option<String>>,
+    discontinuity: &AtomicBool,
+    err: cpal::Error,
+) {
+    if err.kind() == cpal::ErrorKind::Xrun {
+        // WASAPI still delivers packets after reporting a buffer discontinuity.
+        discontinuity.store(true, Ordering::Relaxed);
+        return;
+    }
     let message = err.to_string();
     let mut stored = target.lock();
     if stored.is_none() {
@@ -607,6 +615,7 @@ fn run_capture(
         consumer,
         input_rate,
         overflow,
+        stream_discontinuity,
         stream_error,
     } = built;
     run_capture_writer(
@@ -615,6 +624,7 @@ fn run_capture(
         dest,
         stop,
         overflow,
+        stream_discontinuity,
         stream_error,
         move || {
             drop(stream);
@@ -632,6 +642,7 @@ fn run_capture_writer(
     dest: PathBuf,
     stop: Arc<AtomicBool>,
     overflow: Arc<AtomicU32>,
+    stream_discontinuity: Arc<AtomicBool>,
     stream_error: Arc<Mutex<Option<String>>>,
     close_stream: impl FnOnce(),
 ) -> Result<CaptureResult, AppError> {
@@ -673,7 +684,8 @@ fn run_capture_writer(
     thread::sleep(Duration::from_millis(20));
     drain_consumer(&mut consumer, &mut leftover)?;
     let dropped_frames = overflow.load(Ordering::Relaxed);
-    if dropped_frames > 0 {
+    let device_discontinuity = stream_discontinuity.load(Ordering::Relaxed);
+    if dropped_frames > 0 || device_discontinuity {
         truncated = true;
     }
     if flush_pcm_chunk(&mut leftover, &mut resampler, &mut writer, &mut written)? {
@@ -699,6 +711,7 @@ fn run_capture_writer(
     tracing::info!(
         duration_ms,
         dropped_frames,
+        device_discontinuity,
         input_rate,
         limit_reached = written >= MAX_PCM16_FRAMES,
         stream_failed = stream_error.lock().is_some(),
@@ -1403,6 +1416,7 @@ mod tests {
                 path,
                 worker_stop,
                 overflow,
+                Arc::new(AtomicBool::new(false)),
                 Arc::new(Mutex::new(None)),
                 move || {
                     let _ = closed_tx.send(());
@@ -1448,6 +1462,52 @@ mod tests {
         assert!(samples[32..]
             .iter()
             .all(|sample| (*sample + 0.5).abs() < 0.001));
+    }
+
+    #[test]
+    fn device_xrun_marks_a_gap_without_ending_the_recording() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("xrun.wav");
+        let (mut producer, consumer) = RingBuffer::<f32>::new(8);
+        producer.push(0.25).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = stop.clone();
+        let discontinuity = Arc::new(AtomicBool::new(false));
+        let stream_error = Arc::new(Mutex::new(None));
+        record_stream_error(&stream_error, &discontinuity, cpal::ErrorKind::Xrun.into());
+        assert!(stream_error.lock().is_none());
+        let worker = thread::spawn(move || {
+            run_capture_writer(
+                consumer,
+                SAMPLE_RATE,
+                path,
+                worker_stop,
+                Arc::new(AtomicU32::new(0)),
+                discontinuity,
+                stream_error,
+                || {},
+            )
+        });
+        thread::sleep(Duration::from_millis(100));
+        let stopped_itself = worker.is_finished();
+        producer.push(-0.5).unwrap();
+        stop.store(true, Ordering::SeqCst);
+        let result = worker.join().unwrap().unwrap();
+        assert!(!stopped_itself);
+        assert!(result.truncated && !result.limit_reached && result.capture_error.is_none());
+        let (samples, _) = read_pcm16_wav_with_rate(&result.path).unwrap();
+        assert_eq!(samples.len(), 2);
+        assert!(samples[0] > 0.24 && samples[1] < -0.49);
+
+        let fatal = Mutex::new(None);
+        let unrelated_gap = AtomicBool::new(false);
+        record_stream_error(
+            &fatal,
+            &unrelated_gap,
+            cpal::ErrorKind::DeviceNotAvailable.into(),
+        );
+        assert!(fatal.lock().is_some());
+        assert!(!unrelated_gap.load(Ordering::Relaxed));
     }
 
     #[test]

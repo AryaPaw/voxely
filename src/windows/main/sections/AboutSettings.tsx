@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { getVersion } from "@tauri-apps/api/app";
-import { CircleAlert, ExternalLink, Github } from "lucide-react";
+import { CircleAlert, ExternalLink, GitFork } from "lucide-react";
 import { api } from "../../../lib/api";
 import { reportError } from "../../../lib/system-notify";
 import { formatInvokeError, type Messages, appDisplayName } from "../../../lib/i18n";
@@ -92,7 +92,7 @@ export function AboutSettings({ copy }: { copy: Messages }) {
         <div className="h-px bg-border" />
         <LinkRow
           copy={copy}
-          icon={<Github className="size-4" aria-hidden="true" />}
+          icon={<GitFork className="size-4" aria-hidden="true" />}
           title={copy.aboutSource}
           hint={copy.githubRepo}
           onOpen={() => api.openGithub()}

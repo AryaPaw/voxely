@@ -27,8 +27,6 @@ export function AdvancedSettings({
   const [revision, setRevision] = useState(0);
   useEffect(() => {
     let active = true;
-    setLoading(true);
-    setError("");
     void Promise.allSettled([api.runtimeInfo(), getVersion()]).then(([runtime, nextVersion]) => {
       if (!active) return;
       if (runtime.status === "fulfilled") setInfo(runtime.value);
@@ -104,7 +102,14 @@ export function AdvancedSettings({
         {error ? (
           <div className="space-y-3 py-3 text-sm" role="alert">
             <p className="text-destructive">{error}</p>
-            <Button variant="outline" onClick={() => setRevision((value) => value + 1)}>
+            <Button
+              variant="outline"
+              onClick={() => {
+                setLoading(true);
+                setError("");
+                setRevision((value) => value + 1);
+              }}
+            >
               {copy.retryAction}
             </Button>
           </div>

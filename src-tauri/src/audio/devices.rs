@@ -16,12 +16,19 @@ pub struct InputDeviceInfo {
 pub fn list_input_devices() -> Result<Vec<InputDeviceInfo>, String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
-    let default_name = host.default_input_device().and_then(|d| d.name().ok());
+    let default_name = host.default_input_device().and_then(|d| {
+        d.description()
+            .map(|description| description.name().to_owned())
+            .ok()
+    });
     let mut seen: HashMap<String, u32> = HashMap::new();
     let mut devices = Vec::new();
     let inputs = host.input_devices().map_err(|e| e.to_string())?;
     for device in inputs {
-        let name = device.name().unwrap_or_else(|_| "Unknown".into());
+        let name = device
+            .description()
+            .map(|description| description.name().to_owned())
+            .unwrap_or_else(|_| "Unknown".into());
         let count = seen.entry(name.clone()).or_insert(0);
         *count += 1;
         let id = if *count == 1 {
@@ -33,7 +40,7 @@ pub fn list_input_devices() -> Result<Vec<InputDeviceInfo>, String> {
         let (sample_rate, channels) = device
             .default_input_config()
             .ok()
-            .map(|c| (Some(c.sample_rate().0), Some(c.channels())))
+            .map(|c| (Some(c.sample_rate()), Some(c.channels())))
             .unwrap_or((None, None));
         devices.push(InputDeviceInfo {
             id,
@@ -123,6 +130,12 @@ pub fn annotate_missing_selection(devices: &mut Vec<InputDeviceInfo>, selected_i
 pub fn resolve_device(preferred: Option<&str>) -> Result<(cpal::Device, bool), String> {
     use cpal::traits::{DeviceTrait, HostTrait};
     let host = cpal::default_host();
+    let default_device = || {
+        // WASAPI's default proxy follows Windows device changes. Pin this capture
+        // to the physical endpoint selected when recording starts.
+        let id = host.default_input_device()?.id().ok()?;
+        host.device_by_id(&id)
+    };
     let listed = list_input_devices().unwrap_or_default();
     let ids: Vec<String> = listed.iter().map(|d| d.id.clone()).collect();
     let names: Vec<String> = listed.iter().map(|d| d.name.clone()).collect();
@@ -135,7 +148,7 @@ pub fn resolve_device(preferred: Option<&str>) -> Result<(cpal::Device, bool), S
                 plan_device_resolve(preferred, &ids, &names, has_default),
                 DeviceResolvePlan::FallbackDefault
             );
-            host.default_input_device()
+            default_device()
                 .map(|device| (device, fallback))
                 .ok_or_else(|| "Microphone is unavailable".into())
         }
@@ -147,7 +160,12 @@ pub fn resolve_device(preferred: Option<&str>) -> Result<(cpal::Device, bool), S
             if let Ok(mut devices) = host.input_devices() {
                 let mut seen = 0usize;
                 if let Some(found) = devices.find(|d| {
-                    if d.name().ok().as_deref() == Some(match_name.as_str()) {
+                    if d.description()
+                        .map(|description| description.name().to_owned())
+                        .ok()
+                        .as_deref()
+                        == Some(match_name.as_str())
+                    {
                         if seen == occurrence {
                             return true;
                         }
@@ -158,7 +176,7 @@ pub fn resolve_device(preferred: Option<&str>) -> Result<(cpal::Device, bool), S
                     return Ok((found, false));
                 }
             }
-            host.default_input_device()
+            default_device()
                 .map(|device| (device, true))
                 .ok_or_else(|| "Selected microphone is unavailable".into())
         }

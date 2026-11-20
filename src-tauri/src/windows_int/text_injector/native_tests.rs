@@ -26,7 +26,7 @@ impl OwnedEdit {
                 80,
                 480,
                 200,
-                HWND::default(),
+                None,
                 None,
                 None,
                 None,
@@ -53,7 +53,7 @@ impl OwnedEdit {
                 8,
                 440,
                 140,
-                root,
+                Some(root),
                 None,
                 None,
                 None,
@@ -89,7 +89,7 @@ impl OwnedRoot {
                 80,
                 480,
                 240,
-                HWND::default(),
+                None,
                 None,
                 None,
                 None,
@@ -190,7 +190,7 @@ impl InsertWorld for FixtureWorld {
     fn send_keys(&mut self, keys: &[InsertKey]) -> ChunkSend {
         self.assert_owned_target(&self.target);
         let focused = HWND(self.expected_focus as *mut _);
-        assert!(unsafe { IsWindow(focused) }.as_bool());
+        assert!(unsafe { IsWindow(Some(focused)) }.as_bool());
         assert_eq!(
             unsafe { GetAncestor(focused, GA_ROOT) }.0 as usize,
             self.target.root
@@ -385,7 +385,7 @@ struct RestoreForeground(HWND);
 impl Drop for RestoreForeground {
     fn drop(&mut self) {
         unsafe {
-            if IsWindow(self.0).as_bool() {
+            if IsWindow(Some(self.0)).as_bool() {
                 let _ = SetForegroundWindow(self.0);
             }
         }
@@ -417,7 +417,7 @@ fn native_unicode_delivery_to_owned_edit_is_exact_for_cyrillic_and_emoji() {
         std::thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(unsafe { GetForegroundWindow() }, start_root.0);
-    let _ = unsafe { SetFocus(start_window.0) };
+    let _ = unsafe { SetFocus(Some(start_window.0)) };
     let start_target =
         native::capture_session_target(&[], 104).expect("capture recording start window");
     assert_eq!(start_target.root, start_root.0 .0 as usize);
@@ -436,7 +436,7 @@ fn native_unicode_delivery_to_owned_edit_is_exact_for_cyrillic_and_emoji() {
         "owned EDIT activation denied; native Unicode delivery was not verified"
     );
     // SetFocus returns the previous focus, which may legitimately be NULL.
-    let _ = unsafe { SetFocus(first.0) };
+    let _ = unsafe { SetFocus(Some(first.0)) };
     assert_eq!(
         unsafe { GetFocus() },
         first.0,
@@ -457,7 +457,7 @@ fn native_unicode_delivery_to_owned_edit_is_exact_for_cyrillic_and_emoji() {
     assert_eq!(target.tid, unsafe { GetCurrentThreadId() });
     drop(first);
     let edit = OwnedEdit::child(root.0);
-    let _ = unsafe { SetFocus(edit.0) };
+    let _ = unsafe { SetFocus(Some(edit.0)) };
     assert_eq!(
         unsafe { GetFocus() },
         edit.0,

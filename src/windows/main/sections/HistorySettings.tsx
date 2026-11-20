@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { AppSettings, RetentionApplyResult, RetentionPreview } from "../../../lib/api";
 import type { Messages } from "../../../lib/i18n";
 import { SettingsGroup } from "../../../components/settings/SettingsGroup";
@@ -109,13 +109,18 @@ export function HistorySettings({
   const retentionChanged =
     draft.retention !== settings.retention || requestedStorageLimit !== settings.storageLimit;
 
-  useEffect(() => {
-    previewRequestRef.current += 1;
+  const policyKey = JSON.stringify([settings.retention, settings.storageLimit]);
+  const [previousPolicyKey, setPreviousPolicyKey] = useState(policyKey);
+  if (previousPolicyKey !== policyKey) {
+    setPreviousPolicyKey(policyKey);
     setDraft(retentionDraftFromSettings(settings.retention, settings.storageLimit));
     setPreview(null);
     setPreviewFailed(false);
     setApplyFailed(false);
-  }, [settings.retention, settings.storageLimit]);
+  }
+  useLayoutEffect(() => {
+    previewRequestRef.current += 1;
+  }, [policyKey]);
 
   async function updateRetentionDraft(patch: Partial<RetentionDraft>, previewChange = true) {
     const next = { ...draft, ...patch };

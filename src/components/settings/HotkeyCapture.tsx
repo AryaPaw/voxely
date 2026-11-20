@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ComponentProps } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ComponentProps } from "react";
 import { api } from "../../lib/api";
 import { hotkeyFromKeyboardEvent } from "../../lib/hotkey";
 import { Button } from "../ui/button";
@@ -15,7 +15,9 @@ export function HotkeyCapture({
 } & Pick<ComponentProps<typeof Button>, "id" | "aria-describedby" | "aria-labelledby">) {
   const [listening, setListening] = useState(false);
   const onChangeRef = useRef(onChange);
-  onChangeRef.current = onChange;
+  useLayoutEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
 
   useEffect(() => {
     if (!listening) {
@@ -35,11 +37,17 @@ export function HotkeyCapture({
         return;
       }
       setListening(false);
-      void api.setHotkeyCapture(false).then(() => onChangeRef.current(next));
+      void api
+        .setHotkeyCapture(false)
+        .then(() => onChangeRef.current(next))
+        .catch(() => undefined);
     };
     window.addEventListener("keydown", onKey, true);
+    const onBlur = () => setListening(false);
+    window.addEventListener("blur", onBlur);
     return () => {
       window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("blur", onBlur);
       void api.setHotkeyCapture(false).catch(() => undefined);
     };
   }, [listening]);

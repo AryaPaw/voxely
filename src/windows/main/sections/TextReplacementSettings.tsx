@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import {
   DndContext,
   KeyboardSensor,
@@ -205,7 +205,11 @@ function ReplacementGroupCard({
       ? copy.replacementCustomName
       : group.name;
   const [name, setName] = useState(displayName);
-  useEffect(() => setName(displayName), [displayName]);
+  const [previousName, setPreviousName] = useState(displayName);
+  if (previousName !== displayName) {
+    setPreviousName(displayName);
+    setName(displayName);
+  }
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: group.id,
   });

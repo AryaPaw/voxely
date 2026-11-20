@@ -318,6 +318,7 @@ describe("MainApp", () => {
     render(<MainApp />);
     expect(document.querySelector(".app-shell")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^(Close|Закрыть)$/ })).toBeInTheDocument();
+    await waitFor(() => expect(rejectRead).toBeTypeOf("function"));
     await act(async () => rejectRead(new Error("offline")));
     expect(await screen.findByText("offline")).toBeInTheDocument();
     expect(document.querySelector(".app-shell")).toBeInTheDocument();
@@ -408,7 +409,7 @@ describe("MainApp", () => {
     render(<MainApp />);
     await screen.findByRole("heading", { name: "История" });
     expect(
-      await screen.findByText(/Настройки восстановлены со значениями по умолчанию/),
+      await screen.findByText(/Автоматическая очистка истории приостановлена/),
     ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: /Общие/ }));
@@ -419,7 +420,7 @@ describe("MainApp", () => {
 
     fireEvent.click(screen.getByRole("button", { name: /История/ }));
     expect(
-      await screen.findByText(/Настройки восстановлены со значениями по умолчанию/),
+      await screen.findByText(/Автоматическая очистка истории приостановлена/),
     ).toBeInTheDocument();
   });
 

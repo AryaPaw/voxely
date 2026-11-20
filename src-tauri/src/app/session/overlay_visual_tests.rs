@@ -132,12 +132,12 @@ fn pixel_sample(backdrop: isize, overlay: isize) -> Result<String, String> {
                 return Err("fixture is occluded by another process".into());
             }
         }
-        let dc = GetDC(HWND::default());
+        let dc = GetDC(None);
         if dc.0.is_null() {
             return Err("desktop DC unavailable".into());
         }
         let colors = points.map(|point| GetPixel(dc, point.x, point.y).0);
-        let _ = ReleaseDC(HWND::default(), dc);
+        let _ = ReleaseDC(None, dc);
         let styles = GetWindowLongW(HWND(overlay as *mut _), GWL_EXSTYLE);
         let detail = format!(
             "background={:06x} corner={:06x} center={:06x} exstyle={styles:08x} backdrop={back:?} hud={hud:?}",

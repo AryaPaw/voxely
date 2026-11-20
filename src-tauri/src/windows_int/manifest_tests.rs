@@ -17,7 +17,7 @@ fn process_manifest_declares_common_controls_v6_and_per_monitor_v2() {
     unsafe {
         let executable = GetModuleHandleW(PCWSTR::null()).expect("current executable module");
         let resource = FindResourceW(
-            executable,
+            Some(executable),
             PCWSTR(CREATEPROCESS_MANIFEST_RESOURCE_ID as usize as *const u16),
             RT_MANIFEST,
         );
@@ -25,12 +25,12 @@ fn process_manifest_declares_common_controls_v6_and_per_monitor_v2() {
             !resource.is_invalid(),
             "executable has no process activation manifest"
         );
-        let length = SizeofResource(executable, resource) as usize;
+        let length = SizeofResource(Some(executable), resource) as usize;
         assert!(
             (1..=64 * 1024).contains(&length),
             "invalid manifest resource size"
         );
-        let loaded = LoadResource(executable, resource).expect("manifest resource bytes");
+        let loaded = LoadResource(Some(executable), resource).expect("manifest resource bytes");
         let bytes = LockResource(loaded) as *const u8;
         assert!(!bytes.is_null(), "manifest resource wasn't mapped");
         let xml = std::str::from_utf8(std::slice::from_raw_parts(bytes, length))

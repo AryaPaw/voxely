@@ -333,21 +333,9 @@ pub fn apply_retention_recording_ids(
         recordings.push(recording);
     }
 
-    let mut result = DeleteAllResult {
-        deleted: Vec::new(),
-        failed: Vec::new(),
-    };
-    for recording in recordings {
-        match delete_recording(repo, audio_root, &recording) {
-            Ok(true) => result.deleted.push(recording.id),
-            Ok(false) => result.failed.push(recording.id),
-            Err(err) => {
-                tracing::warn!(error = %err, id = %recording.id, "retention skip");
-                result.failed.push(recording.id);
-            }
-        }
-    }
-    Ok(result)
+    Ok(delete_retention_recordings(repo, recordings, |recording| {
+        delete_recording(repo, audio_root, recording)
+    }))
 }
 
 fn is_protected_recording(
@@ -379,21 +367,36 @@ pub fn apply_retention_with_result(
         protected_ids,
         protected_names,
     )?;
+    Ok(delete_retention_recordings(
+        repo,
+        plan.selected,
+        |recording| delete_recording(repo, audio_root, recording),
+    ))
+}
+
+fn delete_retention_recordings(
+    repo: &HistoryRepo,
+    recordings: Vec<Recording>,
+    delete: impl Fn(&Recording) -> Result<bool, AppError>,
+) -> DeleteAllResult {
     let mut result = DeleteAllResult {
         deleted: Vec::new(),
         failed: Vec::new(),
     };
-    for rec in plan.selected {
-        match delete_recording(repo, audio_root, &rec) {
+    for rec in recordings {
+        match delete(&rec) {
             Ok(true) => result.deleted.push(rec.id),
             Ok(false) => result.failed.push(rec.id),
             Err(err) => {
-                tracing::warn!(error = %err, id = %rec.id, "retention skip");
+                tracing::warn!(error = %err, id = %rec.id, "retention deletion incomplete");
+                if repo.get(&rec.id).is_ok_and(|recording| recording.is_none()) {
+                    result.deleted.push(rec.id.clone());
+                }
                 result.failed.push(rec.id);
             }
         }
     }
-    Ok(result)
+    result
 }
 
 fn processing_tmp_keep(known: &[Recording], name: &str) -> bool {
@@ -444,7 +447,7 @@ fn file_names_bytes(audio_root: &Path, names: &HashSet<String>) -> u64 {
         .sum()
 }
 
-fn safe_audio_path(audio_root: &Path, name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn safe_audio_path(audio_root: &Path, name: &str) -> Option<std::path::PathBuf> {
     let mut components = Path::new(name).components();
     match (components.next(), components.next()) {
         (Some(std::path::Component::Normal(file_name)), None)
@@ -454,6 +457,31 @@ fn safe_audio_path(audio_root: &Path, name: &str) -> Option<std::path::PathBuf> 
         }
         _ => None,
     }
+}
+
+pub(crate) fn resolve_recording_audio(
+    root: &Path,
+    candidates: impl IntoIterator<Item = impl AsRef<str>>,
+) -> Result<Option<std::path::PathBuf>, AppError> {
+    for name in candidates {
+        let Some(path) = safe_audio_path(root, name.as_ref()) else {
+            continue;
+        };
+        if !path.is_file() {
+            continue;
+        }
+        let canonical = path
+            .canonicalize()
+            .map_err(|error| AppError::StorageFailed(error.to_string()))?;
+        let root = root
+            .canonicalize()
+            .map_err(|error| AppError::StorageFailed(error.to_string()))?;
+        if !canonical.starts_with(root) {
+            return Err(AppError::StorageFailed("audio path escaped".into()));
+        }
+        return Ok(Some(canonical));
+    }
+    Ok(None)
 }
 
 fn recording_bytes(audio_root: &Path, rec: &Recording) -> u64 {
@@ -474,7 +502,7 @@ pub fn delete_recording(
     audio_root: &Path,
     rec: &Recording,
 ) -> Result<bool, AppError> {
-    delete_recording_with_staged_audio(repo, audio_root, rec, |repo, id| repo.delete(id))
+    delete_recording_with_staged_audio(repo, audio_root, rec, HistoryRepo::delete)
 }
 
 pub fn delete_recording_and_usage(
@@ -482,7 +510,7 @@ pub fn delete_recording_and_usage(
     audio_root: &Path,
     rec: &Recording,
 ) -> Result<bool, AppError> {
-    delete_recording_with_staged_audio(repo, audio_root, rec, |repo, id| repo.delete_with_usage(id))
+    delete_recording_with_staged_audio(repo, audio_root, rec, HistoryRepo::delete_with_usage)
 }
 
 fn delete_recording_with_staged_audio(
@@ -1328,7 +1356,7 @@ mod tests {
     }
 
     #[test]
-    fn staged_audio_cleanup_failure_is_reported_after_database_delete() {
+    fn retention_reports_deleted_row_when_staged_audio_cleanup_is_pending() {
         let dir = tempdir().unwrap();
         let repo = HistoryRepo::open(&dir.path().join("h.db")).unwrap();
         let mut rec = new_recording("m".into());
@@ -1337,22 +1365,25 @@ mod tests {
         std::fs::write(&raw_audio, b"audio").unwrap();
         repo.insert(&rec).unwrap();
 
-        let result = delete_recording_with_staged_audio(&repo, dir.path(), &rec, |repo, id| {
-            let staged_path = std::fs::read_dir(dir.path())
-                .unwrap()
-                .map(|entry| entry.unwrap().path())
-                .find(|path| {
-                    path.file_name().is_some_and(|name| {
-                        name.to_string_lossy().contains(".voxely-delete-pending-")
+        let result = delete_retention_recordings(&repo, vec![rec.clone()], |recording| {
+            delete_recording_with_staged_audio(&repo, dir.path(), recording, |repo, id| {
+                let staged_path = std::fs::read_dir(dir.path())
+                    .unwrap()
+                    .map(|entry| entry.unwrap().path())
+                    .find(|path| {
+                        path.file_name().is_some_and(|name| {
+                            name.to_string_lossy().contains(".voxely-delete-pending-")
+                        })
                     })
-                })
-                .unwrap();
-            std::fs::remove_file(&staged_path).unwrap();
-            std::fs::create_dir(&staged_path).unwrap();
-            repo.delete(id)
+                    .unwrap();
+                std::fs::remove_file(&staged_path).unwrap();
+                std::fs::create_dir(&staged_path).unwrap();
+                repo.delete(id)
+            })
         });
 
-        assert!(result.is_err());
+        assert_eq!(result.deleted, vec![rec.id.clone()]);
+        assert_eq!(result.failed, vec![rec.id.clone()]);
         assert!(repo.get(&rec.id).unwrap().is_none());
         assert!(!raw_audio.exists());
         assert!(cleanup_orphans(dir.path(), &repo).is_err());

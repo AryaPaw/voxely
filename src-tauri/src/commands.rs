@@ -17,7 +17,7 @@ use crate::transcription::openrouter::{list_transcription_models, SttModel};
 use crate::transcription::TranscriptionProvider;
 use crate::windows_int::credentials::{delete_api_key, has_api_key, set_api_key};
 use crate::windows_int::text_injector::native;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Emitter, Manager, State};
 
@@ -132,6 +132,7 @@ pub fn import_settings(
         |current| crate::settings_transfer::import(&data, current),
         false,
         false,
+        false,
     )
 }
 
@@ -156,6 +157,7 @@ fn persist_settings_inner(
         |_| Ok(settings),
         run_retention,
         allow_retention_change,
+        false,
     )
 }
 
@@ -165,6 +167,7 @@ fn persist_settings_with(
     prepare: impl FnOnce(&AppSettings) -> Result<AppSettings, AppError>,
     run_retention: bool,
     allow_retention_change: bool,
+    reset_disclosure: bool,
 ) -> Result<AppSettings, AppError> {
     let _writer = ctx.settings_write_gate.lock();
     let previous = ctx.settings.lock().clone();
@@ -181,7 +184,7 @@ fn persist_settings_with(
             "retention changes require preview and confirmation".into(),
         ));
     }
-    settings.first_run_complete = previous.first_run_complete;
+    settings.first_run_complete = !reset_disclosure && previous.first_run_complete;
     if settings.write_seq != 0 && settings.write_seq <= previous.write_seq {
         return Ok(previous);
     }
@@ -1175,12 +1178,19 @@ pub fn reset_settings(
         openrouter?;
         openai?;
     }
-    let keep_first_run = !wipe_api_key && ctx.settings.lock().first_run_complete;
-    let current = ctx.settings.lock().clone();
-    let mut reset = AppSettings::reset_user_settings(keep_first_run);
-    reset.retention = current.retention;
-    reset.storage_limit = current.storage_limit;
-    persist_settings_inner(&app, ctx.inner().as_ref(), reset, false, false)
+    persist_settings_with(
+        &app,
+        ctx.inner().as_ref(),
+        |current| {
+            let mut reset = AppSettings::reset_user_settings(false);
+            reset.retention = current.retention.clone();
+            reset.storage_limit = current.storage_limit.clone();
+            Ok(reset)
+        },
+        false,
+        false,
+        wipe_api_key,
+    )
 }
 
 #[tauri::command]
@@ -1250,41 +1260,20 @@ pub fn recording_audio_url(
         .get(&id)?
         .ok_or_else(|| AppError::StorageFailed("not found".into()))?;
     let root = crate::history::repository::audio_dir(&ctx.data_dir);
-    let Some(name) = existing_recording_audio(&rec, &root) else {
-        return Ok(None);
-    };
-    if name.contains("..") || Path::new(name).is_absolute() {
-        return Err(AppError::StorageFailed("invalid audio path".into()));
-    }
-    let path = root.join(name);
-    if !path.is_file() {
-        return Ok(None);
-    }
-    let canonical = path
-        .canonicalize()
-        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    let root_canonical = root
-        .canonicalize()
-        .map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    if !canonical.starts_with(&root_canonical) {
-        return Err(AppError::StorageFailed("audio path escaped".into()));
-    }
-    if !canonical.exists() {
-        return Ok(None);
-    }
-    Ok(Some(canonical.to_string_lossy().to_string()))
+    existing_recording_audio(&rec, &root)
+        .map(|path| path.map(|path| path.to_string_lossy().into_owned()))
 }
 
-fn existing_recording_audio<'a>(rec: &'a Recording, root: &Path) -> Option<&'a str> {
-    [
-        rec.processed_audio_path.as_deref(),
-        rec.raw_audio_path.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .find(|name| {
-        !name.contains("..") && !Path::new(name).is_absolute() && root.join(name).is_file()
-    })
+fn existing_recording_audio(rec: &Recording, root: &Path) -> Result<Option<PathBuf>, AppError> {
+    crate::history::retention::resolve_recording_audio(
+        root,
+        [
+            rec.processed_audio_path.as_deref(),
+            rec.raw_audio_path.as_deref(),
+        ]
+        .into_iter()
+        .flatten(),
+    )
 }
 
 #[tauri::command]
@@ -2161,6 +2150,8 @@ mod tests {
         // Resampling retains a 10ms transition frame at each speech boundary.
         assert_eq!(wav.duration(), 40320);
         let actual = wav.samples::<i16>().collect::<Result<Vec<_>, _>>().unwrap();
+        assert!(actual.iter().filter(|&&sample| sample > 3100).count() >= 15900);
+        assert!(actual.iter().filter(|&&sample| sample < -3100).count() >= 15900);
         let (saved, rate) = crate::audio::capture::read_pcm16_wav_with_rate(&path).unwrap();
         let expected = crate::dsp::pipeline::prepare_stt_audio(&saved, rate, &silence).unwrap();
         assert_eq!(actual, crate::audio::resample::f32_to_i16(&expected));
@@ -2910,13 +2901,16 @@ mod tests {
         let mut rec = crate::history::repository::new_recording("model".into());
         rec.raw_audio_path = Some("raw.wav".into());
         rec.processed_audio_path = Some("processed.wav".into());
-        assert_eq!(existing_recording_audio(&rec, dir.path()), None);
+        assert_eq!(existing_recording_audio(&rec, dir.path()).unwrap(), None);
         std::fs::write(dir.path().join("raw.wav"), b"raw").unwrap();
-        assert_eq!(existing_recording_audio(&rec, dir.path()), Some("raw.wav"));
+        assert_eq!(
+            existing_recording_audio(&rec, dir.path()).unwrap(),
+            Some(dir.path().join("raw.wav").canonicalize().unwrap())
+        );
         std::fs::write(dir.path().join("processed.wav"), b"processed").unwrap();
         assert_eq!(
-            existing_recording_audio(&rec, dir.path()),
-            Some("processed.wav")
+            existing_recording_audio(&rec, dir.path()).unwrap(),
+            Some(dir.path().join("processed.wav").canonicalize().unwrap())
         );
     }
 

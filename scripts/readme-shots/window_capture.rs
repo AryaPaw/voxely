@@ -52,7 +52,7 @@ pub(super) fn save(window: &tauri::WebviewWindow, path: &Path) -> Result<(i32, i
         let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
         let hwnd = window
             .hwnd()
-            .map_err(|_| windows::core::Error::from_win32())?;
+            .map_err(|_| windows::core::Error::from_thread())?;
         let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(HWND(hwnd.0))? };
         println!("Capture: own HWND item created");
         let mut d3d = None;
@@ -93,10 +93,11 @@ pub(super) fn save(window: &tauri::WebviewWindow, path: &Path) -> Result<(i32, i
         };
         let size = frame.ContentSize()?;
         println!("Capture: received frame {}x{}", size.Width, size.Height);
-        let bitmap = SoftwareBitmap::CreateCopyFromSurfaceAsync(&frame.Surface()?)?.get()?;
+        let bitmap = SoftwareBitmap::CreateCopyFromSurfaceAsync(&frame.Surface()?)?.join()?;
         println!("Capture: frame copied to CPU");
         let stream = InMemoryRandomAccessStream::new()?;
-        let encoder = BitmapEncoder::CreateAsync(BitmapEncoder::PngEncoderId()?, &stream)?.get()?;
+        let encoder =
+            BitmapEncoder::CreateAsync(BitmapEncoder::PngEncoderId()?, &stream)?.join()?;
         encoder.SetSoftwareBitmap(&bitmap)?;
         encoder.BitmapTransform()?.SetBounds(BitmapBounds {
             X: 0,
@@ -104,13 +105,13 @@ pub(super) fn save(window: &tauri::WebviewWindow, path: &Path) -> Result<(i32, i
             Width: size.Width as u32,
             Height: size.Height as u32,
         })?;
-        encoder.FlushAsync()?.get()?;
+        encoder.FlushAsync()?.join()?;
         let reader = DataReader::CreateDataReader(&stream.GetInputStreamAt(0)?)?;
         let length = stream.Size()? as u32;
-        reader.LoadAsync(length)?.get()?;
+        reader.LoadAsync(length)?.join()?;
         let mut bytes = vec![0; length as usize];
         reader.ReadBytes(&mut bytes)?;
-        std::fs::write(path, bytes).map_err(|_| windows::core::Error::from_win32())?;
+        std::fs::write(path, bytes).map_err(|_| windows::core::Error::from_thread())?;
         Ok((size.Width, size.Height))
     };
     capture().map_err(|e| format!("Windows Graphics Capture failed: {e}"))

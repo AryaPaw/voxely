@@ -77,11 +77,11 @@ export function MainApp() {
   const historyRequestIdRef = useRef(0);
   const historyPagesInFlightRef = useRef(new Set<string>());
   const queryRef = useRef(query);
-  queryRef.current = query;
   const historyQueryRef = useRef(historySearchQuery(query));
-  historyQueryRef.current = historySearchQuery(query);
   const settingsRef = useRef<AppSettings | null>(null);
-  settingsRef.current = settings;
+  useLayoutEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
   const persistedSettingsRef = useRef<AppSettings | null>(null);
   const issuedSettingsSeqRef = useRef(0);
   const acceptPersistedSettings = useCallback((saved: AppSettings) => {
@@ -243,7 +243,10 @@ export function MainApp() {
   }, [acceptPersistedSettings]);
 
   useEffect(() => {
-    void loadSettings();
+    let active = true;
+    queueMicrotask(() => {
+      if (active) void loadSettings();
+    });
     const unlistenHistory = listen(HISTORY_CHANGED, () => {
       void refreshHistory(true, queryRef.current, true);
     });
@@ -277,6 +280,7 @@ export function MainApp() {
       void api.cancel().catch(() => undefined);
     });
     return () => {
+      active = false;
       unbindEscape();
       void unlistenHistory.then((fn) => fn());
       void unlistenInsert.then((fn) => fn());
@@ -337,13 +341,20 @@ export function MainApp() {
     };
   }, [usesOpenAi]);
 
-  useEffect(() => {
+  function changeQuery(next: string) {
+    if (queryRef.current === next) return;
+    queryRef.current = next;
+    historyQueryRef.current = historySearchQuery(next);
     historyRequestIdRef.current += 1;
     historyCursorRef.current = null;
     setHistoryHasMore(false);
     setLoadingMore(false);
     setHistoryError(null);
     setHistory([]);
+    setQuery(next);
+  }
+
+  useEffect(() => {
     const timer = window.setTimeout(() => {
       void refreshHistory(true, query);
     }, 220);
@@ -464,8 +475,8 @@ export function MainApp() {
             recovered={settingsRecovered}
             keyConfigured={usesOpenAi ? openAiKeyConfigured : keyConfigured}
             hotkey={settings.hotkey}
-            onQuery={setQuery}
-            onClearQuery={() => setQuery("")}
+            onQuery={changeQuery}
+            onClearQuery={() => changeQuery("")}
             onLoadMore={() => void refreshHistory(false, queryRef.current)}
             onRefresh={() => refreshHistory(true, queryRef.current, true)}
             onOpenKey={() => setSection("transcription")}

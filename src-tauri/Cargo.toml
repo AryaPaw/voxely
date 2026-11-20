@@ -4,7 +4,7 @@ version = "0.5.1"
 description = "Windows voice dictation with bounded OpenRouter retries"
 authors = ["Voxely"]
 edition = "2021"
-rust-version = "1.90.0"
+rust-version = "1.95.0"
 license = "AGPL-3.0-or-later"
 default-run = "voxely"
 
@@ -30,27 +30,28 @@ regex = "1.13"
 thiserror = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde", "clock"] }
-rusqlite = { version = "0.41", features = ["bundled"] }
-cpal = "0.15"
+rusqlite = { version = "0.43", features = ["bundled"] }
+cpal = "0.18"
 hound = "3"
-rubato = "0.16"
+rubato = "5.1"
 nnnoiseless = { version = "0.5", default-features = false }
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "multipart", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "system-proxy", "multipart", "json"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "fs", "net", "io-util"] }
-keyring = { version = "3", features = ["windows-native"] }
+keyring-core = "1"
+windows-native-keyring-store = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
-rtrb = "0.3"
-parking_lot = "0.12"
+rtrb = "0.4"
+parking_lot = "0.13"
 httpdate = "1"
 tauri-plugin-notification = "2.4.0"
 tauri-plugin-dialog = "2"
 
 [target.'cfg(windows)'.dependencies]
 notify-rust = "4.18"
-winreg = "0.55"
-windows = { version = "0.58", features = [
+winreg = "0.56"
+windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -68,16 +69,16 @@ windows = { version = "0.58", features = [
 [dev-dependencies]
 tauri = { version = "2", features = ["test"] }
 proptest = "1"
-httpmock = "0.7"
+httpmock = "0.9"
 tempfile = "3"
 approx = "0.5"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "test-util"] }
 chrono-tz = "0.10"
 
 [target.'cfg(windows)'.dev-dependencies]
 # Native documentation capture only; the shipped executable doesn't use these APIs.
-windows = { version = "0.58", features = [
+windows = { version = "0.62", features = [
     "Foundation", "Graphics_Capture", "Graphics_DirectX_Direct3D11", "Graphics_Imaging",
     "Storage_Streams", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11",
     "Win32_Graphics_Dxgi", "Win32_System_WinRT_Graphics_Capture",

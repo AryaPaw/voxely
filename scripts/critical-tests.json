@@ -9,6 +9,7 @@
         "audio::capture::tests::stop_timeout_does_not_kill_worker_and_cancel_cleans_late_wav_after_join",
         "audio::capture::tests::duration_cap_matches_across_input_rates",
         "audio::capture::tests::overflow_keeps_recording_and_preserves_speech_until_explicit_stop",
+        "audio::capture::tests::device_xrun_marks_a_gap_without_ending_the_recording",
         "audio::capture::tests::busy_meter_does_not_block_the_audio_callback",
         "audio::capture::tests::capture_queue_reserves_ten_seconds_at_the_device_rate",
         "audio::capture::tests::pcm_flush_preserves_short_chunk_and_stops_at_exact_frame_limit",
@@ -93,6 +94,7 @@
         "history::repository::tests::usage_expiry_and_full_clear_survive_restart",
         "history::repository::tests::usage_prune_is_atomic_and_preserves_exact_cutoff_without_querying_statistics",
         "app::session::tests::usage_maintenance_expires_metadata_without_opening_statistics_or_expiring_history",
+        "app::session::tests::startup_restores_failed_capture_duration_without_changing_its_error",
         "app::session::tests::attempt_storage_failure_preserves_paid_text_and_recovers_cost_once",
         "app::session::tests::deferred_usage_attempt_cannot_restore_deleted_or_cancelled_metrics",
         "app::session::tests::deferred_usage_capacity_reserves_all_configured_attempts_before_api_admission",
@@ -105,9 +107,10 @@
     },
     {
       "id": "retention",
-      "purpose": "Restore staged audio on transactional deletion failure and protect audio owned by an active retry.",
+      "purpose": "Distinguish failed file cleanup from a failed database deletion and protect audio owned by an active retry.",
       "tests": [
         "history::retention::tests::retention_sqlite_failure_restores_audio_and_keeps_record",
+        "history::retention::tests::retention_reports_deleted_row_when_staged_audio_cleanup_is_pending",
         "history::retention::tests::deleting_record_and_usage_restores_audio_when_sqlite_delete_fails",
         "app::session::tests::configured_retention_waits_for_retry_reservation_before_snapshotting_protection"
       ]

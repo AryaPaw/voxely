@@ -155,25 +155,34 @@ impl AppContext {
     pub fn initialize(data_dir: PathBuf) -> Result<Self, AppError> {
         std::fs::create_dir_all(&data_dir).map_err(|e| AppError::StorageFailed(e.to_string()))?;
         let settings_path = data_dir.join("settings.json");
-        let (settings, recovered) = AppSettings::load_with_recovery(&settings_path)?;
+        let settings_missing = !settings_path.exists();
+        let (mut settings, mut recovered) = AppSettings::load_with_recovery(&settings_path)?;
         let audio = audio_dir(&data_dir);
         std::fs::create_dir_all(&audio).map_err(|e| AppError::StorageFailed(e.to_string()))?;
         let history = HistoryRepo::open(&data_dir.join("history.sqlite"))?;
-        if let Err(err) =
-            crate::history::retention::cleanup_staged_audio_deletions(&audio, &history)
-        {
+        if settings_missing && history.count(None)? > 0 {
+            settings.retention_policy_confirmed = false;
+            recovered = true;
+        }
+        let staged_recovery =
+            crate::history::retention::cleanup_staged_audio_deletions(&audio, &history);
+        if let Err(err) = &staged_recovery {
             tracing::warn!(error = %err, "recover pending staged audio deletions");
         }
         cleanup_startup_cancelled_recordings(&history, &audio);
         recover_stale_processing(&history, &audio)?;
-        if !recovered {
-            cleanup_orphans(&audio, &history)?;
-            apply_retention(
-                &history,
-                &audio,
-                Retention::from_setting(&settings.retention),
-                settings.storage_limit_bytes(),
-            )?;
+        if !recovered && staged_recovery.is_ok() {
+            let maintenance = cleanup_orphans(&audio, &history).and_then(|()| {
+                apply_retention(
+                    &history,
+                    &audio,
+                    Retention::from_setting(&settings.retention),
+                    settings.storage_limit_bytes(),
+                )
+            });
+            if let Err(err) = maintenance {
+                tracing::warn!(error = %err, "startup audio maintenance deferred");
+            }
         }
         let compare_nonce = crate::app::compare::initial_compare_nonce(&audio)?;
         let transport = OpenRouterTransport::new(settings.retry.to_policy().connect_timeout)?;
@@ -1128,6 +1137,7 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
                 started,
                 generation,
                 &recording_id,
+                device.as_deref(),
                 native_worker_pending,
                 pending_worker,
             );
@@ -1141,6 +1151,7 @@ fn finish_capture_start(
     started: Result<CaptureSession, AppError>,
     generation: u64,
     recording_id: &str,
+    requested_device: Option<&str>,
     native_worker_pending: bool,
     pending_worker: Arc<AtomicBool>,
 ) {
@@ -1176,8 +1187,10 @@ fn finish_capture_start(
     match started {
         Ok(session) => {
             *ctx.capture_cleanup.lock() = Some(session.cleanup_handle());
-            if session.used_fallback_device() {
-                persist_default_microphone(&ctx, app);
+            if let Some(requested_device) =
+                requested_device.filter(|_| session.used_fallback_device())
+            {
+                persist_default_microphone(&ctx, app, requested_device);
             }
             *ctx.capture.lock() = Some(session);
             if let Err(err) = ctx.transition(SessionEvent::CaptureReady) {
@@ -1340,8 +1353,8 @@ fn finish_stale_capture_start_error(ctx: &AppContext, recording_id: &str, err: &
     }
 }
 
-fn persist_default_microphone(ctx: &AppContext, app: &AppHandle) {
-    let settings = match persist_fallback_microphone_settings(ctx) {
+fn persist_default_microphone(ctx: &AppContext, app: &AppHandle, requested_device: &str) {
+    let settings = match persist_fallback_microphone_settings(ctx, requested_device) {
         Ok(Some(settings)) => settings,
         Ok(None) | Err(_) => return,
     };
@@ -1352,10 +1365,11 @@ fn persist_default_microphone(ctx: &AppContext, app: &AppHandle) {
 
 fn persist_fallback_microphone_settings(
     ctx: &AppContext,
+    requested_device: &str,
 ) -> Result<Option<crate::settings::AppSettings>, AppError> {
     let _writer = ctx.settings_write_gate.lock();
     let mut settings = ctx.settings.lock().clone();
-    if settings.input_device == "default" {
+    if settings.input_device == "default" || settings.input_device != requested_device {
         return Ok(None);
     }
     settings.input_device = "default".into();
@@ -2649,44 +2663,54 @@ fn recover_stale_processing(
     history: &HistoryRepo,
     audio_root: &std::path::Path,
 ) -> Result<(), AppError> {
-    for rec in history.list_all()? {
+    for mut rec in history.list_all()? {
+        if rec.last_error_code.as_deref() == Some("Cancelled") {
+            continue;
+        }
         let raw_tmp_exists = rec
             .raw_audio_path
-            .as_ref()
-            .is_some_and(|name| audio_root.join(name).with_extension("wav.tmp").is_file());
+            .as_deref()
+            .and_then(|name| crate::history::retention::safe_audio_path(audio_root, name))
+            .is_some_and(|path| {
+                path.with_extension("wav.tmp")
+                    .symlink_metadata()
+                    .is_ok_and(|metadata| metadata.is_file())
+            });
+        if rec.status == RecordingStatus::Failed {
+            let duration_was_missing = rec.duration_ms <= 0;
+            if raw_tmp_exists {
+                salvage_raw_tmp(audio_root, &mut rec);
+            }
+            if duration_was_missing {
+                restore_missing_capture_duration(audio_root, &mut rec);
+                if rec.duration_ms > 0 {
+                    if let Err(err) = history.update(&rec) {
+                        tracing::warn!(error = %err, recording_id = rec.id, "defer restoring failed capture duration");
+                    }
+                }
+            }
+            continue;
+        }
         let stale_processing = rec.status == RecordingStatus::Processing;
         let interrupted_missing_duration =
             rec.status == RecordingStatus::Interrupted && rec.duration_ms <= 0;
         if !stale_processing && !raw_tmp_exists && !interrupted_missing_duration {
             continue;
         }
-        let mut rec = rec;
         let truncated = salvage_raw_tmp(audio_root, &mut rec);
-        if rec.duration_ms <= 0 {
-            for name in [&rec.raw_audio_path, &rec.processed_audio_path]
-                .into_iter()
-                .flatten()
-            {
-                let path = audio_root.join(name);
-                if !path.is_file() {
-                    continue;
-                }
-                match crate::audio::capture::capture_wav_duration_ms(&path) {
-                    Ok(duration) if duration > 0 => {
-                        rec.duration_ms = duration as i64;
-                        break;
-                    }
-                    Ok(_) => {}
-                    Err(err) => {
-                        tracing::warn!(error = %err, path = %path.display(), "could not restore interrupted capture duration");
-                    }
-                }
-            }
-        }
-        let has_audio = [&rec.raw_audio_path, &rec.processed_audio_path]
+        restore_missing_capture_duration(audio_root, &mut rec);
+        let candidates = [&rec.raw_audio_path, &rec.processed_audio_path]
             .into_iter()
-            .flatten()
-            .any(|name| audio_root.join(name).is_file());
+            .flatten();
+        let has_audio = match crate::history::retention::resolve_recording_audio(
+            audio_root, candidates,
+        ) {
+            Ok(path) => path.is_some(),
+            Err(err) => {
+                tracing::warn!(error = %err, recording_id = rec.id, "preserve stale recording after audio lookup failure");
+                continue;
+            }
+        };
         if has_audio {
             rec.status = RecordingStatus::Interrupted;
             rec.last_error_code = Some(
@@ -2713,20 +2737,58 @@ fn recover_stale_processing(
     Ok(())
 }
 
+fn restore_missing_capture_duration(
+    audio_root: &Path,
+    rec: &mut crate::history::repository::Recording,
+) {
+    if rec.duration_ms > 0 {
+        return;
+    }
+    for name in [&rec.raw_audio_path, &rec.processed_audio_path]
+        .into_iter()
+        .flatten()
+    {
+        let duration = crate::history::retention::resolve_recording_audio(audio_root, [name])
+            .and_then(|path| {
+                path.map(|path| crate::audio::capture::capture_wav_duration_ms(&path))
+                    .transpose()
+            });
+        match duration {
+            Ok(Some(duration)) if duration > 0 => {
+                rec.duration_ms = duration as i64;
+                return;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(error = %err, recording_id = rec.id, "could not restore capture duration");
+            }
+        }
+    }
+}
+
 fn salvage_raw_tmp(audio_root: &Path, rec: &mut crate::history::repository::Recording) -> bool {
-    let Some(name) = rec.raw_audio_path.clone() else {
+    let Some(dest) = rec
+        .raw_audio_path
+        .as_deref()
+        .and_then(|name| crate::history::retention::safe_audio_path(audio_root, name))
+    else {
         return false;
     };
-    let dest = audio_root.join(&name);
-    if dest.is_file() {
-        if let Ok(duration) = crate::audio::capture::capture_wav_duration_ms(&dest) {
-            rec.duration_ms = duration as i64;
+    match dest.symlink_metadata() {
+        Ok(metadata) if metadata.is_file() => {
+            if let Ok(duration) = crate::audio::capture::capture_wav_duration_ms(&dest) {
+                rec.duration_ms = duration as i64;
+            }
+            return metadata.len() >= crate::audio::capture::MAX_WAV_BYTES;
         }
-        return std::fs::metadata(&dest)
-            .is_ok_and(|metadata| metadata.len() >= crate::audio::capture::MAX_WAV_BYTES);
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        _ => return false,
     }
     let tmp = dest.with_extension("wav.tmp");
-    if !tmp.is_file() {
+    if !tmp
+        .symlink_metadata()
+        .is_ok_and(|metadata| metadata.is_file())
+    {
         return false;
     }
     let recovered = match crate::audio::capture::recover_incomplete_capture_wav(&tmp) {
@@ -3150,6 +3212,7 @@ fn mark_recording_failed(
     }) {
         rec.processed_audio_path = None;
     }
+    restore_missing_capture_duration(&audio, &mut rec);
     history.update(&rec)?;
     Ok(())
 }
@@ -3192,11 +3255,13 @@ fn apply_configured_retention_admitted(
 fn maintain_usage_statistics(
     ctx: &AppContext,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), AppError> {
-    flush_pending_attempts(ctx);
-    ctx.history
+) -> Result<bool, AppError> {
+    let flushed = flush_pending_attempts(ctx);
+    let pruned = ctx
+        .history
         .lock()
-        .prune_usage_statistics(now - chrono::Duration::days(90))
+        .prune_usage_statistics(now - chrono::Duration::days(90))?;
+    Ok(flushed || pruned)
 }
 
 pub fn start_retention_maintenance(app: AppHandle) {
@@ -3215,15 +3280,21 @@ pub fn start_retention_maintenance(app: AppHandle) {
             }
             let ctx = app.state::<Arc<AppContext>>();
             retry_pending_cancelled_recordings(&ctx);
-            if let Err(err) = maintain_usage_statistics(&ctx, chrono::Utc::now()) {
-                tracing::warn!(error = %err, "periodic usage retention failed");
+            match maintain_usage_statistics(&ctx, chrono::Utc::now()) {
+                Ok(true) => ctx.emit_history(&app),
+                Ok(false) => {}
+                Err(err) => tracing::warn!(error = %err, "periodic usage retention failed"),
             }
             let _admission = crate::app::operations::lock_admission(&ctx);
             if crate::app::operations::system_busy(&ctx) || *ctx.settings_recovery.lock() {
                 continue;
             }
-            if let Err(err) = apply_configured_retention_admitted(&ctx, &_admission) {
-                tracing::warn!(error = %err, "periodic retention failed");
+            let result = apply_configured_retention_admitted(&ctx, &_admission);
+            drop(_admission);
+            match result {
+                Ok(deleted) if !deleted.is_empty() => ctx.emit_history(&app),
+                Ok(_) => {}
+                Err(err) => tracing::warn!(error = %err, "periodic retention failed"),
             }
         }
     });
@@ -3518,12 +3589,11 @@ async fn manual_retry_inner(
     let provider = TranscriptionProvider::from_recording(&rec.provider)?;
     let mut staged_processed = None;
     let processed_path = if reprocess_original {
-        let raw_path = rec
-            .raw_audio_path
-            .as_ref()
-            .map(|name| audio_root.join(name))
-            .filter(|path| path.is_file())
-            .ok_or_else(|| AppError::StorageFailed("original audio missing".into()))?;
+        let raw_path = crate::history::retention::resolve_recording_audio(
+            &audio_root,
+            rec.raw_audio_path.as_deref(),
+        )?
+        .ok_or_else(|| AppError::StorageFailed("original audio missing".into()))?;
         let id = uuid::Uuid::parse_str(recording_id)
             .map_err(|_| AppError::StorageFailed("invalid recording id".into()))?;
         let processed_name = format!("{id}.processed-{}.wav", uuid::Uuid::new_v4());
@@ -3544,19 +3614,16 @@ async fn manual_retry_inner(
         rec.processed_audio_path = Some(processed_name);
         processed_path
     } else {
-        let processed = rec
-            .processed_audio_path
-            .as_ref()
-            .map(|name| audio_root.join(name))
-            .filter(|path| path.is_file());
-        let raw = rec
-            .raw_audio_path
-            .as_ref()
-            .map(|name| audio_root.join(name))
-            .filter(|path| path.is_file());
-        processed
-            .or(raw)
-            .ok_or_else(|| AppError::StorageFailed("audio missing".into()))?
+        crate::history::retention::resolve_recording_audio(
+            &audio_root,
+            [
+                rec.processed_audio_path.as_deref(),
+                rec.raw_audio_path.as_deref(),
+            ]
+            .into_iter()
+            .flatten(),
+        )?
+        .ok_or_else(|| AppError::StorageFailed("audio missing".into()))?
     };
     if let Err(err) = validate_retry_audio_path(&processed_path) {
         if let Some(path) = staged_processed.as_deref() {
@@ -4140,6 +4207,61 @@ mod readme_shots;
 #[cfg(test)]
 mod tests {
     use rusqlite::Connection;
+
+    #[test]
+    fn missing_settings_preserve_existing_history_until_retention_is_confirmed() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = audio_dir(dir.path());
+        std::fs::create_dir_all(&root).unwrap();
+        let mut recording = new_recording("vendor/model".into());
+        recording.created_at = chrono::Utc::now() - chrono::Duration::days(4);
+        recording.status = RecordingStatus::Completed;
+        let name = format!("{}.raw.wav", recording.id);
+        recording.raw_audio_path = Some(name.clone());
+        let repo = HistoryRepo::open(&dir.path().join("history.sqlite")).unwrap();
+        repo.insert(&recording).unwrap();
+        drop(repo);
+        std::fs::write(root.join(&name), b"historical audio").unwrap();
+
+        for _ in 0..2 {
+            let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+            assert!(*ctx.settings_recovery.lock());
+            assert!(!ctx.settings.lock().retention_policy_confirmed);
+            assert!(apply_configured_retention(&ctx).unwrap().is_empty());
+            assert!(ctx.history.lock().get(&recording.id).unwrap().is_some());
+            assert_eq!(
+                std::fs::read(root.join(&name)).unwrap(),
+                b"historical audio"
+            );
+        }
+    }
+
+    #[test]
+    fn staged_audio_conflict_does_not_prevent_startup_or_delete_either_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = audio_dir(dir.path());
+        std::fs::create_dir_all(&root).unwrap();
+        AppSettings::default()
+            .save(&dir.path().join("settings.json"))
+            .unwrap();
+        let mut recording = new_recording("vendor/model".into());
+        recording.created_at = chrono::Utc::now() - chrono::Duration::days(4);
+        recording.status = RecordingStatus::Completed;
+        let name = format!("{}.raw.wav", recording.id);
+        recording.raw_audio_path = Some(name.clone());
+        let repo = HistoryRepo::open(&dir.path().join("history.sqlite")).unwrap();
+        repo.insert(&recording).unwrap();
+        drop(repo);
+        let original = root.join(&name);
+        let staged = root.join(format!("{name}.voxely-delete-pending-conflict"));
+        std::fs::write(&original, b"original").unwrap();
+        std::fs::write(&staged, b"staged").unwrap();
+
+        let ctx = AppContext::initialize(dir.path().to_path_buf()).unwrap();
+        assert!(ctx.history.lock().get(&recording.id).unwrap().is_some());
+        assert_eq!(std::fs::read(original).unwrap(), b"original");
+        assert_eq!(std::fs::read(staged).unwrap(), b"staged");
+    }
 
     #[test]
     fn initial_history_insert_failure_releases_start_ownership_before_hud_publication() {
@@ -6444,7 +6566,18 @@ mod tests {
         preferred.save(&ctx.settings_path).unwrap();
         *ctx.settings.lock() = preferred;
 
-        let saved = persist_fallback_microphone_settings(&ctx).unwrap().unwrap();
+        assert!(
+            persist_fallback_microphone_settings(&ctx, "previous-microphone")
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            AppSettings::load(&ctx.settings_path).unwrap().input_device,
+            "preferred-microphone"
+        );
+        let saved = persist_fallback_microphone_settings(&ctx, "preferred-microphone")
+            .unwrap()
+            .unwrap();
 
         assert_eq!(saved.input_device, "default");
         assert_eq!(saved.write_seq, 5);
@@ -7670,6 +7803,63 @@ mod tests {
         assert_eq!(kept.status, RecordingStatus::Interrupted);
         assert!(dest.exists());
         assert!(!tmp.exists());
+    }
+
+    #[test]
+    fn startup_restores_failed_capture_duration_without_changing_its_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_path_buf();
+        let history = HistoryRepo::open(&data.join("history.sqlite")).unwrap();
+        let audio = audio_dir(&data);
+        std::fs::create_dir_all(&audio).unwrap();
+        let mut rec = new_recording("vendor/model".into());
+        rec.status = RecordingStatus::Failed;
+        rec.last_error_code = Some("StorageFailed".into());
+        rec.last_error_message = Some("The recording could not be updated".into());
+        let name = format!("{}.raw.wav", rec.id);
+        rec.raw_audio_path = Some(name.clone());
+        write_pcm16_wav(&audio.join(&name), 16_000, &[0.1; 1_600]).unwrap();
+        history.insert(&rec).unwrap();
+        drop(history);
+
+        let fault = Connection::open(data.join("history.sqlite")).unwrap();
+        fault
+            .execute_batch(
+                "CREATE TRIGGER reject_duration_recovery BEFORE UPDATE OF duration_ms ON recordings
+                 WHEN NEW.duration_ms > 0
+                 BEGIN SELECT RAISE(ABORT, 'injected duration write failure'); END;",
+            )
+            .unwrap();
+        {
+            let ctx = AppContext::initialize(data.clone()).unwrap();
+            let kept = ctx.history.lock().get(&rec.id).unwrap().unwrap();
+            assert_eq!(kept.duration_ms, 0);
+            assert_eq!(kept.status, RecordingStatus::Failed);
+            assert_eq!(kept.last_error_code, rec.last_error_code);
+            assert!(audio.join(&name).is_file());
+        }
+        fault
+            .execute_batch("DROP TRIGGER reject_duration_recovery;")
+            .unwrap();
+
+        for _ in 0..2 {
+            let ctx = AppContext::initialize(data.clone()).unwrap();
+            let history = ctx.history.lock();
+            let kept = history.get(&rec.id).unwrap().unwrap();
+            assert_eq!(kept.duration_ms, 100);
+            assert_eq!(kept.status, RecordingStatus::Failed);
+            assert_eq!(kept.updated_at, rec.updated_at);
+            assert_eq!(kept.last_error_code, rec.last_error_code);
+            assert_eq!(kept.last_error_message, rec.last_error_message);
+            assert!(audio.join(&name).is_file());
+            let statistics = history
+                .get_usage_statistics(
+                    rec.created_at,
+                    rec.created_at + chrono::Duration::seconds(1),
+                )
+                .unwrap();
+            assert_eq!(statistics.audio_duration_ms, 100);
+        }
     }
 
     #[test]

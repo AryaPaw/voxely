@@ -144,8 +144,8 @@ fn native_rust_hud_visibility_alpha_dpi_and_lifetime() {
                 let _restore = RestorePointer(previous, center);
                 SetCursorPos(center.x, center.y).unwrap();
                 std::thread::sleep(Duration::from_millis(100));
-                SendMessageW(hwnd, WM_LBUTTONDOWN, WPARAM(0), LPARAM(0));
-                SendMessageW(hwnd, WM_LBUTTONUP, WPARAM(0), LPARAM(0));
+                SendMessageW(hwnd, WM_LBUTTONDOWN, None, None);
+                SendMessageW(hwnd, WM_LBUTTONUP, None, None);
                 assert_eq!(
                     calls.load(Ordering::SeqCst),
                     1,
@@ -160,7 +160,7 @@ fn native_rust_hud_visibility_alpha_dpi_and_lifetime() {
         }
         // Display changes must not falsify the physical visibility bookkeeping.
         unsafe {
-            SendMessageW(hwnd, WM_DISPLAYCHANGE, WPARAM(0), LPARAM(0));
+            SendMessageW(hwnd, WM_DISPLAYCHANGE, None, None);
         }
         visible.store(false, Ordering::SeqCst);
         std::thread::sleep(Duration::from_millis(150));
@@ -187,12 +187,12 @@ fn native_rust_hud_visibility_alpha_dpi_and_lifetime() {
     }
     drop(hud);
     assert!(
-        !unsafe { IsWindow(hwnd) }.as_bool(),
+        !unsafe { IsWindow(Some(hwnd)) }.as_bool(),
         "worker/window must end together"
     );
     let other = NativeHud::spawn(|| Some(frame(false)), |_, _| {}).unwrap();
     unsafe {
-        SendMessageW(HWND(other.hwnd() as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0));
+        SendMessageW(HWND(other.hwnd() as *mut _), WM_CLOSE, None, None);
     }
     assert_eq!(
         other.hwnd(),

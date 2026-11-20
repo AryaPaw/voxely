@@ -86,6 +86,56 @@ fn check_wav(result: &CaptureResult) {
     );
 }
 
+struct NativeProbe {
+    session: CaptureSession,
+    cleanup: DiscardProbeAudio,
+    input_rate: u32,
+    overflow: Arc<AtomicU32>,
+    device_discontinuity: Arc<AtomicBool>,
+}
+
+fn start_probe(device: Option<String>, path: PathBuf, writer_delay: Duration) -> NativeProbe {
+    let cleanup = CaptureCleanupHandle::new(Some(path.clone()));
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = stop.clone();
+    let meter = Arc::new(Mutex::new(MeterSample::silent()));
+    let worker_meter = meter.clone();
+    let fallback = Arc::new(AtomicBool::new(false));
+    let worker_fallback = fallback.clone();
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let worker = thread::spawn(move || {
+        let built = start_stream_inner(device.as_deref(), worker_meter, worker_fallback)?;
+        ready_tx
+            .send((
+                built.input_rate,
+                built.overflow.clone(),
+                built.stream_discontinuity.clone(),
+            ))
+            .map_err(|_| AppError::AudioCaptureFailed("native probe controller exited".into()))?;
+        if !writer_delay.is_zero() {
+            thread::sleep(writer_delay);
+        }
+        run_capture(built, path, worker_stop)
+    });
+    let session = CaptureSession {
+        stop,
+        meter,
+        thread: Some(worker),
+        fallback,
+        cleanup,
+    };
+    let cleanup = DiscardProbeAudio(session.cleanup_handle());
+    let (input_rate, overflow, device_discontinuity) =
+        ready_rx.recv_timeout(START_TIMEOUT).unwrap();
+    NativeProbe {
+        session,
+        cleanup,
+        input_rate,
+        overflow,
+        device_discontinuity,
+    }
+}
+
 #[test]
 #[ignore = "requires explicit microphone consent and VOXELY_NATIVE_CAPTURE_TEST=1"]
 fn native_capture_survives_load_and_forced_overflow() {
@@ -101,8 +151,13 @@ fn native_capture_survives_load_and_forced_overflow() {
     for (index, seconds) in [8, 20, 60].into_iter().enumerate() {
         let run = index + 1;
         let path = temporary.path().join(format!("normal-{run}.wav"));
-        let session = CaptureSession::start(device.as_deref(), path).unwrap();
-        let _normal_cleanup = DiscardProbeAudio(session.cleanup_handle());
+        let NativeProbe {
+            session,
+            cleanup: _normal_cleanup,
+            overflow,
+            device_discontinuity,
+            ..
+        } = start_probe(device.clone(), path, Duration::ZERO);
         let fallback = session.used_fallback_device();
         let stayed_active = wait_until_stop(&session, Duration::from_secs(seconds));
         let result = session.stop().unwrap();
@@ -112,48 +167,39 @@ fn native_capture_survives_load_and_forced_overflow() {
             stayed_active,
             "native recording stopped without a stop request"
         );
-        assert!(!result.truncated, "ordinary CPU load dropped audio");
+        assert_eq!(
+            overflow.load(Ordering::Relaxed),
+            0,
+            "ordinary CPU load overflowed the app queue"
+        );
+        let device_gap = device_discontinuity.load(Ordering::Relaxed);
+        assert_eq!(
+            result.truncated, device_gap,
+            "WASAPI discontinuities must be reflected in the result"
+        );
         assert!(
             result.duration_ms >= (seconds - 2) * 1000,
             "native capture lost recording time"
         );
         eprintln!(
-            "NATIVE PASS: run={run}, normal_load, audio_ms={}, truncated=false",
+            "NATIVE PASS: run={run}, normal_load, audio_ms={}, device_discontinuity={device_gap}, app_queue_drop=0",
             result.duration_ms
         );
         std::fs::remove_file(&result.path).unwrap();
 
         let path = temporary.path().join(format!("overflow-{run}.wav"));
-        let cleanup = CaptureCleanupHandle::new(Some(path.clone()));
-        let stop = Arc::new(AtomicBool::new(false));
-        let worker_stop = stop.clone();
-        let meter = Arc::new(Mutex::new(MeterSample::silent()));
-        let worker_meter = meter.clone();
-        let fallback = Arc::new(AtomicBool::new(false));
-        let worker_fallback = fallback.clone();
-        let device = device.clone();
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let worker = thread::spawn(move || {
-            let built = start_stream_inner(device.as_deref(), worker_meter, worker_fallback)?;
-            ready_tx
-                .send((built.input_rate, built.overflow.clone()))
-                .map_err(|_| {
-                    AppError::AudioCaptureFailed("native probe controller exited".into())
-                })?;
-            // The real microphone callback runs while the disk writer is held.
-            // This deterministically exceeds the ten-second queue capacity.
-            thread::sleep(Duration::from_secs(QUEUE_SECONDS as u64 + 2));
-            run_capture(built, path, worker_stop)
-        });
-        let session = CaptureSession {
-            stop,
-            meter,
-            thread: Some(worker),
-            fallback,
-            cleanup,
-        };
-        let _overflow_cleanup = DiscardProbeAudio(session.cleanup_handle());
-        let (input_rate, overflow) = ready_rx.recv_timeout(START_TIMEOUT).unwrap();
+        // Hold the writer while real microphone callbacks fill the ten-second queue.
+        let NativeProbe {
+            session,
+            cleanup: _overflow_cleanup,
+            input_rate,
+            overflow,
+            ..
+        } = start_probe(
+            device.clone(),
+            path,
+            Duration::from_secs(QUEUE_SECONDS as u64 + 2),
+        );
         let stayed_active = wait_until_stop(&session, Duration::from_secs(18));
         let fallback = session.used_fallback_device();
         let result = session.stop().unwrap();

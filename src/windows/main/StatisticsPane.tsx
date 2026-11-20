@@ -119,6 +119,15 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
   const dayCount = period === "custom" ? inclusiveDaysBetween(from, to) : Number(period);
   const customRangeValid =
     period !== "custom" || (dayCount > 0 && dayCount <= 90 && from <= to && to <= today);
+  const [previousRangeValid, setPreviousRangeValid] = useState(customRangeValid);
+  if (previousRangeValid !== customRangeValid) {
+    setPreviousRangeValid(customRangeValid);
+    if (!customRangeValid) {
+      setSnapshot(null);
+      setIsLoading(false);
+      setError(null);
+    }
+  }
 
   const range = useMemo(() => {
     const days = period === "custom" ? 0 : Number(period);
@@ -133,12 +142,7 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
   }, [period, from, to, today]);
 
   useEffect(() => {
-    if (!customRangeValid) {
-      setSnapshot(null);
-      setIsLoading(false);
-      setError(null);
-      return;
-    }
+    if (!customRangeValid) return;
 
     let active = true;
     let latestRequest = 0;
@@ -163,7 +167,9 @@ export function StatisticsPane({ copy }: { copy: Messages }) {
         });
     };
 
-    refresh();
+    queueMicrotask(() => {
+      if (active && latestRequest === 0) refresh();
+    });
     void listen(HISTORY_CHANGED, refresh)
       .then((stop) => {
         if (active) unlisten = stop;

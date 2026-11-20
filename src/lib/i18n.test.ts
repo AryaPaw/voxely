@@ -114,7 +114,7 @@ describe("messagesFor", () => {
       "The audio file exceeds the upload size limit.",
     );
     expect(localizedError("RecordingTooLarge", messagesFor("en"), "Recording truncated")).toBe(
-      "Recording was truncated after reaching the audio size or buffer limit.",
+      "Some audio may be missing due to a capture interruption or the recording size limit.",
     );
     expect(
       localizedError(
@@ -122,9 +122,9 @@ describe("messagesFor", () => {
         messagesFor("en"),
         "Recovered capture reached the maximum recording size",
       ),
-    ).toBe("Recording was truncated after reaching the audio size or buffer limit.");
+    ).toBe("Some audio may be missing due to a capture interruption or the recording size limit.");
     expect(localizedError("RecordingTruncated", messagesFor("ru"))).toBe(
-      "Запись обрезана: достигнут лимит размера аудио или буфера.",
+      "Часть аудио могла потеряться из-за сбоя захвата или лимита размера.",
     );
     expect(updateToast("none", messagesFor("en"))).toBe("No updates");
     expect(updateToast("available", messagesFor("en"))).toBe("An update is available");

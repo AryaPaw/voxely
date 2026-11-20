@@ -150,11 +150,17 @@ function main() {
   if (process.argv.includes("--install-hooks")) return installHooks();
   const pkg = JSON.parse(read("package.json"));
   const expectedBun = /^bun@(\d+\.\d+\.\d+)$/.exec(pkg.packageManager)?.[1];
+  const expectedNode = pkg.engines?.node;
   const toolchain = Bun.TOML.parse(read("rust-toolchain.toml")) as any;
   const expectedRust = toolchain.toolchain?.channel;
-  if (!expectedBun || !/^\d+\.\d+\.\d+$/.test(expectedRust))
-    throw new Error("Bun and Rust must have exact version pins");
+  if (
+    !expectedBun ||
+    !/^\d+\.\d+\.\d+$/.test(expectedRust) ||
+    !/^\d+\.\d+\.\d+$/.test(expectedNode)
+  )
+    throw new Error("Bun, Rust and Node must have exact version pins");
   checkVersion("Bun", Bun.version, expectedBun);
+  checkVersion("Node (Vitest)", run("node", ["--version"]).trim().replace(/^v/, ""), expectedNode);
   for (const name of ["RUSTC", "RUSTC_WRAPPER", "RUSTC_WORKSPACE_WRAPPER"]) {
     if (process.env[name])
       throw new Error(`${name} overrides the canonical compiler; unset it before verification`);
@@ -198,7 +204,7 @@ function main() {
     }
   }
   console.log(
-    `Preflight PASS: Rust ${expectedRust}, Bun ${expectedBun}, ${files.length} Rust files with LF, shared CI commands`,
+    `Preflight PASS: Rust ${expectedRust}, Bun ${expectedBun}, Node ${expectedNode}, ${files.length} Rust files with LF, shared CI commands`,
   );
 }
 

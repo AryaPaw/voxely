@@ -88,7 +88,7 @@ pub mod native {
                 let (target_alive, target_iconic, window_class, integrity_blocked) =
                     if let Some(target) = captured {
                         let hwnd = HWND(target.hwnd as *mut _);
-                        let window_ok = IsWindow(hwnd).as_bool();
+                        let window_ok = IsWindow(Some(hwnd)).as_bool();
                         let root = if window_ok { root_hwnd(hwnd) } else { hwnd };
                         let pid_ok = window_ok && pid_matches(hwnd, target.pid);
                         let root_ok = window_ok && hwnd_root_value(hwnd) == Some(target.root);
@@ -150,7 +150,7 @@ pub mod native {
         fn restore_foreground(&mut self, target: &CapturedTarget) -> bool {
             unsafe {
                 let hwnd = HWND(target.root as *mut _);
-                if !IsWindow(hwnd).as_bool() {
+                if !IsWindow(Some(hwnd)).as_bool() {
                     return false;
                 }
                 let _guard = attach_input(hwnd);
@@ -230,7 +230,7 @@ pub mod native {
             if let Err(error) = SetPropW(
                 HWND(target.hwnd as *mut _),
                 &session_target_property(),
-                HANDLE(token as *mut _),
+                Some(HANDLE(token as *mut _)),
             ) {
                 tracing::warn!(
                     generation = target.generation,
@@ -571,7 +571,7 @@ pub mod native {
                 0,
                 0,
                 0,
-                HWND_MESSAGE,
+                Some(HWND_MESSAGE),
                 None,
                 None,
                 None,
@@ -591,7 +591,7 @@ pub mod native {
 
     unsafe fn open_clipboard(owner: HWND) -> Result<(), AppError> {
         for _ in 0..20 {
-            if OpenClipboard(owner).is_ok() {
+            if OpenClipboard(Some(owner)).is_ok() {
                 return Ok(());
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -618,7 +618,7 @@ pub mod native {
             free_hglobal(handle);
             return Err(AppError::TextInsertionFailed(error.to_string()));
         }
-        if let Err(err) = SetClipboardData(13, HANDLE(handle.0)) {
+        if let Err(err) = SetClipboardData(13, Some(HANDLE(handle.0))) {
             free_hglobal(handle);
             return Err(AppError::TextInsertionFailed(err.to_string()));
         }
@@ -700,14 +700,14 @@ pub mod native {
             unsafe {
                 let owner = ClipboardOwner::new().unwrap();
                 let hwnd = owner.0;
-                assert!(IsWindow(hwnd).as_bool());
+                assert!(IsWindow(Some(hwnd)).as_bool());
                 assert!(!windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(hwnd).as_bool());
                 assert_eq!(
                     GetWindowThreadProcessId(hwnd, None),
                     windows::Win32::System::Threading::GetCurrentThreadId()
                 );
                 drop(owner);
-                assert!(!IsWindow(hwnd).as_bool());
+                assert!(!IsWindow(Some(hwnd)).as_bool());
             }
         }
     }
@@ -912,7 +912,7 @@ mod hwnd_tests {
                         40,
                         400,
                         200,
-                        HWND::default(),
+                        None,
                         None,
                         None,
                         None,

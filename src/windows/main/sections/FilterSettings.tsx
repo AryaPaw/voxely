@@ -370,20 +370,30 @@ function setSlot(
 function MicLevelMeter({ live, copy }: { live: boolean; copy: Messages }) {
   const [level, setLevel] = useState(0);
   const [warning, setWarning] = useState<string | null>(null);
+  const [previousLive, setPreviousLive] = useState(live);
+  if (previousLive !== live) {
+    setPreviousLive(live);
+    setLevel(0);
+    setWarning(null);
+  }
   useEffect(() => {
-    if (!live) {
-      setLevel(0);
-      setWarning(null);
-      return;
-    }
+    if (!live) return;
+    let active = true;
     const timer = window.setInterval(() => {
-      void api.meter().then((sample) => {
-        const db = peakDbFs(sample.peak);
-        setLevel(meterFromPeakDb(db));
-        setWarning(previewWarning(sample.peak, 0, copy.clippingWarning));
-      });
+      void api
+        .meter()
+        .then((sample) => {
+          if (!active) return;
+          const db = peakDbFs(sample.peak);
+          setLevel(meterFromPeakDb(db));
+          setWarning(previewWarning(sample.peak, 0, copy.clippingWarning));
+        })
+        .catch(() => undefined);
     }, 80);
-    return () => window.clearInterval(timer);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
   }, [copy.clippingWarning, live]);
   return (
     <div className="mb-5 max-w-lg">

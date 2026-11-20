@@ -246,11 +246,16 @@ describe("HistoryPane", () => {
     vi.unstubAllGlobals();
   });
 
-  it("reports preview failure and can return to full audio", async () => {
+  it("retries a failed API preview without switching tabs and can return to full audio", async () => {
+    const preview = vi
+      .fn()
+      .mockRejectedValueOnce({ code: "AudioProcessingFailed" })
+      .mockResolvedValue(new ArrayBuffer(44));
     vi.mocked(invoke).mockImplementation(async (cmd: string) => {
-      if (cmd === "recording_api_audio") throw { code: "AudioProcessingFailed" };
+      if (cmd === "recording_api_audio") return preview();
       return "retained.wav";
     });
+    vi.stubGlobal("URL", { createObjectURL: vi.fn(() => "blob:retry"), revokeObjectURL: vi.fn() });
     const { container } = render(
       <HistoryCard
         item={recording()}
@@ -265,11 +270,19 @@ describe("HistoryPane", () => {
       ctrlKey: false,
     });
     await waitFor(() => expect(reportError).toHaveBeenCalled());
+    const listen = screen.getByRole("button", { name: "Listen" });
+    expect(listen).toBeEnabled();
+    fireEvent.click(listen);
+    await waitFor(() =>
+      expect(container.querySelector("audio")).toHaveAttribute("src", "blob:retry"),
+    );
+    expect(preview).toHaveBeenCalledTimes(2);
     fireEvent.mouseDown(screen.getByRole("tab", { name: "Full" }), { button: 0, ctrlKey: false });
     await waitFor(() =>
       expect(container.querySelector("audio")).toHaveAttribute("src", "retained.wav"),
     );
     expect(screen.getByRole("button", { name: "Listen" })).not.toBeDisabled();
+    vi.unstubAllGlobals();
   });
 
   it.each([
@@ -469,7 +482,7 @@ describe("HistoryPane", () => {
       />,
     );
     expect(screen.getByRole("status")).toHaveTextContent(
-      "Recording was truncated after reaching the audio size or buffer limit.",
+      "Some audio may be missing due to a capture interruption or the recording size limit.",
     );
   });
 

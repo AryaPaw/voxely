@@ -471,24 +471,27 @@ impl HistoryRepo {
         Ok(())
     }
 
-    pub fn prune_usage_statistics(&self, cutoff: DateTime<Utc>) -> Result<(), AppError> {
+    pub fn prune_usage_statistics(&self, cutoff: DateTime<Utc>) -> Result<bool, AppError> {
         let tx = self.conn.unchecked_transaction().map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM usage_dictations WHERE created_at < ?1",
-            params![cutoff.to_rfc3339()],
-        )
-        .map_err(storage_err)?;
-        tx.execute(
-            "DELETE FROM usage_attempts WHERE occurred_at < ?1",
-            params![cutoff.to_rfc3339()],
-        )
-        .map_err(storage_err)?;
+        let dictations = tx
+            .execute(
+                "DELETE FROM usage_dictations WHERE created_at < ?1",
+                params![cutoff.to_rfc3339()],
+            )
+            .map_err(storage_err)?;
+        let attempts = tx
+            .execute(
+                "DELETE FROM usage_attempts WHERE occurred_at < ?1",
+                params![cutoff.to_rfc3339()],
+            )
+            .map_err(storage_err)?;
         tx.execute(
             "DELETE FROM usage_suppressed WHERE recording_id NOT IN (SELECT id FROM recordings)",
             [],
         )
         .map_err(storage_err)?;
-        tx.commit().map_err(storage_err)
+        tx.commit().map_err(storage_err)?;
+        Ok(dictations > 0 || attempts > 0)
     }
 
     pub fn get_usage_statistics(

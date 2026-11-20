@@ -713,6 +713,9 @@ async fn run_compare_inner(
 ) -> Result<CompareState, AppError> {
     let ctx = app.state::<Arc<AppContext>>();
     let settings = ctx.settings.lock().clone();
+    if !settings.first_run_complete {
+        return Err(AppError::DisclosureRequired);
+    }
     let models = validate_compare_models(&settings.compare_models)?;
     let key = get_api_key()?.ok_or(AppError::InvalidApiKey)?;
     let stt_src = ctx
@@ -1372,7 +1375,7 @@ mod tests {
         )
         .await;
         assert_eq!(rejected.unwrap_err(), AppError::Cancelled);
-        assert_eq!(request.hits(), 1);
+        assert_eq!(request.calls(), 1);
         injection
             .execute_batch("DROP TRIGGER reject_compare_price;")
             .unwrap();
@@ -1459,7 +1462,7 @@ mod tests {
             },
         );
         let switch = async {
-            while busy.hits() == 0 {
+            while busy.calls() == 0 {
                 tokio::time::sleep(Duration::from_millis(2)).await;
             }
             busy.delete();
@@ -2415,14 +2418,14 @@ mod tests {
         server.mock(|when, then| {
             when.method(POST)
                 .path("/audio/transcriptions")
-                .body_contains("model-a");
+                .body_includes("model-a");
             then.status(401)
                 .json_body(serde_json::json!({"error":"no"}));
         });
         server.mock(|when, then| {
             when.method(POST)
                 .path("/audio/transcriptions")
-                .body_contains("model-b");
+                .body_includes("model-b");
             then.status(200)
                 .json_body(serde_json::json!({"text":"hello"}));
         });

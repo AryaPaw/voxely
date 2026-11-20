@@ -2,6 +2,8 @@
 
 `bun run verify` runs frontend typecheck, lint, format, coverage and Rust fmt/clippy/tests with `--locked` when the MSVC linker is available. `scripts/verify.ps1` owns the build-cache lifecycle; the shared stage list remains in `package.json` as `verify:checks`, and CI runs those same `verify:*` stages. Failures remain fatal and cleanup runs in `finally`.
 
+Vitest запускается на Node 24 LTS, закреплённом в `package.json` (`engines.node`). Установка зависимостей и остальные команды выполняются через Bun. Vitest 5 использует IPC дочерних процессов Node, которого нет в Bun 1.4.5.
+
 Frontend coverage includes all product `src` modules, including StatisticsPane, OverlayApp and shadcn primitives. Test discovery is scoped to `src` and `scripts`, so temporary checkouts under `.local` cannot duplicate the suite. Global lines/branches floors are 85%; StatisticsPane and OverlayApp also have per-file floors.
 
 `rust-toolchain.toml` is the canonical compiler/tooling version for local commands, verification CI and release packaging. Install it with `rustup toolchain install --no-self-update`; don't change the global default. Upgrade this pin deliberately and run the complete gate before publication. The independent MSRV check still reads `Cargo.toml` and uses an explicit `cargo +<MSRV>` so the repository pin cannot replace the minimum-version test.
@@ -14,7 +16,7 @@ Frontend coverage includes all product `src` modules, including StatisticsPane, 
 
 ## Preventing local/CI drift
 
-`bun run verify:preflight` fails before expensive tests when the actual Rust/Bun version differs from the repository pins, a compiler override is active, a tracked Rust file contains CRLF, or Git attributes don't force LF. It also checks that CI uses the same `verify:*` commands as the local gate and that both workflows use the pinned Bun version. The guard's negative tests run locally and in CI.
+`bun run verify:preflight` fails before expensive tests when Rust, Bun or Node differs from the repository pin, a compiler override is active, a tracked Rust file contains CRLF, or Git attributes don't force LF. It also checks that CI uses the same `verify:*` commands as the local gate and that both workflows use the pinned Bun version. The guard's negative tests run locally and in CI.
 
 Run `bun run hooks:install` once per clone. It enables the tracked `.githooks/pre-push` hook for this repository only and refuses to replace existing custom hooks. The hook requires a clean tracked tree and the checked HEAD, then runs the complete local `bun run verify` before allowing a push. It doesn't cache successful results or accept stale reports. To undo installation: `git config --local --unset core.hooksPath`.
 
@@ -97,7 +99,7 @@ Explicit maintenance: `pwsh -NoProfile -File scripts/clean-rust-artifacts.ps1`. 
 
 MSRV CI использует `scripts/check-msrv.ps1`: минимальная версия читается из Cargo.toml, сборка выполняется в `target/msrv-<version>`, артефакты очищаются в `finally`. Coverage использует отдельный `target/llvm-cov`, а отчёты сохраняет вне target. Общий lifecycle owner сериализует операции и сохраняет файлы блокировок, включая ожидателей Cargo. Старые `profraw`/`profdata` удаляются как из корня coverage-target, так и из вложенных namespace рядом с заблокированными профилями, включая `llvm-cov-target`.
 
-Прямые `cargo` / `bun x --bun tauri` не получают managed lease Voxely. Обычный Cargo синхронизируется с очисткой через блокировки своих профилей; общий lifecycle, бюджет и приватные временные targets обслуживают `bun run --bun verify`, `bun run --bun rebuild:local-app` и репозиторные helpers. Сборки других проектов с отдельными targets могут работать параллельно. Произвольные файловые писатели, не соблюдающие Cargo-lock или managed lease, не входят в эту гарантию синхронизации.
+Прямые `cargo` / `bun x --bun tauri` не получают managed lease Voxely. Обычный Cargo синхронизируется с очисткой через блокировки своих профилей; общий lifecycle, бюджет и приватные временные targets обслуживают `bun run verify`, `bun run --bun rebuild:local-app` и репозиторные helpers. Сборки других проектов с отдельными targets могут работать параллельно. Произвольные файловые писатели, не соблюдающие Cargo-lock или managed lease, не входят в эту гарантию синхронизации.
 
 Если Cargo удерживает блокировку профиля внутри target Voxely, финальная очистка ждёт её освобождения до 15 минут, сохраняя lease и временные файлы. Истечение ожидания остаётся ошибкой. Блокировки конкретных профилей удерживаются до конца удаления; проверка reparse points повторяется после ожидания. Процессы скрипт не останавливает.
 

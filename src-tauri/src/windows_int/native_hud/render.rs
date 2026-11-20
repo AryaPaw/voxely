@@ -104,7 +104,7 @@ impl Dib {
     unsafe fn new(width: i32, height: i32) -> Result<Self> {
         let dc = CreateCompatibleDC(None);
         if dc.0.is_null() {
-            return Err(windows::core::Error::from_win32());
+            return Err(windows::core::Error::from_thread());
         }
         let info = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
@@ -119,14 +119,14 @@ impl Dib {
             ..Default::default()
         };
         let mut bits = std::ptr::null_mut();
-        let bitmap = match CreateDIBSection(dc, &info, DIB_RGB_COLORS, &mut bits, None, 0) {
+        let bitmap = match CreateDIBSection(Some(dc), &info, DIB_RGB_COLORS, &mut bits, None, 0) {
             Ok(bitmap) => bitmap,
             Err(error) => {
                 let _ = DeleteDC(dc);
                 return Err(error);
             }
         };
-        let previous = SelectObject(dc, bitmap);
+        let previous = SelectObject(dc, bitmap.into());
         Ok(Self {
             dc,
             bitmap,
@@ -144,7 +144,7 @@ impl Drop for Dib {
     fn drop(&mut self) {
         unsafe {
             SelectObject(self.dc, self.previous);
-            let _ = DeleteObject(self.bitmap);
+            let _ = DeleteObject(self.bitmap.into());
             let _ = DeleteDC(self.dc);
         }
     }
@@ -176,17 +176,17 @@ impl Painter {
             0,
             0,
             0,
-            DEFAULT_CHARSET.0 as u32,
-            OUT_DEFAULT_PRECIS.0 as u32,
-            CLIP_DEFAULT_PRECIS.0 as u32,
-            ANTIALIASED_QUALITY.0 as u32,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            ANTIALIASED_QUALITY,
             0,
             w!("Segoe UI"),
         );
         if font.0.is_null() {
-            return Err(windows::core::Error::from_win32());
+            return Err(windows::core::Error::from_thread());
         }
-        let old_font = SelectObject(mask.dc, font);
+        let old_font = SelectObject(mask.dc, font.into());
         Ok(Self {
             canvas,
             mask,
@@ -349,7 +349,7 @@ impl Painter {
                 cx: self.canvas.width,
                 cy: self.canvas.height,
             }),
-            self.canvas.dc,
+            Some(self.canvas.dc),
             Some(&POINT::default()),
             COLORREF(0),
             Some(&BLENDFUNCTION {
@@ -366,7 +366,7 @@ impl Drop for Painter {
     fn drop(&mut self) {
         unsafe {
             SelectObject(self.mask.dc, self.old_font);
-            let _ = DeleteObject(self.font);
+            let _ = DeleteObject(self.font.into());
         }
     }
 }

@@ -134,7 +134,7 @@ Default remains hide (not destroy) for overlay (created hidden at launch) and ma
 
 ## Supply chain
 
-The MSRV source of truth is `rust-version` in `src-tauri/Cargo.toml`. CI reads that value and compiles with `cargo build --locked --all-targets`, then runs clippy/tests with the compiler pinned in `rust-toolchain.toml`. The current locked Tauri dependency graph requires Rust 1.90 or newer.
+The MSRV source of truth is `rust-version` in `src-tauri/Cargo.toml`. CI reads that value and compiles with `cargo build --locked --all-targets`, then runs clippy/tests with the compiler pinned in `rust-toolchain.toml`.
 
 Removed unused direct Rust crates: `rand`, `sha2`, `directories`, `once_cell`, `bytes`, `base64`. Dropped unused `reqwest` `blocking`, `nnnoiseless` default `bin` features, and `tracing-subscriber` `json`. Frontend dropped unused JS wrappers `@tauri-apps/plugin-opener`, `plugin-process`, `plugin-updater` (Rust plugins stay). `shadcn` stays because `src/styles.css` imports `shadcn/tailwind.css`.
 

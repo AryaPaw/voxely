@@ -198,6 +198,7 @@ export function HistoryCard({
   const [audioLoading, setAudioLoading] = useState(false);
   const [audioDuration, setAudioDuration] = useState<number | null>(item.durationMs);
   const [loadAudio, setLoadAudio] = useState(false);
+  const [audioLoadRevision, setAudioLoadRevision] = useState(0);
   const [audioMissing, setAudioMissing] = useState(false);
   const [playing, setPlaying] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -206,7 +207,7 @@ export function HistoryCard({
   const [retrying, setRetrying] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const pendingPlay = useRef(false);
-  const playback = useRef({ generation: 0 }).current;
+  const playback = useRef(0);
   const copiedTimer = useRef<number | null>(null);
   const failed = item.status === "failed" || item.status === "interrupted";
   const processing = item.status === "processing";
@@ -225,19 +226,36 @@ export function HistoryCard({
           ? copy.retryingTranscript
           : null;
 
-  useEffect(() => {
-    if (!loadAudio) {
-      return;
+  const audioRequest = JSON.stringify([
+    loadAudio,
+    audioLoadRevision,
+    audioVariant,
+    item.id,
+    item.processedAudioPath,
+    item.rawAudioPath,
+    item.attemptCount,
+    item.status,
+    item.durationMs,
+    copy.dateLocale,
+  ]);
+  const [previousAudioRequest, setPreviousAudioRequest] = useState(audioRequest);
+  if (previousAudioRequest !== audioRequest) {
+    setPreviousAudioRequest(audioRequest);
+    if (loadAudio) {
+      setAudioLoading(true);
+      setAudioSrc(null);
+      setPlaying(false);
+      setAudioMissing(false);
+      setCurrent(0);
+      setProgress(0);
+      setAudioDuration(audioVariant === "full" ? item.durationMs : null);
     }
+  }
+  useEffect(() => {
+    if (!loadAudio) return;
     let cancelled = false;
-    playback.generation++;
+    playback.current++;
     let objectUrl: string | null = null;
-    setAudioLoading(true);
-    setAudioSrc(null);
-    setPlaying(false);
-    setCurrent(0);
-    setProgress(0);
-    setAudioDuration(audioVariant === "full" ? item.durationMs : null);
     const source =
       audioVariant === "api"
         ? api.apiAudio(item.id).then((bytes) => {
@@ -265,7 +283,6 @@ export function HistoryCard({
       .catch((error: unknown) => {
         if (!cancelled) {
           setAudioSrc(null);
-          setAudioMissing(true);
           pendingPlay.current = false;
           reportError(formatInvokeError(error, copy));
         }
@@ -275,11 +292,11 @@ export function HistoryCard({
       });
     return () => {
       cancelled = true;
-      playback.generation++;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [
     loadAudio,
+    audioLoadRevision,
     item.id,
     item.processedAudioPath,
     item.rawAudioPath,
@@ -288,7 +305,6 @@ export function HistoryCard({
     item.durationMs,
     audioVariant,
     copy,
-    playback,
   ]);
 
   useEffect(() => {
@@ -298,13 +314,12 @@ export function HistoryCard({
     pendingPlay.current = false;
     const node = audioRef.current;
     if (!node) return;
-    const generation = ++playback.generation;
+    const generation = ++playback.current;
     void node.play().catch(() => {
-      if (generation !== playback.generation || audioRef.current !== node) return;
-      setAudioMissing(true);
+      if (generation !== playback.current || audioRef.current !== node) return;
       reportError(copy.playbackFailed);
     });
-  }, [audioSrc, copy.playbackFailed, playback]);
+  }, [audioSrc, copy.playbackFailed]);
 
   useEffect(() => {
     return () => {
@@ -318,20 +333,20 @@ export function HistoryCard({
     const node = audioRef.current;
     if (node) {
       if (node.paused) {
-        const generation = ++playback.generation;
+        const generation = ++playback.current;
         void node.play().catch(() => {
-          if (generation !== playback.generation || audioRef.current !== node) return;
-          setAudioMissing(true);
+          if (generation !== playback.current || audioRef.current !== node) return;
           reportError(copy.playbackFailed);
         });
       } else {
-        playback.generation++;
+        playback.current++;
         node.pause();
       }
       return;
     }
     pendingPlay.current = true;
-    setLoadAudio(true);
+    if (loadAudio) setAudioLoadRevision((revision) => revision + 1);
+    else setLoadAudio(true);
   }
 
   async function retryTranscription() {
@@ -557,7 +572,7 @@ export function HistoryCard({
         <Tabs
           value={audioVariant}
           onValueChange={(value) => {
-            playback.generation++;
+            playback.current++;
             audioRef.current?.pause();
             pendingPlay.current = false;
             setAudioMissing(false);
@@ -635,7 +650,7 @@ export function HistoryCard({
           }}
           onError={() => {
             setPlaying(false);
-            setAudioMissing(true);
+            setAudioSrc(null);
             reportError(copy.playbackFailed);
           }}
         />

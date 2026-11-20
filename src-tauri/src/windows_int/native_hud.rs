@@ -77,7 +77,7 @@ impl NativeHud {
                         DispatchMessageW(&msg);
                     }
                     // WM_CLOSE normally destroys it; also clean up after GetMessage failure.
-                    if IsWindow(window).as_bool() {
+                    if IsWindow(Some(window)).as_bool() {
                         let _ = DestroyWindow(window);
                     }
                 }
@@ -106,7 +106,7 @@ impl Drop for NativeHud {
         let raw = self.hwnd();
         if raw != 0 {
             unsafe {
-                let _ = PostMessageW(HWND(raw as *mut _), WM_CLOSE, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(Some(HWND(raw as *mut _)), WM_CLOSE, WPARAM(0), LPARAM(0));
             }
         }
         if let Some(thread) = self.thread.take() {
@@ -143,7 +143,7 @@ unsafe fn create_window(data: &mut WindowData) -> Result<HWND> {
     };
     // One worker in production, parallel isolated fixtures may reuse this class.
     if RegisterClassW(&wc) == 0 && GetLastError() != ERROR_CLASS_ALREADY_EXISTS {
-        return Err(windows::core::Error::from_win32());
+        return Err(windows::core::Error::from_thread());
     }
     let hwnd = CreateWindowExW(
         WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST,
@@ -156,12 +156,12 @@ unsafe fn create_window(data: &mut WindowData) -> Result<HWND> {
         72,
         None,
         None,
-        module,
+        Some(module.into()),
         Some(data as *mut _ as *const _),
     )?;
     data.hwnd.store(hwnd.0 as isize, Ordering::SeqCst);
-    if SetTimer(hwnd, 1, 50, None) == 0 {
-        let error = windows::core::Error::from_win32();
+    if SetTimer(Some(hwnd), 1, 50, None) == 0 {
+        let error = windows::core::Error::from_thread();
         let _ = DestroyWindow(hwnd);
         return Err(error);
     }
@@ -192,7 +192,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
             WM_DPICHANGED | WM_DISPLAYCHANGE => {
                 // UpdateLayeredWindow/SetWindowPos can synchronously reenter this
                 // procedure while tick owns &mut WindowData. Defer all mutation.
-                let _ = PostMessageW(hwnd, GEOMETRY_DIRTY, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(Some(hwnd), GEOMETRY_DIRTY, WPARAM(0), LPARAM(0));
                 return LRESULT(0);
             }
             GEOMETRY_DIRTY => {
@@ -230,7 +230,7 @@ unsafe extern "system" fn window_proc(hwnd: HWND, msg: u32, wp: WPARAM, lp: LPAR
                 return LRESULT(0);
             }
             WM_DESTROY => {
-                let _ = KillTimer(hwnd, 1);
+                let _ = KillTimer(Some(hwnd), 1);
                 (*pointer).hwnd.store(0, Ordering::SeqCst);
                 PostQuitMessage(0);
                 return LRESULT(0);
@@ -323,7 +323,7 @@ impl WindowData {
         if !self.shown {
             SetWindowPos(
                 hwnd,
-                HWND_TOPMOST,
+                Some(HWND_TOPMOST),
                 0,
                 0,
                 0,

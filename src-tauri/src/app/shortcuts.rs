@@ -279,11 +279,11 @@ fn hook_update_is_current(ctx: &AppContext, layout: &ShortcutLayout) -> bool {
 #[cfg(windows)]
 fn drain_owned_hotkey_messages() -> Result<(), AppError> {
     use windows::Win32::{
-        Foundation::{BOOL, HWND, LPARAM},
+        Foundation::{HWND, LPARAM},
         System::Threading::GetCurrentThreadId,
         UI::WindowsAndMessaging::{EnumThreadWindows, GetClassNameW},
     };
-    unsafe extern "system" fn find(hwnd: HWND, data: LPARAM) -> BOOL {
+    unsafe extern "system" fn find(hwnd: HWND, data: LPARAM) -> windows::core::BOOL {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut class = [0u16; 128];
             let len = GetClassNameW(hwnd, &mut class);
@@ -326,7 +326,7 @@ fn drain_window_hotkey_messages(hwnd: windows::Win32::Foundation::HWND) -> Resul
     unsafe {
         let mut process = 0;
         let owner = GetWindowThreadProcessId(hwnd, Some(&mut process));
-        if !IsWindow(hwnd).as_bool()
+        if !IsWindow(Some(hwnd)).as_bool()
             || owner != GetCurrentThreadId()
             || process != GetCurrentProcessId()
         {
@@ -337,7 +337,7 @@ fn drain_window_hotkey_messages(hwnd: windows::Win32::Foundation::HWND) -> Resul
         let mut message = MSG::default();
         let mut drained = 0;
         while drained < 256
-            && PeekMessageW(&mut message, hwnd, WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool()
+            && PeekMessageW(&mut message, Some(hwnd), WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool()
         {
             // PeekMessage can surface WM_QUIT despite a message-range filter.
             // Preserve exit instead of consuming it as a stale shortcut.
@@ -347,7 +347,7 @@ fn drain_window_hotkey_messages(hwnd: windows::Win32::Foundation::HWND) -> Resul
             }
             drained += 1;
         }
-        if PeekMessageW(&mut message, hwnd, WM_HOTKEY, WM_HOTKEY, PM_NOREMOVE).as_bool() {
+        if PeekMessageW(&mut message, Some(hwnd), WM_HOTKEY, WM_HOTKEY, PM_NOREMOVE).as_bool() {
             return Err(AppError::HotkeyFailed(
                 "Too many pending shortcut messages; registration wasn't resumed".into(),
             ));
@@ -456,7 +456,7 @@ mod tests {
                     for hwnd in &self.windows {
                         let _ = DestroyWindow(*hwnd);
                     }
-                    let _ = UnregisterClassW(PCWSTR(self.name.as_ptr()), self.instance);
+                    let _ = UnregisterClassW(PCWSTR(self.name.as_ptr()), Some(self.instance));
                 }
             }
         }
@@ -498,7 +498,7 @@ mod tests {
                         0,
                         None,
                         None,
-                        instance,
+                        Some(instance),
                         None,
                     )
                     .unwrap(),
@@ -506,8 +506,8 @@ mod tests {
             }
             let target = fixture.windows[0];
             let unrelated = fixture.windows[1];
-            PostMessageW(target, WM_HOTKEY, WPARAM(7), LPARAM(0)).unwrap();
-            PostMessageW(unrelated, WM_HOTKEY, WPARAM(7), LPARAM(0)).unwrap();
+            PostMessageW(Some(target), WM_HOTKEY, WPARAM(7), LPARAM(0)).unwrap();
+            PostMessageW(Some(unrelated), WM_HOTKEY, WPARAM(7), LPARAM(0)).unwrap();
             assert_eq!(drain_window_hotkey_messages(target).unwrap(), 1);
             let raw = target.0 as isize;
             assert!(thread::spawn(
@@ -516,32 +516,51 @@ mod tests {
             .join()
             .unwrap());
             let mut message = MSG::default();
-            assert!(
-                !PeekMessageW(&mut message, target, WM_HOTKEY, WM_HOTKEY, PM_NOREMOVE).as_bool()
-            );
+            assert!(!PeekMessageW(
+                &mut message,
+                Some(target),
+                WM_HOTKEY,
+                WM_HOTKEY,
+                PM_NOREMOVE
+            )
+            .as_bool());
             // The same HotKeyId now refers to a fresh handler. Only its new post is delivered.
-            PostMessageW(target, WM_HOTKEY, WPARAM(7), LPARAM(0)).unwrap();
-            assert!(PeekMessageW(&mut message, target, WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool());
+            PostMessageW(Some(target), WM_HOTKEY, WPARAM(7), LPARAM(0)).unwrap();
+            assert!(
+                PeekMessageW(&mut message, Some(target), WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool()
+            );
             DispatchMessageW(&message);
             assert_eq!(DELIVERED.with(Cell::get), 1);
-            assert!(
-                PeekMessageW(&mut message, unrelated, WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool()
-            );
+            assert!(PeekMessageW(
+                &mut message,
+                Some(unrelated),
+                WM_HOTKEY,
+                WM_HOTKEY,
+                PM_REMOVE
+            )
+            .as_bool());
             assert_eq!(
                 message.wParam.0, 7,
                 "A different HWND's queue must remain untouched"
             );
             for _ in 0..257 {
-                PostMessageW(target, WM_HOTKEY, WPARAM(7), LPARAM(0)).unwrap();
+                PostMessageW(Some(target), WM_HOTKEY, WPARAM(7), LPARAM(0)).unwrap();
             }
             assert!(
                 drain_window_hotkey_messages(target).is_err(),
                 "A saturated queue must leave registration suspended"
             );
-            assert!(PeekMessageW(&mut message, target, WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool());
             assert!(
-                !PeekMessageW(&mut message, target, WM_HOTKEY, WM_HOTKEY, PM_NOREMOVE).as_bool()
+                PeekMessageW(&mut message, Some(target), WM_HOTKEY, WM_HOTKEY, PM_REMOVE).as_bool()
             );
+            assert!(!PeekMessageW(
+                &mut message,
+                Some(target),
+                WM_HOTKEY,
+                WM_HOTKEY,
+                PM_NOREMOVE
+            )
+            .as_bool());
         }
     }
 

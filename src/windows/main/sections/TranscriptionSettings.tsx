@@ -66,6 +66,16 @@ function isValidRetryValue(field: RetryNumberField, value: number, settings: App
   }
 }
 
+function useFieldDraft(value: string) {
+  const [draft, setDraft] = useState(value);
+  const [saved, setSaved] = useState(value);
+  if (saved !== value) {
+    setSaved(value);
+    setDraft(value);
+  }
+  return [draft, setDraft] as const;
+}
+
 export function TranscriptionSettings({
   settings,
   copy,
@@ -96,13 +106,21 @@ export function TranscriptionSettings({
   const [catalog, setCatalog] = useState<Array<{ id: string; name: string }>>([]);
   const [catalogError, setCatalogError] = useState(false);
   const [catalogRevision, setCatalogRevision] = useState(0);
-  const [modelDraft, setModelDraft] = useState(settings.model);
-  const [extraDraft, setExtraDraft] = useState(draftNumber(settings.retry.additionalRetries));
-  const [connectDraft, setConnectDraft] = useState(draftNumber(settings.retry.connectTimeoutMs));
-  const [requestDraft, setRequestDraft] = useState(draftNumber(settings.retry.requestTimeoutMs));
-  const [initialDraft, setInitialDraft] = useState(draftNumber(settings.retry.initialRetryDelayMs));
-  const [maxDraft, setMaxDraft] = useState(draftNumber(settings.retry.maxRetryDelayMs));
-  const [totalDraft, setTotalDraft] = useState(draftNumber(settings.retry.totalOperationTimeoutMs));
+  const [modelDraft, setModelDraft] = useFieldDraft(settings.model);
+  const [extraDraft, setExtraDraft] = useFieldDraft(draftNumber(settings.retry.additionalRetries));
+  const [connectDraft, setConnectDraft] = useFieldDraft(
+    draftNumber(settings.retry.connectTimeoutMs),
+  );
+  const [requestDraft, setRequestDraft] = useFieldDraft(
+    draftNumber(settings.retry.requestTimeoutMs),
+  );
+  const [initialDraft, setInitialDraft] = useFieldDraft(
+    draftNumber(settings.retry.initialRetryDelayMs),
+  );
+  const [maxDraft, setMaxDraft] = useFieldDraft(draftNumber(settings.retry.maxRetryDelayMs));
+  const [totalDraft, setTotalDraft] = useFieldDraft(
+    draftNumber(settings.retry.totalOperationTimeoutMs),
+  );
   const catalogIds = new Set(catalog.map((item) => item.id));
   const catalogValue = catalogIds.has(settings.model) ? settings.model : "";
   const catalogOptions = useMemo(() => {
@@ -112,39 +130,17 @@ export function TranscriptionSettings({
       .sort((a, b) => collator.compare(a.label, b.label) || a.value.localeCompare(b.value, "en"));
   }, [catalog, copy.dateLocale]);
 
-  useEffect(() => {
-    setModelDraft(settings.model);
-  }, [settings.model]);
-
-  useEffect(() => {
-    setExtraDraft(draftNumber(settings.retry.additionalRetries));
-  }, [settings.retry.additionalRetries]);
-
-  useEffect(() => {
-    setConnectDraft(draftNumber(settings.retry.connectTimeoutMs));
-  }, [settings.retry.connectTimeoutMs]);
-
-  useEffect(() => {
-    setRequestDraft(draftNumber(settings.retry.requestTimeoutMs));
-  }, [settings.retry.requestTimeoutMs]);
-
-  useEffect(() => {
-    setInitialDraft(draftNumber(settings.retry.initialRetryDelayMs));
-  }, [settings.retry.initialRetryDelayMs]);
-
-  useEffect(() => {
-    setMaxDraft(draftNumber(settings.retry.maxRetryDelayMs));
-  }, [settings.retry.maxRetryDelayMs]);
-
-  useEffect(() => {
-    setTotalDraft(draftNumber(settings.retry.totalOperationTimeoutMs));
-  }, [settings.retry.totalOperationTimeoutMs]);
+  const catalogRequest = `${direct}:${keyConfigured}:${catalogRevision}`;
+  const [previousCatalogRequest, setPreviousCatalogRequest] = useState(catalogRequest);
+  if (previousCatalogRequest !== catalogRequest) {
+    setPreviousCatalogRequest(catalogRequest);
+    setCatalog([]);
+    setCatalogError(false);
+  }
 
   useEffect(() => {
     if (direct) return;
     let cancelled = false;
-    setCatalog([]);
-    setCatalogError(false);
     void api
       .models()
       .then((items) => {

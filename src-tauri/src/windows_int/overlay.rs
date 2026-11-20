@@ -3,8 +3,8 @@ use crate::app::overlay::WorkArea;
 #[cfg(windows)]
 fn work_area_from_monitor(monitor: windows::Win32::Graphics::Gdi::HMONITOR) -> Option<WorkArea> {
     unsafe {
-        use windows::Win32::Foundation::{BOOL, RECT};
         use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MONITORINFO};
+        use windows::{core::BOOL, Win32::Foundation::RECT};
 
         let mut info = MONITORINFO {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
@@ -202,7 +202,7 @@ pub fn apply_overlay_exstyle(raw: isize) {
             SetWindowLongW(hwnd, GWL_EXSTYLE, ex);
             flags |= SWP_FRAMECHANGED;
         }
-        let _ = SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, flags);
+        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
     }
     if let Err(error) = restore_alpha_blending(raw) {
         tracing::warn!(error = %error, "overlay alpha blending restoration failed");
@@ -219,7 +219,7 @@ fn restore_alpha_blending(raw: isize) -> windows::core::Result<()> {
     unsafe {
         let region = CreateRectRgn(0, 0, -1, -1);
         if region.0.is_null() {
-            return Err(windows::core::Error::from_win32());
+            return Err(windows::core::Error::from_thread());
         }
         let result = DwmEnableBlurBehindWindow(
             HWND(raw as *mut _),
@@ -250,7 +250,7 @@ pub fn show_noactivate(raw: isize) {
         // its extended styles were already correct while it was hidden.
         let _ = SetWindowPos(
             hwnd,
-            HWND_TOPMOST,
+            Some(HWND_TOPMOST),
             0,
             0,
             0,

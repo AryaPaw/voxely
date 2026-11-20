@@ -153,7 +153,7 @@ fn play_blocking(kind: CueKind) -> Result<(), AppError> {
     let config = device
         .default_output_config()
         .map_err(|e| AppError::AudioCaptureFailed(e.to_string()))?;
-    let sample_rate = config.sample_rate().0;
+    let sample_rate = config.sample_rate();
     let channels = config.channels() as usize;
     let samples = cue_samples(kind, sample_rate);
     let drain_ms = ((samples.len() as f64 / f64::from(sample_rate)) * 1000.0) as u64 + 80;
@@ -176,14 +176,14 @@ fn play_f32(
     config: cpal::StreamConfig,
     channels: usize,
     samples: Vec<f32>,
-    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+    err_fn: impl FnMut(cpal::Error) + Send + 'static,
     drain_ms: u64,
 ) -> Result<(), AppError> {
     use cpal::traits::{DeviceTrait, StreamTrait};
     let mut index = 0usize;
     let stream = device
         .build_output_stream(
-            &config,
+            config,
             move |data: &mut [f32], _| {
                 for frame in data.chunks_mut(channels) {
                     let value = samples.get(index).copied().unwrap_or(0.0);
@@ -207,14 +207,14 @@ fn play_i16(
     config: cpal::StreamConfig,
     channels: usize,
     samples: Vec<f32>,
-    err_fn: impl FnMut(cpal::StreamError) + Send + 'static,
+    err_fn: impl FnMut(cpal::Error) + Send + 'static,
     drain_ms: u64,
 ) -> Result<(), AppError> {
     use cpal::traits::{DeviceTrait, StreamTrait};
     let mut index = 0usize;
     let stream = device
         .build_output_stream(
-            &config,
+            config,
             move |data: &mut [i16], _| {
                 for frame in data.chunks_mut(channels) {
                     let value = samples.get(index).copied().unwrap_or(0.0);

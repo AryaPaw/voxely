@@ -1,8 +1,9 @@
 use crate::dsp::metrics::SAMPLE_RATE;
 use crate::error::AppError;
+use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{
-    FftFixedIn, Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+    Async, Fft, FixedAsync, FixedSync, Indexing, Resampler, SincInterpolationParameters,
+    SincInterpolationType, WindowFunction,
 };
 
 pub fn to_mono(frames: &[f32], channels: usize) -> Vec<f32> {
@@ -37,7 +38,7 @@ pub struct StreamResampler {
     output_rate: u32,
     input_frames: u64,
     output_frames: usize,
-    engine: Option<SincFixedIn<f32>>,
+    engine: Option<Async<f32>>,
     pending: Vec<f32>,
     delay_remaining: usize,
     finished: bool,
@@ -54,18 +55,19 @@ impl StreamResampler {
             None
         } else {
             Some(
-                SincFixedIn::<f32>::new(
+                Async::<f32>::new_sinc(
                     f64::from(output_rate) / f64::from(input_rate),
                     2.0,
-                    SincInterpolationParameters {
+                    &SincInterpolationParameters {
                         sinc_len: 128,
-                        f_cutoff: 0.95,
+                        f_cutoff: Some(0.95),
                         interpolation: SincInterpolationType::Linear,
                         oversampling_factor: 128,
                         window: WindowFunction::BlackmanHarris2,
                     },
                     512,
                     1,
+                    FixedAsync::Input,
                 )
                 .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))?,
             )
@@ -99,11 +101,9 @@ impl StreamResampler {
         let mut consumed = 0;
         while self.pending.len() - consumed >= engine.input_frames_next() {
             let needed = engine.input_frames_next();
-            let waves = engine
-                .process(&[&self.pending[consumed..consumed + needed]], None)
-                .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))?;
+            let waves = process_mono(engine, &self.pending[consumed..consumed + needed])?;
             consumed += needed;
-            append_aligned_output(&waves[0], &mut self.delay_remaining, &mut output);
+            append_aligned_output(&waves, &mut self.delay_remaining, &mut output);
         }
         self.pending.drain(..consumed);
         self.output_frames += output.len();
@@ -126,27 +126,34 @@ impl StreamResampler {
         let engine = self.engine.as_mut().expect("non-identity resampler");
         let mut output = Vec::new();
         if !self.pending.is_empty() {
-            let waves = engine
-                .process_partial(Some(&[self.pending.as_slice()]), None)
-                .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))?;
+            let waves = process_mono(engine, &self.pending)?;
             self.pending.clear();
-            append_aligned_output(&waves[0], &mut self.delay_remaining, &mut output);
+            append_aligned_output(&waves, &mut self.delay_remaining, &mut output);
         }
         while output.len() < remaining {
-            let waves = engine
-                .process_partial::<&[f32]>(None, None)
-                .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))?;
-            if waves[0].is_empty() {
+            let waves = process_mono(engine, &[])?;
+            if waves.is_empty() {
                 return Err(AppError::AudioProcessingFailed(
                     "resampler failed to flush".into(),
                 ));
             }
-            append_aligned_output(&waves[0], &mut self.delay_remaining, &mut output);
+            append_aligned_output(&waves, &mut self.delay_remaining, &mut output);
         }
         output.truncate(remaining);
         self.output_frames = expected;
         Ok(output)
     }
+}
+
+fn process_mono(engine: &mut impl Resampler<f32>, input: &[f32]) -> Result<Vec<f32>, AppError> {
+    let buffer = InterleavedSlice::new(input, 1, input.len())
+        .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))?;
+    let partial = (input.len() < engine.input_frames_next())
+        .then(|| Indexing::new().partial_len(input.len()));
+    engine
+        .process(&buffer, partial.as_ref())
+        .map(|output| output.take_data())
+        .map_err(|error| AppError::AudioProcessingFailed(error.to_string()))
 }
 
 fn append_aligned_output(samples: &[f32], delay: &mut usize, output: &mut Vec<f32>) {
@@ -165,36 +172,24 @@ pub fn resample_sinc(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f3
     let ratio = f64::from(output_rate) / f64::from(input_rate);
     let params = SincInterpolationParameters {
         sinc_len: 128,
-        f_cutoff: 0.95,
+        f_cutoff: Some(0.95),
         interpolation: SincInterpolationType::Linear,
         oversampling_factor: 128,
         window: WindowFunction::BlackmanHarris2,
     };
     let chunk = 1024.min(input.len().max(8));
-    let Ok(mut resampler) = SincFixedIn::<f32>::new(ratio, 2.0, params, chunk, 1) else {
+    let Ok(mut resampler) =
+        Async::<f32>::new_sinc(ratio, 2.0, &params, chunk, 1, FixedAsync::Input)
+    else {
         return resample_linear(input, input_rate, output_rate);
     };
-    let mut output = Vec::with_capacity(((input.len() as f64) * ratio).ceil() as usize + 16);
-    let mut offset = 0;
-    while offset < input.len() {
-        let needed = resampler.input_frames_next();
-        if offset + needed <= input.len() {
-            let chunk_in = &input[offset..offset + needed];
-            if let Ok(waves) = resampler.process(&[chunk_in], None) {
-                output.extend_from_slice(&waves[0]);
-            }
-            offset += needed;
-        } else {
-            let rest = &input[offset..];
-            if let Ok(waves) = resampler.process_partial(Some(&[rest]), None) {
-                output.extend_from_slice(&waves[0]);
-            }
-            break;
-        }
-    }
-    if let Ok(waves) = resampler.process_partial::<&[f32]>(None, None) {
-        output.extend_from_slice(&waves[0]);
-    }
+    let Ok(buffer) = InterleavedSlice::new(input, 1, input.len()) else {
+        return resample_linear(input, input_rate, output_rate);
+    };
+    let Ok(resampled) = resampler.process_all(&buffer, input.len(), None) else {
+        return resample_linear(input, input_rate, output_rate);
+    };
+    let mut output = resampled.take_data();
     let expected = ((input.len() as f64) * ratio).round().max(1.0) as usize;
     output.truncate(expected);
     output
@@ -208,9 +203,15 @@ pub fn resample_fft(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32
         return input.to_vec();
     }
     let chunk = 1024.min(input.len().max(8));
-    let Ok(mut resampler) =
-        FftFixedIn::<f32>::new(input_rate as usize, output_rate as usize, chunk, 2, 1)
-    else {
+    let Ok(mut resampler) = Fft::<f32>::new_custom(
+        input_rate as usize,
+        output_rate as usize,
+        chunk,
+        2,
+        1,
+        WindowFunction::BlackmanHarris2,
+        FixedSync::Input,
+    ) else {
         return resample_sinc(input, input_rate, output_rate);
     };
     let delay = resampler.output_delay();
@@ -222,20 +223,20 @@ pub fn resample_fft(input: &[f32], input_rate: u32, output_rate: u32) -> Vec<f32
         let needed = resampler.input_frames_next();
         if offset + needed <= input.len() {
             let chunk_in = &input[offset..offset + needed];
-            if let Ok(waves) = resampler.process(&[chunk_in], None) {
-                output.extend_from_slice(&waves[0]);
+            if let Ok(waves) = process_mono(&mut resampler, chunk_in) {
+                output.extend_from_slice(&waves);
             }
             offset += needed;
         } else {
             let rest = &input[offset..];
-            if let Ok(waves) = resampler.process_partial(Some(&[rest]), None) {
-                output.extend_from_slice(&waves[0]);
+            if let Ok(waves) = process_mono(&mut resampler, rest) {
+                output.extend_from_slice(&waves);
             }
             break;
         }
     }
-    if let Ok(waves) = resampler.process_partial::<&[f32]>(None, None) {
-        output.extend_from_slice(&waves[0]);
+    if let Ok(waves) = process_mono(&mut resampler, &[]) {
+        output.extend_from_slice(&waves);
     }
     let trimmed = if output.len() > delay {
         output.split_off(delay)
@@ -396,6 +397,16 @@ mod tests {
         assert_ne!(sinc, linear);
         assert_ne!(sinc, linear);
         assert_eq!(resample_sinc(&input, 16_000, 16_000), input);
+    }
+
+    #[test]
+    fn sinc_preserves_signal_at_the_end_of_the_clip() {
+        let mut input = vec![0.0; 4800];
+        input[4512..].fill(0.25);
+        let output = resample_sinc(&input, 48_000, 16_000);
+        assert_eq!(output.len(), 1600);
+        let tail = &output[1504..];
+        assert!(tail.iter().filter(|&&sample| sample > 0.20).count() >= 90);
     }
 
     #[test]
