@@ -1,11 +1,12 @@
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import type { AppSettings } from "../../../lib/api";
 import { messagesFor } from "../../../lib/i18n";
 import { TranscriptionSettings } from "./TranscriptionSettings";
 
 const invoke = vi.fn();
+let scrollIntoViewDescriptor: PropertyDescriptor | undefined;
 
 vi.mock("sonner", () => ({
   toast: { success: vi.fn(), error: vi.fn(), warning: vi.fn() },
@@ -20,8 +21,21 @@ vi.mock("@tauri-apps/api/core", () => ({
   convertFileSrc: (path: string) => path,
 }));
 
+beforeEach(() => {
+  scrollIntoViewDescriptor = Object.getOwnPropertyDescriptor(Element.prototype, "scrollIntoView");
+  Object.defineProperty(Element.prototype, "scrollIntoView", {
+    configurable: true,
+    value: vi.fn(),
+  });
+});
+
 afterEach(() => {
   cleanup();
+  if (scrollIntoViewDescriptor) {
+    Object.defineProperty(Element.prototype, "scrollIntoView", scrollIntoViewDescriptor);
+  } else {
+    Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+  }
   invoke.mockReset();
   vi.clearAllMocks();
 });
@@ -61,6 +75,50 @@ function settings(patch: Partial<AppSettings> = {}): AppSettings {
 }
 
 describe("TranscriptionSettings", () => {
+  it("keeps OpenAI credentials and connection checks separate from OpenRouter", async () => {
+    invoke.mockImplementation(async (command) =>
+      command === "discover_models" ? [] : "gpt-transcribe",
+    );
+    const copy = messagesFor("en");
+    const changed = vi.fn();
+    const openAiConfigured = vi.fn();
+    const props = {
+      copy,
+      keyConfigured: true,
+      onConfigured: vi.fn(),
+      onOpenAiConfigured: openAiConfigured,
+      onChange: changed,
+    };
+    const view = render(<TranscriptionSettings {...props} settings={settings()} />);
+    fireEvent.change(screen.getByLabelText(copy.apiKey, { selector: "input" }), {
+      target: { value: "fixture-openrouter" },
+    });
+    fireEvent.click(screen.getByRole("combobox", { name: copy.transcriptionProvider }));
+    fireEvent.click(await screen.findByRole("option", { name: copy.openAiDirect }));
+    expect(changed).toHaveBeenCalledWith({ transcriptionProvider: "openai" });
+    view.rerender(<TranscriptionSettings {...props} settings={settings()} providerPending />);
+    expect(screen.getByLabelText(copy.apiKey, { selector: "input" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: copy.replaceKey })).toBeDisabled();
+    expect(screen.getByRole("button", { name: copy.testConnection })).toBeDisabled();
+    view.rerender(
+      <TranscriptionSettings {...props} settings={settings({ transcriptionProvider: "openai" })} />,
+    );
+    expect(screen.getByLabelText(copy.apiKey, { selector: "input" })).toHaveValue("");
+    expect(screen.queryByRole("button", { name: copy.openRouterCatalog })).toBeNull();
+    fireEvent.change(screen.getByLabelText(copy.apiKey, { selector: "input" }), {
+      target: { value: "fixture-openai" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: copy.saveKey }));
+    await waitFor(() => expect(openAiConfigured).toHaveBeenCalledWith(true));
+    expect(invoke).toHaveBeenCalledWith("store_api_key", {
+      key: "fixture-openai",
+      provider: "openai",
+    });
+    expect(props.onConfigured).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: copy.testConnection }));
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("test_openai", undefined));
+  });
+
   it.each([
     ["extraAttempts", "additionalRetries", "3", "-1", 2],
     ["connectTimeout", "connectTimeoutMs", "10000", "7999", 8000],

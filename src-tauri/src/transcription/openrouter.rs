@@ -5,9 +5,11 @@ use std::time::{Duration, Instant};
 use crate::error::AppError;
 use crate::transcription::limits::MAX_MULTIPART_AUDIO_FILE_BYTES;
 use crate::transcription::retry::{
-    classify_http, classify_io, classify_reqwest, error_category, error_chain, parse_retry_after,
-    AttemptDecision, ClassifiedError, RetryClass, RetryPolicy, RetryScheduler,
+    classify_http, classify_http_status, classify_io, classify_reqwest, error_category,
+    error_chain, parse_retry_after, AttemptDecision, ClassifiedError, RetryClass, RetryPolicy,
+    RetryScheduler,
 };
+use crate::transcription::{TranscriptionProvider, OPENAI_MODEL};
 
 const DEFAULT_BASE: &str = "https://openrouter.ai/api/v1";
 
@@ -29,6 +31,7 @@ pub fn build_stt_client(connect_timeout: Duration) -> Result<reqwest::Client, Ap
     let mut builder = reqwest::Client::builder()
         .use_rustls_tls()
         .pool_max_idle_per_host(opts.pool_max_idle_per_host)
+        .redirect(reqwest::redirect::Policy::none())
         .connect_timeout(connect_timeout);
     if opts.http1_only {
         builder = builder.http1_only();
@@ -270,6 +273,35 @@ pub async fn transcribe_file_with_progress(
     policy: RetryPolicy,
     audio_duration: Duration,
     cancel: tokio::sync::watch::Receiver<bool>,
+    on_progress: impl FnMut(SttProgress) + Send,
+) -> Result<TranscriptionSuccess, AppError> {
+    transcribe_provider_file_with_progress(
+        client,
+        TranscriptionProvider::OpenRouter,
+        base_url,
+        api_key,
+        model,
+        language,
+        path,
+        policy,
+        audio_duration,
+        cancel,
+        on_progress,
+    )
+    .await
+}
+
+pub(crate) async fn transcribe_provider_file_with_progress(
+    client: &reqwest::Client,
+    provider: TranscriptionProvider,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    language: Option<&str>,
+    path: &Path,
+    policy: RetryPolicy,
+    audio_duration: Duration,
+    cancel: tokio::sync::watch::Receiver<bool>,
     mut on_progress: impl FnMut(SttProgress) + Send,
 ) -> Result<TranscriptionSuccess, AppError> {
     if !path.exists() {
@@ -306,6 +338,7 @@ pub async fn transcribe_file_with_progress(
                     _ = cancelled(&mut cancel) => None,
                     result = one_attempt(
                         client,
+                        provider,
                         base_url,
                         api_key,
                         model,
@@ -422,6 +455,7 @@ async fn wait_or_cancel(cancel: &mut tokio::sync::watch::Receiver<bool>, delay: 
 
 async fn one_attempt(
     client: &reqwest::Client,
+    provider: TranscriptionProvider,
     base_url: &str,
     api_key: &str,
     model: &str,
@@ -447,16 +481,24 @@ async fn one_attempt(
         .part("file", part);
     if let Some(lang) = language {
         if lang != "auto" {
-            form = form.text("language", lang.to_string());
+            let field = match provider {
+                TranscriptionProvider::OpenRouter => "language",
+                TranscriptionProvider::OpenAi => "languages[]",
+            };
+            form = form.text(field, lang.to_string());
         }
     }
     let url = format!("{}/audio/transcriptions", base_url.trim_end_matches('/'));
     let attempt_started = Instant::now();
-    let request = client
-        .post(url)
-        .bearer_auth(api_key)
-        .header("HTTP-Referer", crate::app::lifecycle::GITHUB_REPO_URL)
-        .header("X-Title", "Voxely")
+    let request = client.post(url).bearer_auth(api_key);
+    let request = if provider == TranscriptionProvider::OpenRouter {
+        request
+            .header("HTTP-Referer", crate::app::lifecycle::GITHUB_REPO_URL)
+            .header("X-Title", "Voxely")
+    } else {
+        request
+    };
+    let request = request
         .multipart(form)
         .timeout(timeout)
         .build()
@@ -516,7 +558,10 @@ async fn one_attempt(
     let body = String::from_utf8_lossy(&bytes);
     if !(200..300).contains(&status) {
         tracing::warn!(status, "stt http error");
-        return Err(classify_http(status, retry_after, &body));
+        return Err(match provider {
+            TranscriptionProvider::OpenRouter => classify_http(status, retry_after, &body),
+            TranscriptionProvider::OpenAi => classify_openai_http(status, retry_after, &body),
+        });
     }
     let parsed: serde_json::Value = serde_json::from_str(&body).map_err(|_| ClassifiedError {
         class: crate::transcription::retry::RetryClass::Terminal,
@@ -526,8 +571,10 @@ async fn one_attempt(
         cost_usd: None,
     })?;
     let usage = parsed.get("usage").cloned();
+    // Only OpenRouter provides a confirmed USD cost in the transcription response.
     let cost = usage
         .as_ref()
+        .filter(|_| provider == TranscriptionProvider::OpenRouter)
         .and_then(|u| u.get("cost"))
         .and_then(|v| v.as_f64())
         .filter(|cost| cost.is_finite() && *cost >= 0.0);
@@ -551,6 +598,52 @@ async fn one_attempt(
         attempt: 1,
         model: model.to_string(),
     })
+}
+
+fn classify_openai_http(status: u16, retry_after: Option<Duration>, body: &str) -> ClassifiedError {
+    if status == 429
+        && serde_json::from_str::<serde_json::Value>(body)
+            .ok()
+            .is_some_and(|value| value["error"]["code"] == "insufficient_quota")
+    {
+        return ClassifiedError {
+            class: RetryClass::Terminal,
+            error: AppError::QuotaExceeded,
+            http_status: Some(status),
+            retry_after: None,
+            cost_usd: None,
+        };
+    }
+    classify_http_status(status, retry_after)
+}
+
+pub(crate) async fn check_openai_model(
+    client: &reqwest::Client,
+    key: &str,
+) -> Result<String, AppError> {
+    let response = client
+        .get(format!(
+            "{}/models/{OPENAI_MODEL}",
+            TranscriptionProvider::OpenAi.base_url()
+        ))
+        .bearer_auth(key)
+        .timeout(Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|error| classify_reqwest(&error).error)?;
+    let status = response.status().as_u16();
+    if !response.status().is_success() {
+        return Err(classify_http(status, None, "").error);
+    }
+    let body = bounded_response_body(response, ERROR_BODY_LIMIT)
+        .await
+        .map_err(|_| AppError::ResponseMalformed)?;
+    let value: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|_| AppError::ResponseMalformed)?;
+    if value.get("id").and_then(serde_json::Value::as_str) != Some(OPENAI_MODEL) {
+        return Err(AppError::ResponseMalformed);
+    }
+    Ok(OPENAI_MODEL.into())
 }
 
 pub async fn list_transcription_models(
@@ -626,6 +719,101 @@ mod tests {
         let path = dir.join("a.wav");
         crate::audio::capture::write_pcm16_wav(&path, 48_000, &[0.1; 4800]).unwrap();
         path
+    }
+
+    #[tokio::test]
+    async fn openai_uses_only_its_contract_and_does_not_infer_cost() {
+        let server = MockServer::start_async().await;
+        let expected_body = "name=\"languages[]\"";
+        let service = server.mock(|when, then| {
+            when.method(POST)
+                .path("/v1/audio/transcriptions")
+                .header("authorization", "Bearer openai-fixture-key")
+                .matches(|request| {
+                    request.headers.iter().flatten().all(|(name, _)| {
+                        !name.eq_ignore_ascii_case("x-title")
+                            && !name.eq_ignore_ascii_case("http-referer")
+                    })
+                })
+                .body_contains(expected_body)
+                .body_contains(OPENAI_MODEL)
+                .body_contains("ru");
+            then.status(200).json_body(serde_json::json!({
+                "text": "Привет",
+                "usage": { "type": "tokens", "input_tokens": 12, "cost": 99.0 }
+            }));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = wav_fixture(dir.path());
+        let (_tx, rx) = tokio::sync::watch::channel(false);
+        let mut progress = Vec::new();
+        let result = transcribe_provider_file_with_progress(
+            &build_stt_client(Duration::from_secs(2)).unwrap(),
+            TranscriptionProvider::OpenAi,
+            &format!("{}/v1", server.base_url()),
+            "openai-fixture-key",
+            OPENAI_MODEL,
+            Some("ru"),
+            &path,
+            RetryPolicy::default(),
+            Duration::from_millis(100),
+            rx,
+            |event| progress.push(event),
+        )
+        .await
+        .unwrap();
+        service.assert();
+        assert_eq!(result.text, "Привет");
+        assert_eq!(result.cost, None);
+        assert!(result.usage_json.unwrap().contains("input_tokens"));
+        assert!(progress.iter().any(|event| matches!(
+            event,
+            SttProgress::Finished {
+                outcome: "success",
+                cost_usd: None,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn openai_quota_exhaustion_is_terminal_but_throttling_can_retry() {
+        let quota = classify_openai_http(429, None, r#"{"error":{"code":"insufficient_quota"}}"#);
+        assert_eq!(quota.class, RetryClass::Terminal);
+        assert_eq!(quota.error, AppError::QuotaExceeded);
+        let throttle = classify_openai_http(429, Some(Duration::from_secs(2)), "");
+        assert_eq!(throttle.class, RetryClass::Retryable);
+        assert_eq!(throttle.retry_after, Some(Duration::from_secs(2)));
+    }
+
+    #[tokio::test]
+    async fn transcription_transport_refuses_redirects() {
+        let server = MockServer::start_async().await;
+        let redirect = server.mock(|when, then| {
+            when.method(POST).path("/v1/audio/transcriptions");
+            then.status(303).header("location", "/unexpected");
+        });
+        let unexpected = server.mock(|when, then| {
+            when.path("/unexpected");
+            then.status(200).body("{}");
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let result = one_attempt(
+            &build_stt_client(Duration::from_secs(2)).unwrap(),
+            TranscriptionProvider::OpenAi,
+            &format!("{}/v1", server.base_url()),
+            "fixture-key",
+            OPENAI_MODEL,
+            None,
+            &wav_fixture(dir.path()),
+            Duration::from_secs(2),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(result.http_status, Some(303));
+        redirect.assert_hits(1);
+        unexpected.assert_hits(0);
     }
 
     #[test]
@@ -1102,6 +1290,7 @@ mod tests {
             let path = wav_fixture(dir.path());
             let error = one_attempt(
                 &reqwest::Client::new(),
+                TranscriptionProvider::OpenRouter,
                 &server.base_url(),
                 "test-key",
                 "vendor/model",
@@ -1234,6 +1423,7 @@ mod tests {
             });
             let result = one_attempt(
                 &reqwest::Client::new(),
+                TranscriptionProvider::OpenRouter,
                 &server.base_url(),
                 "fixture-key",
                 "model",

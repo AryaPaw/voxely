@@ -23,7 +23,9 @@ describe("FirstRunDisclosure", () => {
       />,
     );
 
-    expect(screen.getByText(/аудио в OpenRouter/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/аудио выбранному провайдеру.*по умолчанию выбран OpenRouter/i),
+    ).toBeInTheDocument();
     expect(screen.getByText(/3 дня.*5 ГБ/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Настройки хранения" }));
     expect(onOpenStorage).toHaveBeenCalledOnce();

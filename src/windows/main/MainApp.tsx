@@ -12,7 +12,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { toast } from "sonner";
 import { reportError } from "../../lib/system-notify";
-import { api, type AppSettings, type Recording } from "../../lib/api";
+import { api, type AppSettings, type Recording, type TranscriptionProvider } from "../../lib/api";
 import {
   acceptSavedSettings,
   nextWriteSeq,
@@ -60,6 +60,10 @@ export function MainApp() {
   const [history, setHistory] = useState<Recording[]>([]);
   const [section, setSection] = useState<Section>(() => sectionFromSearch(window.location.search));
   const [keyConfigured, setKeyConfigured] = useState(false);
+  const [openAiKeyConfigured, setOpenAiKeyConfigured] = useState(false);
+  const openAiKeyRead = useRef(0);
+  const [confirmedProvider, setConfirmedProvider] = useState<TranscriptionProvider>("openrouter");
+  const usesOpenAi = confirmedProvider === "openai";
   const [query, setQuery] = useState("");
   const [localBuild, setLocalBuild] = useState(false);
   const [version, setVersion] = useState("");
@@ -83,6 +87,7 @@ export function MainApp() {
   const acceptPersistedSettings = useCallback((saved: AppSettings) => {
     issuedSettingsSeqRef.current = Math.max(issuedSettingsSeqRef.current, saved.writeSeq ?? 0);
     persistedSettingsRef.current = acceptSavedSettings(persistedSettingsRef.current, saved);
+    setConfirmedProvider(persistedSettingsRef.current.transcriptionProvider ?? "openrouter");
     setSettings((prev) => acceptSavedSettings(prev, saved));
   }, []);
   const reserveSettingsWriteSeq = useCallback(() => {
@@ -282,26 +287,55 @@ export function MainApp() {
 
   useEffect(() => {
     let active = true;
-    void api
-      .keyConfigured()
-      .then((configured) => {
-        if (active) {
-          setKeyConfigured(configured);
-        }
-      })
-      .catch((error: unknown) => {
-        if (active) {
-          const locale = resolveUiLocale(
-            settingsRef.current?.uiLanguage ?? "auto",
-            navigator.language,
-          );
-          reportError(formatInvokeError(error, messagesFor(locale)));
-        }
-      });
+    let sequence = 0;
+    const refresh = () => {
+      const read = ++sequence;
+      void api
+        .keyConfigured()
+        .then((configured) => {
+          if (active && sequence === read) {
+            setKeyConfigured(configured);
+          }
+        })
+        .catch((error: unknown) => {
+          if (active && sequence === read) {
+            const locale = resolveUiLocale(
+              settingsRef.current?.uiLanguage ?? "auto",
+              navigator.language,
+            );
+            reportError(formatInvokeError(error, messagesFor(locale)));
+          }
+        });
+    };
+    const unlisten = listen("credentials://changed", refresh);
+    refresh();
     return () => {
       active = false;
+      void unlisten.then((stop) => stop());
     };
   }, []);
+
+  useEffect(() => {
+    if (!usesOpenAi) return;
+    let active = true;
+    const refresh = () => {
+      const read = ++openAiKeyRead.current;
+      void api
+        .keyConfigured("openai")
+        .then((configured) => {
+          if (active && read === openAiKeyRead.current) setOpenAiKeyConfigured(configured);
+        })
+        .catch(() => {
+          if (active && read === openAiKeyRead.current) setOpenAiKeyConfigured(false);
+        });
+    };
+    const unlisten = listen("credentials://changed", refresh);
+    refresh();
+    return () => {
+      active = false;
+      void unlisten.then((stop) => stop());
+    };
+  }, [usesOpenAi]);
 
   useEffect(() => {
     historyRequestIdRef.current += 1;
@@ -386,6 +420,7 @@ export function MainApp() {
         const persisted = await api.settings();
         persistedSettingsRef.current = acceptSavedSettings(persistedSettingsRef.current, persisted);
         const confirmed = persistedSettingsRef.current;
+        setConfirmedProvider(confirmed.transcriptionProvider ?? "openrouter");
         setSettings((prev) => reconcileFailedSettings(prev, seq, confirmed));
       } catch {
         setSettings((prev) =>
@@ -427,7 +462,7 @@ export function MainApp() {
             historyError={historyError}
             isLoadingMore={loadingMore}
             recovered={settingsRecovered}
-            keyConfigured={keyConfigured}
+            keyConfigured={usesOpenAi ? openAiKeyConfigured : keyConfigured}
             hotkey={settings.hotkey}
             onQuery={setQuery}
             onClearQuery={() => setQuery("")}
@@ -488,10 +523,18 @@ export function MainApp() {
             ) : null}
             {section === "transcription" ? (
               <TranscriptionSettings
-                settings={settings}
+                settings={{ ...settings, transcriptionProvider: confirmedProvider }}
+                providerPending={
+                  (settings.transcriptionProvider ?? "openrouter") !== confirmedProvider
+                }
                 copy={copy}
                 keyConfigured={keyConfigured}
                 onConfigured={setKeyConfigured}
+                openAiKeyConfigured={openAiKeyConfigured}
+                onOpenAiConfigured={(configured) => {
+                  openAiKeyRead.current++;
+                  setOpenAiKeyConfigured(configured);
+                }}
                 onChange={(patch) => void persist({ ...settings, ...patch })}
               />
             ) : null}
@@ -499,7 +542,11 @@ export function MainApp() {
               <HistorySettings
                 onSettingsReplaced={(next, wipeApiKey) => {
                   acceptPersistedSettings(next);
-                  if (wipeApiKey) setKeyConfigured(false);
+                  if (wipeApiKey) {
+                    openAiKeyRead.current++;
+                    setKeyConfigured(false);
+                    setOpenAiKeyConfigured(false);
+                  }
                 }}
                 settings={settings}
                 copy={copy}

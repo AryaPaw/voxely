@@ -103,6 +103,7 @@ mod tests {
     fn round_trip_preserves_user_settings_and_local_state() {
         let mut source = AppSettings::default();
         source.theme = "light".into();
+        source.transcription_provider = crate::transcription::TranscriptionProvider::OpenAi;
         source.accent_color = crate::settings::AccentColor {
             family: "rose".into(),
             shade: 600,
@@ -122,6 +123,7 @@ mod tests {
         current.storage_limit = "10gb".into();
         let result = import(&text, &current).unwrap();
         assert_eq!(result.theme, "light");
+        assert_eq!(result.transcription_provider, source.transcription_provider);
         assert_eq!(result.accent_color, source.accent_color);
         assert_eq!(result.presets, source.presets);
         assert_eq!(result.text_replacements, source.text_replacements);
@@ -144,6 +146,7 @@ mod tests {
             r#"{"format":"voxely-settings","version":1,"settings":{"apiKey":"secret"}}"#,
             r#"{"format":"voxely-settings","version":1,"settings":{"writeSeq":5}}"#,
             r#"{"format":"voxely-settings","version":1,"settings":{"theme":"bad"}}"#,
+            r#"{"format":"voxely-settings","version":1,"settings":{"transcriptionProvider":"unknown"}}"#,
             r#"{"format":"voxely-settings","version":1,"settings":{"hotkey":"invalid"}}"#,
             r#"{"format":"voxely-settings","version":1,"settings":{"presets":[]}}"#,
         ] {

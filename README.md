@@ -37,7 +37,7 @@
   <img src="docs/images/shot-history.png" alt="Voxely history with long and short dictations, search, and playback of full recordings or audio prepared for the API" width="100%" />
 </p>
 
-Voxely lives in the tray and inserts transcripts into your editor, messenger, or another app. Audio is processed locally, then sent to your chosen model through OpenRouter. Transcription requires an internet connection and your own OpenRouter API key.
+Voxely lives in the tray and inserts transcripts into your editor, messenger, or another app. After local audio processing, Voxely sends the recording to your selected transcription provider. Use OpenRouter or connect directly to OpenAI with a separate API key.
 
 ## Install
 
@@ -74,7 +74,7 @@ SmartScreen may warn about an unsigned installer. Tauri update signatures and Au
 
 ## Getting started
 
-1. Open **Transcription**, add your [OpenRouter API key](https://openrouter.ai/), and test the connection. Choose a model from the catalog or enter its ID.
+1. Open **Transcription**, choose a provider, and add its API key. [OpenRouter](https://openrouter.ai/) offers a model catalog and custom model IDs. [OpenAI direct](https://platform.openai.com/api-keys) uses `gpt-transcribe`. Test the connection before recording.
 2. Switch to your target app and press **Ctrl+Shift+Space**. Change the hotkey in **Recording and audio**.
 3. Speak. The HUD shows the audio level and recording time.
 4. Place the cursor in the destination field and press the hotkey again. Voxely transcribes your recording and inserts the text through Unicode input.
@@ -118,9 +118,9 @@ The chart and model breakdown further down the same page:
 
 ## Privacy
 
-- Your API key stays in Windows Credential Manager and isn't included in settings exports.
+- Each provider's API key stays in a separate Windows Credential Manager entry. Settings exports exclude credentials.
 - History and audio are stored locally in `%APPDATA%\Voxely`. Configure retention and storage limits in **Storage and data**.
-- Prepared audio is sent to OpenRouter and the selected provider for transcription. Speech recognition isn't fully offline.
+- New recordings go to the provider selected when recording starts. Retries use the provider shown on the history entry. Compare sends audio through OpenRouter.
 - Statistics are stored separately for up to 90 days and contain metadata without transcripts, audio, or file paths. Automatic history cleanup doesn't remove these metrics early. Manually deleting a dictation removes its metrics; clearing all history also clears statistics.
 
 Read more: [Security](docs/SECURITY.md), [OpenRouter](docs/OPENROUTER.md), [Diagnostics](docs/DIAGNOSTICS.md).

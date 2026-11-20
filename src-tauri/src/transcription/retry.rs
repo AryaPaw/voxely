@@ -229,9 +229,10 @@ pub fn transport_category(message: &str) -> TransportCategory {
 pub fn error_category(error: &AppError) -> &'static str {
     match error {
         AppError::RequestTimeout => TransportCategory::Timeout.as_str(),
-        AppError::RateLimited | AppError::ProviderUnavailable | AppError::OpenRouterServerError => {
-            TransportCategory::Http.as_str()
-        }
+        AppError::RateLimited
+        | AppError::QuotaExceeded
+        | AppError::ProviderUnavailable
+        | AppError::OpenRouterServerError => TransportCategory::Http.as_str(),
         AppError::ConnectionFailed(message) => transport_category(message).as_str(),
         AppError::NetworkUnavailable => TransportCategory::Other.as_str(),
         _ => TransportCategory::Other.as_str(),

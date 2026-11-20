@@ -36,9 +36,10 @@ use crate::history::retention::{
 };
 use crate::settings::AppSettings;
 use crate::transcription::openrouter::{
-    transcribe_file_with_progress, OpenRouterTransport, SttProgress,
+    transcribe_provider_file_with_progress, OpenRouterTransport, SttProgress,
 };
-use crate::windows_int::credentials::get_api_key;
+use crate::transcription::TranscriptionProvider;
+use crate::windows_int::credentials::get_provider_key;
 use crate::windows_int::overlay::{work_area_for_cursor, work_area_for_hwnd};
 use crate::windows_int::text_injector::{
     insert_outcome_event, insert_should_abort, insert_transcript_now, native, CapturedTarget,
@@ -1011,7 +1012,9 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     let settings = ctx.settings.lock().clone();
     let id = uuid::Uuid::new_v4().to_string();
     let dest = audio_dir(&ctx.data_dir).join(format!("{id}.raw.wav"));
-    let mut rec = new_recording(settings.model.clone());
+    let provider = settings.transcription_provider;
+    let mut rec = new_recording(provider.model(&settings.model).into());
+    rec.provider = provider.id().into();
     rec.id = id.clone();
     rec.raw_audio_path = Some(format!("{id}.raw.wav"));
     rec.status = RecordingStatus::Processing;
@@ -1411,6 +1414,9 @@ fn auto_stop_finished_capture(app: &AppHandle) {
 }
 
 fn spawn_openrouter_prewarm(ctx: &AppContext) {
+    if ctx.settings.lock().transcription_provider != TranscriptionProvider::OpenRouter {
+        return;
+    }
     let Ok(client) = ctx.clone_transport_client() else {
         return;
     };
@@ -1827,7 +1833,8 @@ async fn process_and_transcribe_inner(
         rec
     };
 
-    let key = match get_api_key()? {
+    let provider = TranscriptionProvider::from_recording(&rec.provider)?;
+    let key = match get_provider_key(provider)? {
         Some(key) => key,
         None => {
             rec.status = RecordingStatus::Failed;
@@ -1844,7 +1851,7 @@ async fn process_and_transcribe_inner(
     } else {
         Some(settings.language.as_str())
     };
-    rec.model = settings.model.clone();
+    rec.model = provider.model(&settings.model).into();
     rec.request_started_at = Some(chrono::Utc::now());
     persist_live_recording(&ctx, started_generation, &rx, &rec)?;
     ctx.emit_history(app);
@@ -1867,8 +1874,9 @@ async fn process_and_transcribe_inner(
     let transcribed = run_transcription(
         app,
         recording_id,
+        provider,
         &key,
-        &settings.model,
+        &rec.model,
         language,
         &stt_path,
         settings.retry.to_policy(),
@@ -3014,6 +3022,7 @@ fn preserve_transcription_result(
 async fn run_transcription(
     app: &AppHandle,
     recording_id: &str,
+    provider: TranscriptionProvider,
     api_key: &str,
     model: &str,
     language: Option<&str>,
@@ -3035,9 +3044,10 @@ async fn run_transcription(
     let app_for_progress = app.clone();
     let persistence_error = Arc::new(Mutex::new(None));
     let persistence_error_for_callback = Arc::clone(&persistence_error);
-    let result = transcribe_file_with_progress(
+    let result = transcribe_provider_file_with_progress(
         &client,
-        crate::transcription::openrouter::default_base_url(),
+        provider,
+        provider.base_url(),
         api_key,
         model,
         language,
@@ -3505,6 +3515,7 @@ async fn manual_retry_inner(
     if !can_retry_from_history(&rec) {
         return Err(AppError::StorageFailed("audio missing".into()));
     }
+    let provider = TranscriptionProvider::from_recording(&rec.provider)?;
     let mut staged_processed = None;
     let processed_path = if reprocess_original {
         let raw_path = rec
@@ -3559,7 +3570,7 @@ async fn manual_retry_inner(
         }
         return Err(AppError::Cancelled);
     }
-    let key = match get_api_key().and_then(|key| key.ok_or(AppError::InvalidApiKey)) {
+    let key = match get_provider_key(provider).and_then(|key| key.ok_or(AppError::InvalidApiKey)) {
         Ok(key) => key,
         Err(err) => {
             if let Some(path) = staged_processed.as_deref() {
@@ -3610,7 +3621,7 @@ async fn manual_retry_inner(
         }
         return Err(AppError::Cancelled);
     }
-    rec.model = settings.model.clone();
+    rec.model = provider.model(&settings.model).into();
     if let Err(err) = persist_retry_processing(ctx.inner(), &mut rec) {
         remove_capture_artifacts(&stt_path);
         if let Some(path) = staged_processed.as_deref() {
@@ -3623,8 +3634,9 @@ async fn manual_retry_inner(
     let transcribed = run_transcription(
         app,
         recording_id,
+        provider,
         &key,
-        &settings.model,
+        &rec.model,
         language,
         &stt_path,
         settings.retry.to_policy(),
@@ -3642,7 +3654,6 @@ async fn manual_retry_inner(
     let failure = match transcribed {
         Ok(success) => {
             rec.status = RecordingStatus::Completed;
-            rec.model = settings.model.clone();
             rec.transcript = Some(crate::text_replacements::apply_text_replacements(
                 success.text,
                 &settings.text_replacements,

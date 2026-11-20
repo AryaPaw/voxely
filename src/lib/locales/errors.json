@@ -10,6 +10,7 @@
   "ConnectionFailed": "errConnection",
   "RequestTimeout": "errTimeout",
   "RateLimited": "errRateLimited",
+  "QuotaExceeded": "errQuotaExceeded",
   "ProviderUnavailable": "errProvider",
   "OpenRouterServerError": "errServer",
   "ResponseMalformed": "errMalformed",

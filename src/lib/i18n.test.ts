@@ -142,7 +142,7 @@ describe("messagesFor", () => {
       "Расшифровка уже идёт",
     );
     expect(formatInvokeError({ code: "InvalidApiKey" }, messagesFor("en"))).toBe(
-      "OpenRouter API key is missing",
+      "The provider API key is missing or invalid",
     );
     expect(statusToast("error", messagesFor("en"), messagesFor("en").openSettingsFailed)).toBe(
       "Error: Could not open the settings folder",

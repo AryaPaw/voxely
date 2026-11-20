@@ -29,7 +29,7 @@ const cases: Array<[SessionState, string]> = [
   [{ kind: "completed" }, ""],
   [
     { kind: "failed", message: "Нет API-ключа OpenRouter", code: "InvalidApiKey" },
-    "Нет API-ключа OpenRouter",
+    "API-ключ провайдера отсутствует или недействителен",
   ],
 ];
 
@@ -51,7 +51,7 @@ describe("overlayLabel", () => {
 
   it("maps error codes on failed overlay labels", () => {
     expect(overlayLabel({ kind: "failed", message: "legacy", code: "InvalidApiKey" })).toBe(
-      "Нет API-ключа OpenRouter",
+      "API-ключ провайдера отсутствует или недействителен",
     );
   });
 });

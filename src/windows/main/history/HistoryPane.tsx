@@ -382,6 +382,12 @@ export function HistoryCard({
     });
   // Exact minutes omit seconds, so their label isn't the widest possible one.
   const durationWidthSample = duration(Math.floor(item.durationMs / 60_000) * 60_000 + 59_000);
+  const providerName =
+    item.provider === "openai"
+      ? copy.openAiDirect
+      : item.provider === "openrouter"
+        ? "OpenRouter"
+        : item.provider;
 
   return (
     <article className="history-card">
@@ -390,6 +396,14 @@ export function HistoryCard({
           {formatTime(item.createdAt, copy.dateLocale)}
           <span className="mx-2 opacity-50">|</span>
           {duration(item.durationMs)}
+          {providerName && (
+            <>
+              <span className="mx-2 opacity-50" aria-hidden="true">
+                |
+              </span>
+              {providerName}
+            </>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           {item.transcript ? (

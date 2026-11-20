@@ -22,6 +22,8 @@ pub struct AppSettings {
     pub accent_color: AccentColor,
     pub language: String,
     pub model: String,
+    #[serde(default)]
+    pub transcription_provider: crate::transcription::TranscriptionProvider,
     pub custom_model: Option<String>,
     pub insertion_mode: String,
     pub retention: String,
@@ -179,6 +181,7 @@ impl Default for AppSettings {
             accent_color: AccentColor::default(),
             language: "auto".into(),
             model: "openai/gpt-transcribe".into(),
+            transcription_provider: Default::default(),
             custom_model: None,
             insertion_mode: "unicode".into(),
             retention: "3d".into(),

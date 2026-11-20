@@ -14,6 +14,7 @@ use crate::error::AppError;
 use crate::history::repository::Recording;
 use crate::settings::{validate_settings_graph, AppSettings};
 use crate::transcription::openrouter::{list_transcription_models, SttModel};
+use crate::transcription::TranscriptionProvider;
 use crate::windows_int::credentials::{delete_api_key, has_api_key, set_api_key};
 use crate::windows_int::text_injector::native;
 use std::path::Path;
@@ -1047,16 +1048,28 @@ pub fn show_system_notification(
 }
 
 #[tauri::command]
-pub fn api_key_configured() -> bool {
-    has_api_key()
+pub fn api_key_configured(provider: Option<TranscriptionProvider>) -> bool {
+    has_api_key(provider.unwrap_or_default())
 }
 
 #[tauri::command]
-pub fn store_api_key(app: AppHandle, key: String) -> Result<bool, AppError> {
-    if key.trim().len() < 8 {
+pub fn store_api_key(
+    app: AppHandle,
+    key: String,
+    provider: Option<TranscriptionProvider>,
+) -> Result<bool, AppError> {
+    let provider = provider.unwrap_or_default();
+    let key_value = key.trim();
+    let wrong_provider = match provider {
+        TranscriptionProvider::OpenAi => key_value.starts_with("sk-or-"),
+        TranscriptionProvider::OpenRouter => {
+            key_value.starts_with("sk-proj-") || key_value.starts_with("sk-svcacct-")
+        }
+    };
+    if key_value.len() < 8 || wrong_provider {
         return Err(AppError::InvalidApiKey);
     }
-    set_api_key(&key)?;
+    set_api_key(provider, &key)?;
     let _ = app.emit("credentials://changed", ());
     Ok(true)
 }
@@ -1071,6 +1084,13 @@ pub async fn test_openrouter(ctx: State<'_, Arc<AppContext>>) -> Result<String, 
         &models,
     )?;
     Ok(selected_model)
+}
+
+#[tauri::command]
+pub async fn test_openai(ctx: State<'_, Arc<AppContext>>) -> Result<String, AppError> {
+    let key = crate::windows_int::credentials::get_provider_key(TranscriptionProvider::OpenAi)?
+        .ok_or(AppError::InvalidApiKey)?;
+    crate::transcription::openrouter::check_openai_model(&ctx.clone_transport_client()?, &key).await
 }
 
 #[tauri::command]
@@ -1149,8 +1169,11 @@ pub fn reset_settings(
     wipe_api_key: bool,
 ) -> Result<AppSettings, AppError> {
     if wipe_api_key {
-        delete_api_key()?;
+        let openrouter = delete_api_key(TranscriptionProvider::OpenRouter);
+        let openai = delete_api_key(TranscriptionProvider::OpenAi);
         let _ = app.emit("credentials://changed", ());
+        openrouter?;
+        openai?;
     }
     let keep_first_run = !wipe_api_key && ctx.settings.lock().first_run_complete;
     let current = ctx.settings.lock().clone();

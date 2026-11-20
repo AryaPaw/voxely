@@ -164,7 +164,10 @@ export interface DspPreview {
   nonce: number;
 }
 
+export type TranscriptionProvider = "openrouter" | "openai";
+
 export interface AppSettings {
+  transcriptionProvider?: TranscriptionProvider;
   hotkey: string;
   startWithWindows: boolean;
   closeToTray: boolean;
@@ -307,9 +310,12 @@ export const api = {
   stopFilterSample: () => ipc<DspPreview>("stop_filter_sample"),
   checkForUpdates: () => ipc<UpdateOutcome>("check_for_updates"),
   installUpdate: () => ipc<UpdateOutcome>("install_update"),
-  keyConfigured: () => ipc<boolean>("api_key_configured"),
-  storeKey: (key: string) => ipc<boolean>("store_api_key", { key }),
-  testConnection: () => ipc<string>("test_openrouter"),
+  keyConfigured: (provider?: TranscriptionProvider) =>
+    ipc<boolean>("api_key_configured", provider ? { provider } : undefined),
+  storeKey: (key: string, provider?: TranscriptionProvider) =>
+    ipc<boolean>("store_api_key", provider ? { key, provider } : { key }),
+  testConnection: (provider?: TranscriptionProvider) =>
+    ipc<string>(provider === "openai" ? "test_openai" : "test_openrouter"),
   models: () => ipc<Array<{ id: string; name: string }>>("discover_models"),
   toggle: () => ipc<void>("toggle_dictation"),
   cancel: () => ipc<void>("cancel_dictation"),

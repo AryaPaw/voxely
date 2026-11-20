@@ -1,21 +1,25 @@
 use crate::error::AppError;
+use crate::transcription::TranscriptionProvider;
 
 const SERVICE: &str = "com.voxely.desktop";
-const USER: &str = "openrouter-api-key";
+fn entry(provider: TranscriptionProvider) -> Result<keyring::Entry, AppError> {
+    keyring::Entry::new(SERVICE, &format!("{}-api-key", provider.id()))
+        .map_err(|e| AppError::StorageFailed(e.to_string()))
+}
 
-pub fn set_api_key(key: &str) -> Result<(), AppError> {
-    let entry =
-        keyring::Entry::new(SERVICE, USER).map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    entry
+pub fn set_api_key(provider: TranscriptionProvider, key: &str) -> Result<(), AppError> {
+    entry(provider)?
         .set_password(key.trim())
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
     Ok(())
 }
 
 pub fn get_api_key() -> Result<Option<String>, AppError> {
-    let entry =
-        keyring::Entry::new(SERVICE, USER).map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    match entry.get_password() {
+    get_provider_key(TranscriptionProvider::OpenRouter)
+}
+
+pub fn get_provider_key(provider: TranscriptionProvider) -> Result<Option<String>, AppError> {
+    match entry(provider)?.get_password() {
         Ok(value) if !value.is_empty() => Ok(Some(value)),
         Ok(_) => Ok(None),
         Err(keyring::Error::NoEntry) => Ok(None),
@@ -23,14 +27,12 @@ pub fn get_api_key() -> Result<Option<String>, AppError> {
     }
 }
 
-pub fn has_api_key() -> bool {
-    matches!(get_api_key(), Ok(Some(_)))
+pub fn has_api_key(provider: TranscriptionProvider) -> bool {
+    matches!(get_provider_key(provider), Ok(Some(_)))
 }
 
-pub fn delete_api_key() -> Result<(), AppError> {
-    let entry =
-        keyring::Entry::new(SERVICE, USER).map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    match entry.delete_credential() {
+pub fn delete_api_key(provider: TranscriptionProvider) -> Result<(), AppError> {
+    match entry(provider)?.delete_credential() {
         Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
         Err(e) => Err(AppError::StorageFailed(e.to_string())),
     }

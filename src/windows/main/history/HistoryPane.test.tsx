@@ -580,7 +580,9 @@ describe("HistoryPane", () => {
       />,
     );
     expect(screen.getByText(/120 мс/)).toBeInTheDocument();
-    expect(screen.getByText("Нет API-ключа OpenRouter")).toBeInTheDocument();
+    expect(
+      screen.getByText("API-ключ провайдера отсутствует или недействителен"),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Сведения" }));
   });
 

@@ -75,6 +75,7 @@ fn main() {
                 "api_key_configured",
                 "store_api_key",
                 "test_openrouter",
+                "test_openai",
                 "discover_models",
                 "toggle_dictation",
                 "retry_recording",

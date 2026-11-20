@@ -47,6 +47,7 @@
     "allow-api-key-configured",
     "allow-store-api-key",
     "allow-test-openrouter",
+    "allow-test-openai",
     "allow-discover-models",
     "allow-toggle-dictation",
     "allow-retry-recording",

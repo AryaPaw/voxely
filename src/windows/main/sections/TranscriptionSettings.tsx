@@ -71,16 +71,28 @@ export function TranscriptionSettings({
   copy,
   keyConfigured,
   onConfigured,
+  openAiKeyConfigured = false,
+  onOpenAiConfigured,
+  providerPending = false,
   onChange,
 }: {
   settings: AppSettings;
   copy: Messages;
   keyConfigured: boolean;
   onConfigured: (value: boolean) => void;
+  openAiKeyConfigured?: boolean;
+  onOpenAiConfigured?: (value: boolean) => void;
+  providerPending?: boolean;
   onChange: (patch: Partial<AppSettings>) => void;
 }) {
   const keyInputId = useId();
-  const [keyDraft, setKeyDraft] = useState("");
+  const provider = settings.transcriptionProvider ?? "openrouter";
+  const direct = provider === "openai";
+  const configured = direct ? openAiKeyConfigured : keyConfigured;
+  const [keyDrafts, setKeyDrafts] = useState({ openrouter: "", openai: "" });
+  const keyDraft = keyDrafts[provider];
+  const setKeyDraft = (value: string) =>
+    setKeyDrafts((drafts) => ({ ...drafts, [provider]: value }));
   const [catalog, setCatalog] = useState<Array<{ id: string; name: string }>>([]);
   const [catalogError, setCatalogError] = useState(false);
   const [catalogRevision, setCatalogRevision] = useState(0);
@@ -129,6 +141,7 @@ export function TranscriptionSettings({
   }, [settings.retry.totalOperationTimeoutMs]);
 
   useEffect(() => {
+    if (direct) return;
     let cancelled = false;
     setCatalog([]);
     setCatalogError(false);
@@ -148,12 +161,32 @@ export function TranscriptionSettings({
     return () => {
       cancelled = true;
     };
-  }, [keyConfigured, catalogRevision]);
+  }, [direct, keyConfigured, catalogRevision]);
 
   return (
     <div>
       <PageHeader icon={SECTION_ICONS.transcription} title={copy.navTranscription} />
       <SettingsGroup title={copy.settingsConnection}>
+        <SettingsField
+          label={copy.transcriptionProvider}
+          description={
+            providerPending ? copy.transcriptionProviderSaving : copy.transcriptionProviderHint
+          }
+        >
+          <SimpleSelect
+            aria-label={copy.transcriptionProvider}
+            value={provider}
+            disabled={providerPending}
+            onValueChange={(value) => {
+              if (value === "openai" || value === "openrouter")
+                onChange({ transcriptionProvider: value });
+            }}
+            options={[
+              { value: "openrouter", label: "OpenRouter" },
+              { value: "openai", label: copy.openAiDirect },
+            ]}
+          />
+        </SettingsField>
         <div className="settings-field" role="group" aria-labelledby={`${keyInputId}-label`}>
           <label
             id={`${keyInputId}-label`}
@@ -167,18 +200,25 @@ export function TranscriptionSettings({
               id={keyInputId}
               aria-describedby={`${keyInputId}-hint`}
               type="password"
+              disabled={providerPending}
               value={keyDraft}
               autoComplete="off"
-              placeholder={keyConfigured ? copy.replaceKey : "sk-or-…"}
+              placeholder={configured ? copy.replaceKey : direct ? "sk-…" : "sk-or-…"}
               onChange={(event) => setKeyDraft(event.target.value)}
             />
             <div className="flex flex-wrap gap-2">
               <Button
+                disabled={providerPending}
                 onClick={async () => {
                   try {
-                    await api.storeKey(keyDraft);
-                    onConfigured(true);
-                    setCatalogRevision((revision) => revision + 1);
+                    if (direct) {
+                      await api.storeKey(keyDraft, "openai");
+                      onOpenAiConfigured?.(true);
+                    } else {
+                      await api.storeKey(keyDraft);
+                      onConfigured(true);
+                      setCatalogRevision((revision) => revision + 1);
+                    }
                     setKeyDraft("");
                     toast.success(copy.keySavedToast);
                   } catch (error) {
@@ -186,14 +226,18 @@ export function TranscriptionSettings({
                   }
                 }}
               >
-                {keyConfigured ? copy.replaceKey : copy.saveKey}
+                {configured ? copy.replaceKey : copy.saveKey}
               </Button>
               <Button
                 variant="outline"
+                disabled={providerPending}
                 onClick={async () => {
                   try {
-                    const model = await api.testConnection();
-                    toast.success(copy.modelAvailable.replace("{model}", model));
+                    const model = direct
+                      ? await api.testConnection("openai")
+                      : await api.testConnection();
+                    const message = direct ? copy.openAiModelCheckSuccess : copy.modelAvailable;
+                    toast.success(message.replace("{model}", model));
                   } catch (error) {
                     reportError(formatInvokeError(error, copy));
                   }
@@ -203,59 +247,72 @@ export function TranscriptionSettings({
               </Button>
             </div>
             <p id={`${keyInputId}-hint`} className="text-xs text-muted-foreground">
-              {copy.apiKeyHint} {keyConfigured ? copy.keySaved : copy.keyMissing}.
+              {copy.apiKeyHint} {configured ? copy.keySaved : copy.keyMissing}.
+              {direct ? ` ${copy.openAiModelCheckHint}` : ""}
             </p>
           </div>
         </div>
       </SettingsGroup>
       <SettingsGroup title={copy.navTranscription}>
-        <SettingsField label={copy.settingsModelCatalog} action>
-          <Button type="button" variant="outline" onClick={() => void api.openOpenrouterModels()}>
-            {copy.openRouterCatalog}
-            <ExternalLink aria-hidden="true" />
-          </Button>
-        </SettingsField>
-        <SettingsField
-          label={copy.modelLabel}
-          description={
-            <>
-              {copy.modelIdHint}
-              {catalogError ? ` ${copy.catalogUnavailable}` : ""}
-            </>
-          }
-        >
-          <Input
-            aria-label={copy.modelLabel}
-            value={modelDraft}
-            spellCheck={false}
-            autoComplete="off"
-            placeholder="openai/gpt-transcribe"
-            aria-invalid={!modelDraft.trim()}
-            onChange={(event) => setModelDraft(event.target.value)}
-            onBlur={() => {
-              const next = modelDraft.trim();
-              if (!next) {
-                setModelDraft(settings.model);
-                reportError(copy.modelRequired);
-                return;
-              }
-              onChange({ model: next, customModel: next });
-            }}
-          />
-        </SettingsField>
-        {catalog.length > 0 ? (
-          <SettingsField label={copy.catalogHint}>
-            <SimpleSelect
-              aria-label={copy.catalogHint}
-              value={catalogValue}
-              onValueChange={(value) => {
-                setModelDraft(value);
-                onChange({ model: value, customModel: value });
-              }}
-              options={catalogOptions}
-            />
+        {direct ? (
+          <SettingsField label={copy.modelLabel} action>
+            <p className="text-sm">gpt-transcribe</p>
           </SettingsField>
-        ) : null}
+        ) : (
+          <>
+            <SettingsField label={copy.settingsModelCatalog} action>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => void api.openOpenrouterModels()}
+              >
+                {copy.openRouterCatalog}
+                <ExternalLink aria-hidden="true" />
+              </Button>
+            </SettingsField>
+            <SettingsField
+              label={copy.modelLabel}
+              description={
+                <>
+                  {copy.modelIdHint}
+                  {catalogError ? ` ${copy.catalogUnavailable}` : ""}
+                </>
+              }
+            >
+              <Input
+                aria-label={copy.modelLabel}
+                value={modelDraft}
+                spellCheck={false}
+                autoComplete="off"
+                placeholder="openai/gpt-transcribe"
+                aria-invalid={!modelDraft.trim()}
+                onChange={(event) => setModelDraft(event.target.value)}
+                onBlur={() => {
+                  const next = modelDraft.trim();
+                  if (!next) {
+                    setModelDraft(settings.model);
+                    reportError(copy.modelRequired);
+                    return;
+                  }
+                  onChange({ model: next, customModel: next });
+                }}
+              />
+            </SettingsField>
+            {catalog.length > 0 ? (
+              <SettingsField label={copy.catalogHint}>
+                <SimpleSelect
+                  aria-label={copy.catalogHint}
+                  value={catalogValue}
+                  onValueChange={(value) => {
+                    setModelDraft(value);
+                    onChange({ model: value, customModel: value });
+                  }}
+                  options={catalogOptions}
+                />
+              </SettingsField>
+            ) : null}
+          </>
+        )}
         <SettingsField label={copy.language} description={copy.speechLanguageHint}>
           <SimpleSelect
             aria-label={copy.language}
