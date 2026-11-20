@@ -21,25 +21,22 @@ jobs:
   verify:
     uses: ./.github/workflows/verify.yml
 
-  publish:
+  bundle:
     needs: verify
     runs-on: windows-2022
     timeout-minutes: 75
     outputs:
       version: ${{ steps.ver.outputs.version }}
+      artifact_id: ${{ steps.archive.outputs.artifact-id }}
+      fingerprint: ${{ steps.fingerprint.outputs.fingerprint }}
     permissions:
-      contents: write
+      contents: read
       id-token: write
       attestations: write
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.sha }}
-      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
-        with:
-          bun-version: 1.4.5
-      - name: Install repository Rust toolchain
-        run: rustup toolchain install --no-self-update
       - name: Resolve version
         id: ver
         shell: pwsh
@@ -57,19 +54,24 @@ jobs:
           }
           if ($version -notmatch '^\d+\.\d+\.\d+$') { throw "Version must be X.Y.Z" }
           echo "version=$version" >> $env:GITHUB_OUTPUT
-      - name: Build date from CI
-        shell: pwsh
-        run: echo "VOXELY_BUILD_DATE=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))" >> $env:GITHUB_ENV
       - name: Version SSOT
         shell: pwsh
         run: ./scripts/check-version.ps1 -Expected "${{ steps.ver.outputs.version }}"
-      - name: Verify release identity
+      - name: Verify release identity and eligibility for a fresh build
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CANDIDATE_SHA: ${{ github.sha }}
           RELEASE_VERSION: ${{ steps.ver.outputs.version }}
         run: ./scripts/publish-release.ps1 -Mode preflight -Version $env:RELEASE_VERSION -CandidateSha $env:CANDIDATE_SHA
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.4.5
+      - name: Install repository Rust toolchain
+        run: rustup toolchain install --no-self-update
+      - name: Build date from CI
+        shell: pwsh
+        run: echo "VOXELY_BUILD_DATE=$((Get-Date).ToUniversalTime().ToString('yyyy-MM-dd'))" >> $env:GITHUB_ENV
       - name: Install frontend
         run: bun install --frozen-lockfile
       - name: Build signed NSIS
@@ -87,10 +89,9 @@ jobs:
         shell: pwsh
         run: |
           $nsis = "src-tauri/target/release/bundle/nsis"
-          $exe = Get-ChildItem $nsis -Filter "*-setup.exe" | Select-Object -First 1
-          if (-not $exe) { throw "NSIS installer not found" }
-          $sig = (Get-Content -Raw "$($exe.FullName).sig").Trim()
           $version = "${{ steps.ver.outputs.version }}"
+          $exe = Get-Item (Join-Path $nsis "Voxely_${version}_x64-setup.exe") -ErrorAction Stop
+          $sig = (Get-Content -Raw "$($exe.FullName).sig").Trim()
           $manifest = [ordered]@{
             version = $version
             notes = ""
@@ -106,20 +107,70 @@ jobs:
             (Join-Path $nsis "latest.json"),
             ($manifest | ConvertTo-Json -Compress -Depth 5)
           )
-      - name: List NSIS artifacts
+      - name: Record signed bundle SHA-256 checksums
+        id: fingerprint
         shell: pwsh
-        run: Get-ChildItem "src-tauri/target/release/bundle/nsis" | Format-Table Name, Length
+        env:
+          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
+        run: ./scripts/publish-release.ps1 -Mode fingerprint -Version $env:RELEASE_VERSION -CandidateSha $env:GITHUB_SHA
+      - name: Attest artifacts
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-path: |
+            src-tauri/target/release/bundle/nsis/Voxely_${{ steps.ver.outputs.version }}_x64-setup.exe
+            src-tauri/target/release/bundle/nsis/Voxely_${{ steps.ver.outputs.version }}_x64-setup.exe.sig
+            src-tauri/target/release/bundle/nsis/latest.json
+      - name: Save signed release bundle before publication
+        id: archive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: voxely-release-v${{ steps.ver.outputs.version }}-attempt-${{ github.run_attempt }}
+          path: |
+            src-tauri/target/release/bundle/nsis/Voxely_${{ steps.ver.outputs.version }}_x64-setup.exe
+            src-tauri/target/release/bundle/nsis/Voxely_${{ steps.ver.outputs.version }}_x64-setup.exe.sig
+            src-tauri/target/release/bundle/nsis/latest.json
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+  publish:
+    needs: bundle
+    runs-on: windows-2022
+    timeout-minutes: 20
+    outputs:
+      version: ${{ needs.bundle.outputs.version }}
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+      - name: Require saved bundle identity
+        shell: pwsh
+        env:
+          BUNDLE_ID: ${{ needs.bundle.outputs.artifact_id }}
+          BUNDLE_FINGERPRINT: ${{ needs.bundle.outputs.fingerprint }}
+        run: |
+          if ($env:BUNDLE_ID -notmatch '^[1-9]\d*$' -or $env:BUNDLE_FINGERPRINT -notmatch '^[a-f0-9]{192}$') {
+            throw 'Missing artifact ID or checksums from the successful signed bundle job.'
+          }
+      - name: Restore signed release bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          artifact-ids: ${{ needs.bundle.outputs.artifact_id }}
+          github-token: ${{ github.token }}
+          run-id: ${{ github.run_id }}
+          merge-multiple: true
+          path: src-tauri/target/release/bundle/nsis
       - name: Publish release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CANDIDATE_SHA: ${{ github.sha }}
-          RELEASE_VERSION: ${{ steps.ver.outputs.version }}
-        run: ./scripts/publish-release.ps1 -Mode publish -Version $env:RELEASE_VERSION -CandidateSha $env:CANDIDATE_SHA
-      - name: Attest artifacts
-        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
-        with:
-          subject-path: src-tauri/target/release/bundle/nsis/*
+          RELEASE_VERSION: ${{ needs.bundle.outputs.version }}
+          BUNDLE_FINGERPRINT: ${{ needs.bundle.outputs.fingerprint }}
+        run: ./scripts/publish-release.ps1 -Mode publish -Version $env:RELEASE_VERSION -CandidateSha $env:CANDIDATE_SHA -ExpectedBundleFingerprint $env:BUNDLE_FINGERPRINT
 
   winget:
     needs: publish

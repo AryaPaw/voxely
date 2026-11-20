@@ -36,8 +36,12 @@ bun run tauri build
 
 ## Publish
 
-Push a `vX.Y.Z` tag only after manifests already contain `X.Y.Z`. The release workflow builds signed NSIS, runs installer smoke, then publishes one GitHub Release named `vX.Y.Z`. It must not leave a leftover draft.
+Отправляйте тег `vX.Y.Z` после проверки, что манифесты уже содержат `X.Y.Z`. Перед публикацией workflow проверяет установщик на Windows, аттестует и сохраняет подписанный NSIS, его подпись и `latest.json` в одном артефакте Actions на срок до 30 дней.
 
-Rollback: keep the previous NSIS on its GitHub tag. A failed update must leave the running app intact. To roll the Tauri updater back, replace the published `latest.json` with the previous signed manifest; do not rely on GitHub `latest` alone.
+Если публикация прервалась, используйте **Re-run failed jobs** в исходном запуске. Сборка и публикация выполняются в отдельных job. Публикация загружает комплект успешной сборки, сверяет SHA-256 всех трёх файлов и сравнивает уже загруженные файлы черновика с этим комплектом. Если артефакт недоступен, понадобится исходный комплект или выпуск с новой версией.
+
+После HTTP 502 GitHub может оставить пустой файл со статусом `starter`. В этом случае публикация остановится. Повтор возможен после подтверждённого ручного удаления пустого файла из черновика.
+
+При откате сохраните прежний NSIS на его теге. Для распространения предыдущего кода через Tauri Updater соберите его с новым номером версии. Опубликованные установщики, подписи, `latest.json` и теги остаются неизменными.
 
 WinGet uses the same versioned NSIS URL as the updater platform entry, never `releases/latest/download`. A failed WinGet job does not roll back the GitHub Release. First submission is manual; later versions can call `.github/workflows/winget.yml`.

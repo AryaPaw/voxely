@@ -90,14 +90,25 @@ function Get-VoxelyReleaseForTag {
     throw 'Release listing exceeded 100 pages. Refusing an incomplete identity check.'
 }
 
-function Publish-VoxelyRelease {
+function Assert-VoxelyReleaseBuildAllowed {
     param(
-        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')][string]$Repo,
+        [Parameter(Mandatory)][ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version,
+        [Parameter(Mandatory)][ValidatePattern('^[a-fA-F0-9]{40}$')][string]$CandidateSha
+    )
+    $null = Assert-VoxelyReleaseIdentity -Repo $Repo -Version $Version -CandidateSha $CandidateSha -AllowMissing
+    # The build token has read access only. The publisher checks drafts with its write token.
+    $release = Invoke-VoxelyReleaseApi -Path "repos/$Repo/releases/tags/v$Version" -AllowNotFound
+    if ($null -ne $release) {
+        throw "Release v$Version already exists. Use Re-run failed jobs on the original run while its signed bundle is available."
+    }
+}
+
+function Get-VoxelyReleaseFiles {
+    param(
         [Parameter(Mandatory)][string]$Version,
-        [Parameter(Mandatory)][string]$CandidateSha,
         [Parameter(Mandatory)][string[]]$ArtifactPaths
     )
-    $tagExists = Assert-VoxelyReleaseIdentity -Repo $Repo -Version $Version -CandidateSha $CandidateSha -AllowMissing
     $files = @{}
     foreach ($path in $ArtifactPaths) {
         $file = Get-Item -LiteralPath $path
@@ -106,6 +117,28 @@ function Publish-VoxelyRelease {
     }
     $installer = "Voxely_${Version}_x64-setup.exe"
     if ($files.Count -ne 3 -or -not $files.ContainsKey($installer) -or -not $files.ContainsKey("$installer.sig") -or -not $files.ContainsKey('latest.json')) { throw 'Release requires exactly the installer, its signature and latest.json.' }
+    return $files
+}
+
+function Get-VoxelyReleaseBundleFingerprint {
+    param([Parameter(Mandatory)][hashtable]$Files)
+    # Sort by filename so both jobs compare the same ordered set of three SHA-256 values.
+    return (($Files.Keys | Sort-Object | ForEach-Object { $Files[$_].Sha256 }) -join '')
+}
+
+function Publish-VoxelyRelease {
+    param(
+        [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$Version,
+        [Parameter(Mandatory)][string]$CandidateSha,
+        [Parameter(Mandatory)][string[]]$ArtifactPaths,
+        [Parameter(Mandatory)][ValidatePattern('^[a-f0-9]{192}$')][string]$ExpectedBundleFingerprint
+    )
+    $files = Get-VoxelyReleaseFiles -Version $Version -ArtifactPaths $ArtifactPaths
+    if ((Get-VoxelyReleaseBundleFingerprint -Files $files) -cne $ExpectedBundleFingerprint) {
+        throw 'The downloaded release bundle differs from the signed build job output.'
+    }
+    $tagExists = Assert-VoxelyReleaseIdentity -Repo $Repo -Version $Version -CandidateSha $CandidateSha -AllowMissing
     $release = Get-VoxelyReleaseForTag -Repo $Repo -Tag "v$Version"
     if ($null -ne $release) {
         if (-not $tagExists) { throw 'Existing release has no verifiable tag.' }

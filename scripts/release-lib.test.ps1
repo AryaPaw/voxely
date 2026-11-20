@@ -18,6 +18,7 @@ $script:paths = @('Voxely_1.2.3_x64-setup.exe', 'Voxely_1.2.3_x64-setup.exe.sig'
     [IO.File]::WriteAllText($path, "fixture content: $_")
     $path
 }
+$script:fingerprint = Get-VoxelyReleaseBundleFingerprint -Files (Get-VoxelyReleaseFiles -Version $script:version -ArtifactPaths $script:paths)
 function Invoke-VoxelyReleaseApi {
     param($Method = 'GET', $Path, $Body, $UploadPath, [switch]$AllowNotFound)
     if ($Method -ne 'GET') { $script:writes.Add(@{ Method = $Method; Path = $Path; Body = $Body }) }
@@ -68,7 +69,12 @@ function Invoke-VoxelyReleaseApi {
     if ($Method -eq 'GET' -and $Path -eq 'repos/fixture/repo/releases/42') { return $script:releaseFixture }
     throw "Unexpected fixture request $Method $Path"
 }
-function Publish-Fixture { Publish-VoxelyRelease -Repo 'fixture/repo' -Version $script:version -CandidateSha $script:candidate -ArtifactPaths $script:paths }
+function Publish-Fixture {
+    Publish-VoxelyRelease -Repo 'fixture/repo' -Version $script:version -CandidateSha $script:candidate -ArtifactPaths $script:paths -ExpectedBundleFingerprint $script:fingerprint
+}
+function Assert-FixtureCanBuild {
+    Assert-VoxelyReleaseBuildAllowed -Repo 'fixture/repo' -Version $script:version -CandidateSha $script:candidate
+}
 function Expect-Failure([scriptblock]$Action, [string]$Pattern) {
     $before = $script:writes.Count
     $message = ''
@@ -77,14 +83,32 @@ function Expect-Failure([scriptblock]$Action, [string]$Pattern) {
     if ($script:writes.Count -ne $before) { throw 'Invalid existing release caused writes' }
 }
 try {
+    Assert-FixtureCanBuild
+    if ($script:writes.Count -ne 0) { throw 'Build preflight must be read-only' }
+    $sig = $script:paths[1]
+    $original = [IO.File]::ReadAllText($sig)
+    [IO.File]::WriteAllText($sig, $original.ToUpperInvariant())
+    Expect-Failure { Publish-Fixture } 'differs from the signed build job output'
+    [IO.File]::WriteAllText($sig, $original)
     $script:failUpload = $true
     $failure = ''
     try { Publish-Fixture | Out-Null } catch { $failure = $_.Exception.Message }
     if ($failure -notmatch 'upload interruption' -or -not $script:releaseFixture.draft -or $script:releaseFixture.assets.Count -ne 1) { throw 'Interrupted upload did not preserve a recoverable draft' }
     if ($null -ne (Invoke-VoxelyReleaseApi -Path 'repos/fixture/repo/releases/tags/v1.2.3' -AllowNotFound) -or $script:tagEndpointDraftMisses -ne 1) { throw 'Fixture must emulate GitHub returning 404 for draft tag lookup' }
+    Assert-FixtureCanBuild # A read-only token only sees published releases.
+    $uploadedName = $script:releaseFixture.assets[0].name
+    $uploadedPath = $script:paths | Where-Object { [IO.Path]::GetFileName($_) -ceq $uploadedName }
+    $uploadedContent = [IO.File]::ReadAllText($uploadedPath)
+    $originalFingerprint = $script:fingerprint
+    [IO.File]::WriteAllText($uploadedPath, $uploadedContent.ToUpperInvariant())
+    $script:fingerprint = Get-VoxelyReleaseBundleFingerprint -Files (Get-VoxelyReleaseFiles -Version $script:version -ArtifactPaths $script:paths)
+    Expect-Failure { Publish-Fixture } 'Release asset .* differs'
+    [IO.File]::WriteAllText($uploadedPath, $uploadedContent)
+    $script:fingerprint = $originalFingerprint
     $script:listPrefix = @(1..100 | ForEach-Object { [pscustomobject]@{ id = 1000 + $_; tag_name = "v0.0.$_"; draft = $false; assets = @() } })
     $script:failUpload = $false
     if ((Publish-Fixture) -ne 'published' -or $script:releaseFixture.draft) { throw 'New release failed' }
+    Expect-Failure { Assert-FixtureCanBuild } 'Re-run failed jobs'
     $before = $script:writes.Count
     if ((Publish-Fixture) -ne 'already-published' -or $script:writes.Count -ne $before) { throw 'Identical publication must be read-only and idempotent' }
     $script:duplicateRelease = $true
