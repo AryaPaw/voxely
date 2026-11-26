@@ -91,7 +91,7 @@ struct NativeProbe {
     cleanup: DiscardProbeAudio,
     input_rate: u32,
     overflow: Arc<AtomicU32>,
-    device_discontinuity: Arc<AtomicBool>,
+    continuity: Arc<CaptureContinuity>,
 }
 
 fn start_probe(device: Option<String>, path: PathBuf, writer_delay: Duration) -> NativeProbe {
@@ -109,7 +109,7 @@ fn start_probe(device: Option<String>, path: PathBuf, writer_delay: Duration) ->
             .send((
                 built.input_rate,
                 built.overflow.clone(),
-                built.stream_discontinuity.clone(),
+                built.continuity.clone(),
             ))
             .map_err(|_| AppError::AudioCaptureFailed("native probe controller exited".into()))?;
         if !writer_delay.is_zero() {
@@ -125,14 +125,13 @@ fn start_probe(device: Option<String>, path: PathBuf, writer_delay: Duration) ->
         cleanup,
     };
     let cleanup = DiscardProbeAudio(session.cleanup_handle());
-    let (input_rate, overflow, device_discontinuity) =
-        ready_rx.recv_timeout(START_TIMEOUT).unwrap();
+    let (input_rate, overflow, continuity) = ready_rx.recv_timeout(START_TIMEOUT).unwrap();
     NativeProbe {
         session,
         cleanup,
         input_rate,
         overflow,
-        device_discontinuity,
+        continuity,
     }
 }
 
@@ -155,7 +154,7 @@ fn native_capture_survives_load_and_forced_overflow() {
             session,
             cleanup: _normal_cleanup,
             overflow,
-            device_discontinuity,
+            continuity,
             ..
         } = start_probe(device.clone(), path, Duration::ZERO);
         let fallback = session.used_fallback_device();
@@ -172,7 +171,7 @@ fn native_capture_survives_load_and_forced_overflow() {
             0,
             "ordinary CPU load overflowed the app queue"
         );
-        let device_gap = device_discontinuity.load(Ordering::Relaxed);
+        let device_gap = continuity.device_discontinuity.load(Ordering::Relaxed);
         assert_eq!(
             result.truncated, device_gap,
             "WASAPI discontinuities must be reflected in the result"
@@ -224,4 +223,40 @@ fn native_capture_survives_load_and_forced_overflow() {
     }
     assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
     eprintln!("NATIVE PASS: six microphone captures completed, no audio retained, no API or history access");
+}
+
+#[test]
+#[ignore = "requires explicit microphone consent and VOXELY_NATIVE_CAPTURE_TEST=1"]
+fn native_wasapi_startup_and_later_discontinuities() {
+    assert_eq!(
+        std::env::var("VOXELY_NATIVE_CAPTURE_TEST").as_deref(),
+        Ok("1")
+    );
+    let device = std::env::var("VOXELY_NATIVE_CAPTURE_DEVICE").ok();
+    for run in 1..=3 {
+        let fallback = Arc::new(AtomicBool::new(false));
+        let built = start_stream_inner(
+            device.as_deref(),
+            Arc::new(Mutex::new(MeterSample::silent())),
+            fallback.clone(),
+        )
+        .unwrap();
+        thread::sleep(Duration::from_millis(500));
+        drop(built.stream);
+        assert!(!fallback.load(Ordering::Relaxed));
+        assert!(built.continuity.received_packet.load(Ordering::Relaxed));
+        assert!(built.stream_error.lock().is_none());
+        assert_eq!(built.overflow.load(Ordering::Relaxed), 0);
+        eprintln!(
+            "NATIVE: run={run}, startup_discontinuity={}, device_discontinuity={}",
+            built
+                .continuity
+                .startup_discontinuity
+                .load(Ordering::Relaxed),
+            built
+                .continuity
+                .device_discontinuity
+                .load(Ordering::Relaxed),
+        );
+    }
 }

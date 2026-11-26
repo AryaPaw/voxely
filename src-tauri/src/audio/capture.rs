@@ -472,8 +472,34 @@ struct BuiltCapture {
     consumer: rtrb::Consumer<f32>,
     input_rate: u32,
     overflow: Arc<AtomicU32>,
-    stream_discontinuity: Arc<AtomicBool>,
+    continuity: Arc<CaptureContinuity>,
     stream_error: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Default)]
+struct CaptureContinuity {
+    received_packet: AtomicBool,
+    startup_discontinuity: AtomicBool,
+    device_discontinuity: AtomicBool,
+}
+
+impl CaptureContinuity {
+    fn observe_packet(&self, samples: &[f32]) {
+        if !samples.is_empty() {
+            self.received_packet.store(true, Ordering::Relaxed);
+        }
+    }
+
+    fn report_xrun(&self) {
+        // CPAL's Windows default host is WASAPI, which reports the packet's
+        // flag before delivering its samples. The first packet has no
+        // preceding audio against which to establish a gap.
+        if cfg!(windows) && !self.received_packet.load(Ordering::Relaxed) {
+            self.startup_discontinuity.store(true, Ordering::Relaxed);
+        } else {
+            self.device_discontinuity.store(true, Ordering::Relaxed);
+        }
+    }
 }
 
 fn start_stream_inner(
@@ -498,19 +524,24 @@ fn start_stream_inner(
     let hop = meter_hop(input_rate);
 
     let stream_error = Arc::new(Mutex::new(None));
-    let stream_discontinuity = Arc::new(AtomicBool::new(false));
+    let continuity = Arc::new(CaptureContinuity::default());
     let on_error = {
         let stream_error = Arc::clone(&stream_error);
-        let stream_discontinuity = Arc::clone(&stream_discontinuity);
-        move |err| record_stream_error(&stream_error, &stream_discontinuity, err)
+        let continuity = Arc::clone(&continuity);
+        move |err| record_stream_error(&stream_error, &continuity, err)
+    };
+    let mut on_frames = {
+        let continuity = Arc::clone(&continuity);
+        move |data: &[f32]| {
+            continuity.observe_packet(data);
+            push_frames(&mut producer, data, channels, &meter_cb, &overflow_cb, hop);
+        }
     };
 
     let stream = match sample_format {
         SampleFormat::F32 => device.build_input_stream(
             config,
-            move |data: &[f32], _| {
-                push_frames(&mut producer, data, channels, &meter_cb, &overflow_cb, hop)
-            },
+            move |data: &[f32], _| on_frames(data),
             on_error,
             None,
         ),
@@ -518,14 +549,7 @@ fn start_stream_inner(
             config,
             move |data: &[i16], _| {
                 let converted = i16_to_f32(data);
-                push_frames(
-                    &mut producer,
-                    &converted,
-                    channels,
-                    &meter_cb,
-                    &overflow_cb,
-                    hop,
-                )
+                on_frames(&converted);
             },
             on_error,
             None,
@@ -535,14 +559,7 @@ fn start_stream_inner(
             move |data: &[u16], _| {
                 let converted: Vec<f32> =
                     data.iter().map(|s| (*s as f32 / 32768.0) - 1.0).collect();
-                push_frames(
-                    &mut producer,
-                    &converted,
-                    channels,
-                    &meter_cb,
-                    &overflow_cb,
-                    hop,
-                )
+                on_frames(&converted);
             },
             on_error,
             None,
@@ -562,19 +579,18 @@ fn start_stream_inner(
         consumer,
         input_rate,
         overflow,
-        stream_discontinuity,
+        continuity,
         stream_error,
     })
 }
 
 fn record_stream_error(
     target: &Mutex<Option<String>>,
-    discontinuity: &AtomicBool,
+    continuity: &CaptureContinuity,
     err: cpal::Error,
 ) {
     if err.kind() == cpal::ErrorKind::Xrun {
-        // WASAPI still delivers packets after reporting a buffer discontinuity.
-        discontinuity.store(true, Ordering::Relaxed);
+        continuity.report_xrun();
         return;
     }
     let message = err.to_string();
@@ -615,7 +631,7 @@ fn run_capture(
         consumer,
         input_rate,
         overflow,
-        stream_discontinuity,
+        continuity,
         stream_error,
     } = built;
     run_capture_writer(
@@ -624,7 +640,7 @@ fn run_capture(
         dest,
         stop,
         overflow,
-        stream_discontinuity,
+        continuity,
         stream_error,
         move || {
             drop(stream);
@@ -642,7 +658,7 @@ fn run_capture_writer(
     dest: PathBuf,
     stop: Arc<AtomicBool>,
     overflow: Arc<AtomicU32>,
-    stream_discontinuity: Arc<AtomicBool>,
+    continuity: Arc<CaptureContinuity>,
     stream_error: Arc<Mutex<Option<String>>>,
     close_stream: impl FnOnce(),
 ) -> Result<CaptureResult, AppError> {
@@ -684,7 +700,8 @@ fn run_capture_writer(
     thread::sleep(Duration::from_millis(20));
     drain_consumer(&mut consumer, &mut leftover)?;
     let dropped_frames = overflow.load(Ordering::Relaxed);
-    let device_discontinuity = stream_discontinuity.load(Ordering::Relaxed);
+    let device_discontinuity = continuity.device_discontinuity.load(Ordering::Relaxed);
+    let startup_discontinuity = continuity.startup_discontinuity.load(Ordering::Relaxed);
     if dropped_frames > 0 || device_discontinuity {
         truncated = true;
     }
@@ -712,6 +729,7 @@ fn run_capture_writer(
         duration_ms,
         dropped_frames,
         device_discontinuity,
+        startup_discontinuity,
         input_rate,
         limit_reached = written >= MAX_PCM16_FRAMES,
         stream_failed = stream_error.lock().is_some(),
@@ -1416,7 +1434,7 @@ mod tests {
                 path,
                 worker_stop,
                 overflow,
-                Arc::new(AtomicBool::new(false)),
+                Arc::new(CaptureContinuity::default()),
                 Arc::new(Mutex::new(None)),
                 move || {
                     let _ = closed_tx.send(());
@@ -1472,9 +1490,10 @@ mod tests {
         producer.push(0.25).unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
-        let discontinuity = Arc::new(AtomicBool::new(false));
+        let continuity = Arc::new(CaptureContinuity::default());
         let stream_error = Arc::new(Mutex::new(None));
-        record_stream_error(&stream_error, &discontinuity, cpal::ErrorKind::Xrun.into());
+        continuity.observe_packet(&[0.25]);
+        record_stream_error(&stream_error, &continuity, cpal::ErrorKind::Xrun.into());
         assert!(stream_error.lock().is_none());
         let worker = thread::spawn(move || {
             run_capture_writer(
@@ -1483,7 +1502,7 @@ mod tests {
                 path,
                 worker_stop,
                 Arc::new(AtomicU32::new(0)),
-                discontinuity,
+                continuity,
                 stream_error,
                 || {},
             )
@@ -1500,14 +1519,42 @@ mod tests {
         assert!(samples[0] > 0.24 && samples[1] < -0.49);
 
         let fatal = Mutex::new(None);
-        let unrelated_gap = AtomicBool::new(false);
-        record_stream_error(
-            &fatal,
-            &unrelated_gap,
-            cpal::ErrorKind::DeviceNotAvailable.into(),
-        );
+        let startup = CaptureContinuity::default();
+        record_stream_error(&fatal, &startup, cpal::ErrorKind::DeviceNotAvailable.into());
         assert!(fatal.lock().is_some());
-        assert!(!unrelated_gap.load(Ordering::Relaxed));
+        assert!(!startup.device_discontinuity.load(Ordering::Relaxed));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn wasapi_startup_xrun_does_not_mark_recording_truncated() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("startup.wav");
+        let (mut producer, consumer) = RingBuffer::<f32>::new(8);
+        let continuity = Arc::new(CaptureContinuity::default());
+        let stream_error = Arc::new(Mutex::new(None));
+
+        continuity.observe_packet(&[]);
+        record_stream_error(&stream_error, &continuity, cpal::ErrorKind::Xrun.into());
+        assert!(continuity.startup_discontinuity.load(Ordering::Relaxed));
+        continuity.observe_packet(&[0.25]);
+        producer.push(0.25).unwrap();
+
+        let result = run_capture_writer(
+            consumer,
+            SAMPLE_RATE,
+            path,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicU32::new(0)),
+            continuity,
+            stream_error,
+            || {},
+        )
+        .unwrap();
+        assert!(!result.truncated && !result.limit_reached && result.capture_error.is_none());
+        let (samples, _) = read_pcm16_wav_with_rate(&result.path).unwrap();
+        assert_eq!(samples.len(), 1);
+        assert!((samples[0] - 0.25).abs() < 0.001);
     }
 
     #[test]

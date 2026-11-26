@@ -10,6 +10,7 @@
         "audio::capture::tests::duration_cap_matches_across_input_rates",
         "audio::capture::tests::overflow_keeps_recording_and_preserves_speech_until_explicit_stop",
         "audio::capture::tests::device_xrun_marks_a_gap_without_ending_the_recording",
+        "audio::capture::tests::wasapi_startup_xrun_does_not_mark_recording_truncated",
         "audio::capture::tests::busy_meter_does_not_block_the_audio_callback",
         "audio::capture::tests::capture_queue_reserves_ten_seconds_at_the_device_rate",
         "audio::capture::tests::pcm_flush_preserves_short_chunk_and_stops_at_exact_frame_limit",
