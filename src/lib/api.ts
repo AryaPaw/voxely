@@ -172,6 +172,7 @@ export interface AppSettings {
   startWithWindows: boolean;
   closeToTray: boolean;
   notifications: boolean;
+  cuePreset?: CuePreset;
   inputDevice: string;
   keepOriginalRecordings: boolean;
   theme: string;
@@ -250,7 +251,8 @@ export interface CompareState {
   slots: CompareSlot[];
 }
 
-export type CueKind = "start" | "stop" | "cancel";
+export type CueKind = "start" | "stop";
+export type CuePreset = "classic" | "soft" | "warm";
 
 export interface RuntimeInfo {
   localBuild: boolean;
@@ -342,5 +344,6 @@ export const api = {
   clearModelCompare: () => ipc<void>("clear_model_compare"),
   cancelModelCompare: () => ipc<CompareState>("cancel_model_compare"),
   playCue: (kind: CueKind) => ipc<void>("play_cue", { kind }),
+  cuePreviews: () => ipc<ArrayBuffer | number[]>("get_cue_previews"),
   previewErrorNotification: () => ipc<void>("preview_error_notification"),
 };

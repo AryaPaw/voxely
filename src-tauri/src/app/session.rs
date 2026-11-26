@@ -367,7 +367,7 @@ fn cancel_recording_checked(app: &AppHandle, ticket: Option<(u64, u64)>) -> Resu
             clear_captured_target(&ctx);
             ctx.emit_history(app);
             ctx.emit_state(app);
-            play_cancel_cue(&ctx);
+            play_end_cue(&ctx);
             hide_overlay_now(app);
             Ok(())
         }
@@ -378,7 +378,7 @@ fn cancel_recording_checked(app: &AppHandle, ticket: Option<(u64, u64)>) -> Resu
                 return Ok(());
             }
             ctx.emit_state(app);
-            play_cancel_cue(&ctx);
+            play_end_cue(&ctx);
             hide_overlay_now(app);
             Ok(())
         }
@@ -392,7 +392,7 @@ fn cancel_recording_checked(app: &AppHandle, ticket: Option<(u64, u64)>) -> Resu
                 return Ok(());
             }
             ctx.emit_state(app);
-            play_cancel_cue(&ctx);
+            play_end_cue(&ctx);
             hide_overlay_now(app);
             Ok(())
         }
@@ -966,9 +966,13 @@ pub fn should_auto_stop_capture(state: &SessionState, capture_finished: bool) ->
     matches!(state, SessionState::Recording) && capture_finished
 }
 
-fn play_cancel_cue(ctx: &AppContext) {
-    if ctx.settings.lock().notifications {
-        crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Cancel);
+fn play_end_cue(ctx: &AppContext) {
+    play_configured_cue(&ctx.settings.lock(), crate::audio::cue::CueKind::Stop);
+}
+
+fn play_configured_cue(settings: &AppSettings, kind: crate::audio::cue::CueKind) {
+    if settings.notifications {
+        crate::audio::cue::play_dictation_cue(settings.cue_preset, kind);
     }
 }
 
@@ -1039,9 +1043,7 @@ fn start_recording(app: &AppHandle) -> Result<(), AppError> {
     show_overlay(app);
     schedule_keep_captured_caret(app, generation);
     ctx.emit_state(app);
-    if settings.notifications {
-        crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Start);
-    }
+    play_configured_cue(&settings, crate::audio::cue::CueKind::Start);
     ctx.capture_starting.store(true, Ordering::SeqCst);
     // Transfer ownership while admission is held, but never wait for the
     // microphone driver on the UI thread or under the lifecycle lock.
@@ -1516,9 +1518,7 @@ fn stop_recording(app: &AppHandle, origin: StopOrigin) -> Result<(), AppError> {
      * completes, so another operation cannot start in the gap.
      */
     ctx.emit_state(app);
-    if ctx.settings.lock().notifications {
-        crate::audio::cue::play_dictation_cue(crate::audio::cue::CueKind::Stop);
-    }
+    play_end_cue(&ctx);
     let app_handle = app.clone();
     thread::spawn(move || {
         let late_handle = app_handle.clone();

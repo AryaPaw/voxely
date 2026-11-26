@@ -1,11 +1,10 @@
-import { api, type CueKind } from "../../../lib/api";
+import { api } from "../../../lib/api";
+import { CUE_KINDS } from "../../../lib/cue-preview";
 import { formatInvokeError, type Messages } from "../../../lib/i18n";
 import { reportError } from "../../../lib/system-notify";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { Button } from "../../../components/ui/button";
 import { SECTION_ICONS, sectionLabel } from "../sectionNav";
-
-const CUE_KINDS: CueKind[] = ["start", "stop", "cancel"];
 
 export function DebugSettings({ copy }: { copy: Messages }) {
   return (
@@ -25,7 +24,7 @@ export function DebugSettings({ copy }: { copy: Messages }) {
               });
             }}
           >
-            {cueLabel(copy, kind)}
+            {kind === "start" ? copy.cueStart : copy.cueStop}
           </Button>
         ))}
       </div>
@@ -44,19 +43,4 @@ export function DebugSettings({ copy }: { copy: Messages }) {
       </Button>
     </div>
   );
-}
-
-function cueLabel(copy: Messages, kind: CueKind): string {
-  switch (kind) {
-    case "start":
-      return copy.debugCueStart;
-    case "stop":
-      return copy.debugCueStop;
-    case "cancel":
-      return copy.debugCueCancel;
-    default: {
-      const _never: never = kind;
-      return _never;
-    }
-  }
 }

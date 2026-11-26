@@ -206,6 +206,7 @@ fn run_app() -> i32 {
             cancel_model_compare,
             get_runtime_info,
             play_cue,
+            get_cue_previews,
             preview_error_notification
         ])
         .build(context);

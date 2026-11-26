@@ -83,6 +83,7 @@
     "allow-search-history",
     "allow-get-runtime-info",
     "allow-play-cue",
+    "allow-get-cue-previews",
     "allow-preview-error-notification",
     "notification:default"
   ]

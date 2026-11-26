@@ -6,6 +6,7 @@ import { formatInvokeError, type Messages } from "../../../lib/i18n";
 import { PageHeader } from "../../../components/settings/PageHeader";
 import { HotkeyCapture } from "../../../components/settings/HotkeyCapture";
 import { AudioFilterSettings } from "./FilterSettings";
+import { SoundCueSettings } from "./SoundCueSettings";
 import { SettingsGroup } from "../../../components/settings/SettingsGroup";
 import { SettingsField } from "../../../components/settings/SettingsField";
 import { Label } from "../../../components/ui/label";
@@ -175,6 +176,12 @@ export function AudioSettings(props: {
   return (
     <div>
       <MicrophoneSettings {...props} />
+      <SoundCueSettings
+        selected={props.settings.cuePreset ?? "classic"}
+        enabled={props.settings.notifications}
+        copy={props.copy}
+        onChange={(cuePreset) => props.onChange({ cuePreset })}
+      />
       <AudioFilterSettings {...props} />
     </div>
   );

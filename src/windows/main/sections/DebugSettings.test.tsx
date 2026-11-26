@@ -14,14 +14,13 @@ afterEach(() => {
 });
 
 describe("DebugSettings", () => {
-  it("plays each dictation cue", () => {
+  it("plays the start and shared end cues", () => {
     render(<DebugSettings copy={messagesFor("en")} />);
     fireEvent.click(screen.getByRole("button", { name: "Start" }));
-    fireEvent.click(screen.getByRole("button", { name: "End of recording" }));
-    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    fireEvent.click(screen.getByRole("button", { name: "End / cancel" }));
     expect(invoke).toHaveBeenCalledWith("play_cue", { kind: "start" });
     expect(invoke).toHaveBeenCalledWith("play_cue", { kind: "stop" });
-    expect(invoke).toHaveBeenCalledWith("play_cue", { kind: "cancel" });
+    expect(invoke).toHaveBeenCalledTimes(2);
   });
 
   it("sends a real Windows error notification", () => {

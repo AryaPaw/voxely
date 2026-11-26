@@ -1422,11 +1422,17 @@ pub fn get_runtime_info(ctx: State<'_, Arc<AppContext>>) -> crate::app::lifecycl
 }
 
 #[tauri::command]
-pub fn play_cue(kind: String) -> Result<(), AppError> {
+pub fn get_cue_previews() -> tauri::ipc::Response {
+    tauri::ipc::Response::new(crate::audio::cue::cue_preview_bank())
+}
+
+#[tauri::command]
+pub fn play_cue(ctx: State<'_, Arc<AppContext>>, kind: String) -> Result<(), AppError> {
     if !crate::app::lifecycle::is_local_build() {
         return Err(AppError::RequestValidationFailed("debug only".into()));
     }
-    crate::audio::cue::play_dictation_cue(crate::audio::cue::parse_cue_kind(&kind)?);
+    let preset = ctx.settings.lock().cue_preset;
+    crate::audio::cue::play_dictation_cue(preset, crate::audio::cue::parse_cue_kind(&kind)?);
     Ok(())
 }
 

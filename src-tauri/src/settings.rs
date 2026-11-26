@@ -15,6 +15,8 @@ pub struct AppSettings {
     pub start_with_windows: bool,
     pub close_to_tray: bool,
     pub notifications: bool,
+    #[serde(default)]
+    pub cue_preset: crate::audio::cue::CuePreset,
     pub input_device: String,
     pub keep_original_recordings: bool,
     pub theme: String,
@@ -175,6 +177,7 @@ impl Default for AppSettings {
             start_with_windows: false,
             close_to_tray: true,
             notifications: true,
+            cue_preset: Default::default(),
             input_device: "default".into(),
             keep_original_recordings: true,
             theme: "dark".into(),

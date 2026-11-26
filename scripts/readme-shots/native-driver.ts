@@ -1,5 +1,6 @@
 import scenes from "./scenes.json";
 import { emit as nativeEmit } from "../../node_modules/@tauri-apps/api/event";
+import { CUE_KINDS, CUE_PRESETS } from "../../src/lib/cue-preview";
 
 // A fixed local day makes demo history and date filters repeatable. No application
 // source, persisted data, window chrome or layout styles are replaced.
@@ -41,6 +42,16 @@ async function prepare() {
   );
   if (section === "history") {
     await until(() => document.querySelectorAll("article").length === 4, "History not loaded");
+  }
+  if (section === "audio") {
+    await until(
+      () =>
+        [...document.querySelectorAll("[data-waveform]")].filter(
+          (element) => element.childElementCount > 0,
+        ).length ===
+        CUE_PRESETS.length * CUE_KINDS.length,
+      "Dictation cue waveforms did not load",
+    );
   }
   if (section.startsWith("statistics")) {
     await until(

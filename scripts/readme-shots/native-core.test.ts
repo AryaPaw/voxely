@@ -27,4 +27,10 @@ describe("native screenshot isolation", () => {
       label: "main",
     });
   });
+
+  it("renders cue previews from the native synthesizer", async () => {
+    nativeInvoke.mockClear();
+    expect(await invoke("get_cue_previews")).toBe("native");
+    expect(nativeInvoke).toHaveBeenCalledExactlyOnceWith("get_cue_previews", undefined);
+  });
 });

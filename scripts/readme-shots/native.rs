@@ -118,6 +118,7 @@ fn capture_native_readme() {
     let worker_result = result.clone();
     let app = tauri::Builder::default()
         .any_thread()
+        .invoke_handler(tauri::generate_handler![crate::commands::get_cue_previews])
         .setup(move |app| {
             let reports = work.clone();
             let event_handle = app.handle().clone();

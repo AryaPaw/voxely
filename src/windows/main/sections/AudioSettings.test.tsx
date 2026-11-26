@@ -21,6 +21,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("../../../lib/api", () => ({
   api: {
     mics: vi.fn(async () => []),
+    cuePreviews: vi.fn(() => new Promise(() => {})),
     meter: vi.fn(async () => ({ peak: 0, rms: 0 })),
     previewDsp: vi.fn(async () => null),
     startFilterSample: vi.fn(async () => undefined),

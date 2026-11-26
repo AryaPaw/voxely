@@ -104,6 +104,7 @@ mod tests {
         let mut source = AppSettings::default();
         source.theme = "light".into();
         source.transcription_provider = crate::transcription::TranscriptionProvider::OpenAi;
+        source.cue_preset = crate::audio::cue::CuePreset::Warm;
         source.accent_color = crate::settings::AccentColor {
             family: "rose".into(),
             shade: 600,
@@ -124,6 +125,7 @@ mod tests {
         let result = import(&text, &current).unwrap();
         assert_eq!(result.theme, "light");
         assert_eq!(result.transcription_provider, source.transcription_provider);
+        assert_eq!(result.cue_preset, source.cue_preset);
         assert_eq!(result.accent_color, source.accent_color);
         assert_eq!(result.presets, source.presets);
         assert_eq!(result.text_replacements, source.text_replacements);
@@ -147,6 +149,7 @@ mod tests {
             r#"{"format":"voxely-settings","version":1,"settings":{"writeSeq":5}}"#,
             r#"{"format":"voxely-settings","version":1,"settings":{"theme":"bad"}}"#,
             r#"{"format":"voxely-settings","version":1,"settings":{"transcriptionProvider":"unknown"}}"#,
+            r#"{"format":"voxely-settings","version":1,"settings":{"cuePreset":"unknown"}}"#,
             r#"{"format":"voxely-settings","version":1,"settings":{"hotkey":"invalid"}}"#,
             r#"{"format":"voxely-settings","version":1,"settings":{"presets":[]}}"#,
         ] {
@@ -166,6 +169,17 @@ mod tests {
         assert!(read(std::io::Cursor::new(vec![b'a'; MAX_BYTES + 1])).is_err());
         assert!(read(std::io::Cursor::new(vec![255])).is_err());
         assert_eq!(read(text.as_bytes()).unwrap(), text);
+    }
+
+    #[test]
+    fn retired_short_cue_imports_as_classic() {
+        let imported = import(
+            r#"{"format":"voxely-settings","version":1,"settings":{"cuePreset":"short"}}"#,
+            &AppSettings::default(),
+        )
+        .unwrap();
+        assert_eq!(imported.cue_preset, crate::audio::cue::CuePreset::Classic);
+        assert_eq!(portable(&imported).unwrap()["cuePreset"], "classic");
     }
 
     #[test]
