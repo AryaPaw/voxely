@@ -43,7 +43,8 @@ function Start-NativeCargo([string]$Name, [string]$Target, [string[]]$CargoArgum
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    foreach ($argument in @($CargoArguments) + @('--offline', '--locked', '--manifest-path', (Join-Path $project 'Cargo.toml'), '--target-dir', $Target)) {
+    # CI can force ANSI color, but the fixture reads Cargo's lock status from stderr.
+    foreach ($argument in @($CargoArguments) + @('--color', 'never', '--offline', '--locked', '--manifest-path', (Join-Path $project 'Cargo.toml'), '--target-dir', $Target)) {
         $start.ArgumentList.Add($argument)
     }
     foreach ($nameToRemove in @('CARGO_TARGET_DIR', 'CARGO_BUILD_TARGET_DIR', 'CARGO_BUILD_BUILD_DIR', 'VOXELY_BUILD_CACHE_SESSION', 'RUSTFLAGS', 'CARGO_ENCODED_RUSTFLAGS', 'RUSTC_WRAPPER', 'RUSTC_WORKSPACE_WRAPPER')) {
