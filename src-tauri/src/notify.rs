@@ -5,95 +5,58 @@ use tauri::{AppHandle, Manager};
 use tauri_plugin_notification::NotificationExt;
 
 use crate::app::lifecycle::app_display_name;
-use crate::app::locale::resolved_ui_locale;
+use crate::app::locale::{error_message, message, resolved_ui_locale, system_ui_locale};
 use crate::app::session::AppContext;
 use crate::error::AppError;
 use crate::windows_int::insert_engine::{CopyReason, InsertOutcome};
 
 pub const WINDOWS_APP_USER_MODEL_ID: &str = "com.voxely.desktop";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToastDispatch {
-    Dispatched,
-    Disabled,
+fn notification_preferences(app: &AppHandle) -> (bool, &'static str) {
+    app.try_state::<Arc<AppContext>>()
+        .map(|state| {
+            let settings = state.settings.lock();
+            (settings.notifications, resolved_ui_locale(&settings))
+        })
+        .unwrap_or_else(|| (true, system_ui_locale()))
 }
 
 pub fn insert_outcome_toast(
     locale: &str,
     outcome: InsertOutcome,
-) -> Option<(&'static str, String)> {
-    let title = crate::app::lifecycle::app_display_name(locale);
-    let english = locale == "en";
-    match outcome {
-        InsertOutcome::Inserted | InsertOutcome::CancelledBeforeDelivery => None,
-        InsertOutcome::Copied {
-            reason: CopyReason::ClipboardBusy,
-        } => None,
-        InsertOutcome::Copied { reason } => Some((
-            title,
-            match (english, reason) {
-                (true, CopyReason::UserSwitched) => "A different window is active. Text copied; paste it yourself.".into(),
-                (false, CopyReason::UserSwitched) => "Активно другое окно. Текст скопирован, вставьте вручную.".into(),
-                (true, CopyReason::NoTarget) => "No insertion window was found. Text copied; paste it yourself.".into(),
-                (false, CopyReason::NoTarget) => "Окно для вставки не найдено. Текст скопирован, вставьте вручную.".into(),
-                (true, CopyReason::TargetGone) => "The original window is no longer available. Text copied; paste it yourself.".into(),
-                (false, CopyReason::TargetGone) => "Исходное окно недоступно. Текст скопирован, вставьте вручную.".into(),
-                (true, CopyReason::Minimized) => "The original window is minimized. Text copied; paste it yourself.".into(),
-                (false, CopyReason::Minimized) => "Исходное окно свёрнуто. Текст скопирован, вставьте вручную.".into(),
-                (true, CopyReason::IntegrityBlocked) => "Insertion into the original window requires higher privileges. Text copied; paste it yourself.".into(),
-                (false, CopyReason::IntegrityBlocked) => "Недостаточно прав для вставки в исходное окно. Текст скопирован, вставьте вручную.".into(),
-                (true, CopyReason::SendBlocked) => "Windows blocked keyboard delivery. Text copied; paste it yourself.".into(),
-                (false, CopyReason::SendBlocked) => "Windows отклонила отправку текста. Текст скопирован, вставьте вручную.".into(),
-                (true, CopyReason::RestoreFailed) => "Couldn't restore focus to the original window. Text copied; paste it yourself.".into(),
-                (false, CopyReason::RestoreFailed) => "Не удалось вернуть фокус в исходное окно. Текст скопирован, вставьте вручную.".into(),
-                (true, CopyReason::FocusNotReady) => "The input field in the original window doesn't have focus. Text copied; paste it yourself.".into(),
-                (false, CopyReason::FocusNotReady) => "Поле ввода в исходном окне не получило фокус. Текст скопирован, вставьте вручную.".into(),
-                (true, _) =>
-                "Text copied. Paste it yourself.".into()
-                , (false, _) =>
-                "Текст скопирован, вставьте вручную".into()
-            },
-        )),
-        InsertOutcome::PartialCopied => Some((
-            title,
-            if english {
-                "Insert interrupted. Some text may already be in the field. Full transcript copied."
-                    .into()
-            } else {
-                "Вставка прервана, часть текста могла вставиться; полный текст скопирован".into()
-            },
-        )),
-        InsertOutcome::Failed => Some((
-            title,
-            if english {
-                "Could not insert or copy the transcript. Open History.".into()
-            } else {
-                "Не удалось вставить или скопировать текст. Откройте История.".into()
-            },
-        )),
-    }
+) -> Option<(&'static str, &'static str)> {
+    let key = match outcome {
+        InsertOutcome::Inserted | InsertOutcome::CancelledBeforeDelivery => return None,
+        InsertOutcome::Copied { reason } => match reason {
+            CopyReason::UserSwitched => "insertCopyUserSwitched",
+            CopyReason::NoTarget => "insertCopyNoTarget",
+            CopyReason::TargetGone => "insertCopyTargetGone",
+            CopyReason::Minimized => "insertCopyMinimized",
+            CopyReason::IntegrityBlocked => "insertCopyIntegrityBlocked",
+            CopyReason::SendBlocked => "insertCopySendBlocked",
+            CopyReason::RestoreFailed => "insertCopyRestoreFailed",
+            CopyReason::FocusNotReady => "insertCopyFocusNotReady",
+            CopyReason::ClipboardMode => "copiedInsert",
+            CopyReason::ClipboardBusy => return None,
+        },
+        InsertOutcome::PartialCopied => "copiedPartial",
+        InsertOutcome::Failed => "insertDeliveryFailed",
+    };
+    Some((app_display_name(locale), message(key, locale)))
 }
 
 pub fn notify_insert_outcome(app: &AppHandle, outcome: InsertOutcome) {
-    let ctx = app.try_state::<Arc<AppContext>>();
-    let (enabled, locale) = match ctx {
-        Some(state) => {
-            let settings = state.settings.lock();
-            (settings.notifications, resolved_ui_locale(&settings))
-        }
-        None => (true, "en".into()),
-    };
-    let Some((title, body)) = insert_outcome_toast(&locale, outcome) else {
-        if matches!(outcome, InsertOutcome::Failed) {
-            show_error(app, &AppError::TextInsertionFailed("insert failed".into()));
-        }
+    let (enabled, locale) = notification_preferences(app);
+    if !enabled {
+        return;
+    }
+    let Some((title, body)) = insert_outcome_toast(locale, outcome) else {
         return;
     };
-    match show_if_enabled(app, title, &body) {
+    match show_named(app, title, body) {
         Ok(()) => tracing::info!(outcome = ?outcome, "insert toast dispatched"),
         Err(err) => tracing::warn!(error = %err, outcome = ?outcome, "insert toast show failed"),
     }
-    let _ = enabled;
 }
 
 pub fn apply_windows_app_identity() {
@@ -110,14 +73,14 @@ pub fn should_toast_error(err: &AppError) -> bool {
 }
 
 pub fn error_toast(
-    app_name: &'static str,
+    locale: &str,
     enabled: bool,
     err: &AppError,
-) -> Option<(&'static str, String)> {
+) -> Option<(&'static str, &'static str)> {
     if !enabled || !should_toast_error(err) {
         return None;
     }
-    Some((app_name, err.user_message()))
+    Some((app_display_name(locale), error_message(err.code(), locale)))
 }
 
 pub fn show_named(app: &AppHandle, title: &str, body: &str) -> Result<(), AppError> {
@@ -125,18 +88,11 @@ pub fn show_named(app: &AppHandle, title: &str, body: &str) -> Result<(), AppErr
 }
 
 pub fn show_error(app: &AppHandle, err: &AppError) {
-    let ctx = app.try_state::<Arc<AppContext>>();
-    let (enabled, locale) = match ctx {
-        Some(state) => {
-            let settings = state.settings.lock();
-            (settings.notifications, resolved_ui_locale(&settings))
-        }
-        None => (true, "en".into()),
-    };
-    let Some((title, body)) = error_toast(app_display_name(&locale), enabled, err) else {
+    let (enabled, locale) = notification_preferences(app);
+    let Some((title, body)) = error_toast(locale, enabled, err) else {
         return;
     };
-    if let Err(show_err) = show_named(app, title, &body) {
+    if let Err(show_err) = show_named(app, title, body) {
         tracing::warn!(error = %show_err, "system error toast failed");
     }
 }
@@ -153,8 +109,8 @@ pub fn show_preview(app: &AppHandle) -> Result<(), AppError> {
     let locale = app
         .try_state::<Arc<AppContext>>()
         .map(|state| resolved_ui_locale(&state.settings.lock()))
-        .unwrap_or_else(|| "en".into());
-    show_named(app, app_display_name(&locale), preview_body(&locale))
+        .unwrap_or_else(system_ui_locale);
+    show_named(app, app_display_name(locale), preview_body(locale))
 }
 
 pub fn show_if_enabled(app: &AppHandle, title: &str, body: &str) -> Result<(), AppError> {
@@ -243,21 +199,41 @@ mod tests {
     #[test]
     fn cancelled_is_not_a_system_toast() {
         assert!(!should_toast_error(&AppError::Cancelled));
-        assert!(error_toast("Voxely", true, &AppError::Cancelled).is_none());
+        assert!(error_toast("en", true, &AppError::Cancelled).is_none());
     }
 
     #[test]
     fn dictation_errors_toast_when_enabled() {
-        let toast = error_toast("Voxely", true, &AppError::ProviderUnavailable);
         assert_eq!(
-            toast,
-            Some(("Voxely", AppError::ProviderUnavailable.user_message()))
+            error_toast("en", true, &AppError::ProviderUnavailable),
+            Some(("Voxely", "Provider unavailable"))
         );
-        assert!(error_toast("Voxely", false, &AppError::InvalidApiKey).is_none());
-        assert!(should_toast_error(&AppError::TextInsertionFailed(
-            "focus".into()
-        )));
+        assert!(error_toast("ru", false, &AppError::InvalidApiKey).is_none());
         assert!(should_toast_error(&AppError::Interrupted));
+    }
+
+    #[test]
+    fn insertion_failure_uses_the_selected_language_for_both_toast_paths() {
+        let error = AppError::TextInsertionFailed("private details".into());
+        for (locale, generic, delivery) in [
+            (
+                "en",
+                "Could not insert text",
+                "Couldn't deliver the full transcript. Open History to copy it.",
+            ),
+            (
+                "ru",
+                "Не удалось вставить текст",
+                "Не удалось доставить весь текст. Его можно скопировать из истории.",
+            ),
+        ] {
+            assert_eq!(error_toast(locale, true, &error), Some(("Voxely", generic)));
+            assert!(error_toast(locale, false, &error).is_none());
+            assert_eq!(
+                insert_outcome_toast(locale, InsertOutcome::Failed),
+                Some(("Voxely", delivery))
+            );
+        }
     }
 
     #[test]
@@ -290,7 +266,13 @@ mod tests {
         assert!(copied.1.contains("скопирован"));
         let partial = insert_outcome_toast("ru", InsertOutcome::PartialCopied).unwrap();
         assert!(partial.1.contains("прервана"));
-        assert_eq!(ToastDispatch::Dispatched, ToastDispatch::Dispatched);
+        assert!(insert_outcome_toast(
+            "en",
+            InsertOutcome::Copied {
+                reason: CopyReason::ClipboardBusy,
+            }
+        )
+        .is_none());
     }
 
     #[test]

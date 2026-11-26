@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   formatInvokeError,
   localizedError,
@@ -20,6 +20,19 @@ describe("resolveUiLocale", () => {
   it("follows the system language when set to auto", () => {
     expect(resolveUiLocale("auto", "ru-RU")).toBe("ru");
     expect(resolveUiLocale("auto", "en-US")).toBe("en");
+  });
+
+  it("uses the system language supplied by the desktop even when the webview prefers another", () => {
+    const browserLanguage = vi.spyOn(navigator, "language", "get").mockReturnValue("en-US");
+    vi.stubGlobal("__VOXELY_SYSTEM_UI_LOCALE__", "ru");
+    try {
+      expect(resolveUiLocale("auto")).toBe("ru");
+      expect(resolveUiLocale("en")).toBe("en");
+      expect(messagesForUiLanguage("auto").errInsert).toBe("Не удалось вставить текст");
+    } finally {
+      vi.unstubAllGlobals();
+      browserLanguage.mockRestore();
+    }
   });
 });
 

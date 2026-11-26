@@ -98,9 +98,9 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
     let locale = {
         let ctx = app.try_state::<Arc<AppContext>>();
         ctx.map(|state| crate::app::locale::resolved_ui_locale(&state.settings.lock()))
-            .unwrap_or_else(|| "en".into())
+            .unwrap_or_else(crate::app::locale::system_ui_locale)
     };
-    let (open_label, quit_label) = tray_labels(&locale);
+    let (open_label, quit_label) = tray_labels(locale);
     let open = MenuItemBuilder::with_id("open", open_label)
         .build(app)
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
@@ -116,7 +116,7 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
     if let Some(tray) = app.tray_by_id("main") {
         tray.set_menu(Some(menu))
             .map_err(|e| AppError::StorageFailed(e.to_string()))?;
-        apply_app_identity(app, &locale);
+        apply_app_identity(app, locale);
         return Ok(());
     }
     let icon = app
@@ -125,7 +125,7 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
         .ok_or_else(|| AppError::StorageFailed("missing tray icon".into()))?;
     TrayIconBuilder::with_id("main")
         .icon(icon)
-        .tooltip(window_title(&locale))
+        .tooltip(window_title(locale))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -150,7 +150,7 @@ pub fn configure_tray(app: &AppHandle) -> Result<(), AppError> {
         })
         .build(app)
         .map_err(|e| AppError::StorageFailed(e.to_string()))?;
-    apply_app_identity(app, &locale);
+    apply_app_identity(app, locale);
     Ok(())
 }
 

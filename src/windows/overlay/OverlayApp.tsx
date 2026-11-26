@@ -42,7 +42,7 @@ export function OverlayApp() {
     acceptedSettings.current = next;
     setTheme(next.theme);
     setAccent(next.accentColor ?? DEFAULT_ACCENT);
-    const locale = resolveUiLocale(next.uiLanguage ?? "auto", navigator.language);
+    const locale = resolveUiLocale(next.uiLanguage ?? "auto");
     applyUiLocale(locale);
     setCopy(messagesFor(locale));
   }

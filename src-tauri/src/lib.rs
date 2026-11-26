@@ -52,7 +52,10 @@ pub fn run() {
 
 fn run_app() -> i32 {
     crate::notify::apply_windows_app_identity();
-    let builder = tauri::Builder::default();
+    let builder = tauri::Builder::default().append_invoke_initialization_script(format!(
+        r#";Object.defineProperty(window, "__VOXELY_SYSTEM_UI_LOCALE__", {{ value: {:?} }});"#,
+        crate::app::locale::system_ui_locale()
+    ));
     let context = tauri::generate_context!();
     let built = builder
         .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {

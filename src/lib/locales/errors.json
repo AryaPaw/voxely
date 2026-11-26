@@ -17,6 +17,7 @@
   "RecordingTruncated": "errTruncated",
   "RetryDeadlineExceeded": "errRetryDeadline",
   "TextInsertionFailed": "errInsert",
+  "DisclosureRequired": "errDisclosureRequired",
   "Cancelled": "errCancelled",
   "HotkeyFailed": "errHotkey",
   "IllegalTransition": "errIllegalTransition",

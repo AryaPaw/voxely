@@ -237,7 +237,7 @@ export function MainApp() {
         setSection((current) => (current === "debug" ? "history" : current));
       }
     } catch (error) {
-      const locale = resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto", navigator.language);
+      const locale = resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto");
       setLoadError(formatInvokeError(error, messagesFor(locale)));
     }
   }, [acceptPersistedSettings]);
@@ -251,7 +251,7 @@ export function MainApp() {
       void refreshHistory(true, queryRef.current, true);
     });
     const unlistenInsert = listen<string>("session://insert", (event) => {
-      const locale = resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto", navigator.language);
+      const locale = resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto");
       const nextCopy = messagesFor(locale);
       if (event.payload === "copied") {
         toast.success(nextCopy.copiedInsert);
@@ -266,10 +266,7 @@ export function MainApp() {
       status: "cancelled_before_delivery";
     }>("session://insert-cancelled", (event) => {
       if (event.payload.status === "cancelled_before_delivery") {
-        const locale = resolveUiLocale(
-          settingsRef.current?.uiLanguage ?? "auto",
-          navigator.language,
-        );
+        const locale = resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto");
         toast.warning(messagesFor(locale).insertCancelled);
       }
     });
@@ -303,10 +300,7 @@ export function MainApp() {
         })
         .catch((error: unknown) => {
           if (active && sequence === read) {
-            const locale = resolveUiLocale(
-              settingsRef.current?.uiLanguage ?? "auto",
-              navigator.language,
-            );
+            const locale = resolveUiLocale(settingsRef.current?.uiLanguage ?? "auto");
             reportError(formatInvokeError(error, messagesFor(locale)));
           }
         });
@@ -376,12 +370,12 @@ export function MainApp() {
       return;
     }
     applyTheme(settings.theme, settings.accentColor);
-    applyUiLocale(resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language));
+    applyUiLocale(resolveUiLocale(settings.uiLanguage ?? "auto"));
     return watchSystemTheme(settings.theme, settings.accentColor);
   }, [settings]);
 
   const filtered = history;
-  const copy = messagesFor(resolveUiLocale(settings?.uiLanguage ?? "auto", navigator.language));
+  const copy = messagesFor(resolveUiLocale(settings?.uiLanguage ?? "auto"));
 
   function renderFrame(content: ReactNode) {
     return (

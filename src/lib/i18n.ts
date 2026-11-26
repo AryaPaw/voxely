@@ -4,11 +4,22 @@ import ru from "./locales/ru.json";
 import en from "./locales/en.json";
 export type UiLocale = "ru" | "en";
 
-export function resolveUiLocale(uiLanguage: string, navigatorLanguage = "en"): UiLocale {
+declare global {
+  interface Window {
+    readonly __VOXELY_SYSTEM_UI_LOCALE__?: UiLocale;
+  }
+}
+
+export function resolveUiLocale(
+  uiLanguage: string,
+  systemLanguage = globalThis.window?.__VOXELY_SYSTEM_UI_LOCALE__ ??
+    globalThis.navigator?.language ??
+    "en",
+): UiLocale {
   if (uiLanguage === "ru" || uiLanguage === "en") {
     return uiLanguage;
   }
-  return navigatorLanguage.toLowerCase().startsWith("ru") ? "ru" : "en";
+  return systemLanguage.toLowerCase().startsWith("ru") ? "ru" : "en";
 }
 
 export function applyUiLocale(locale: UiLocale): void {
@@ -36,7 +47,7 @@ export function messagesFor(locale: UiLocale): Messages {
   return locale === "en" ? en : ru;
 }
 
-export function messagesForUiLanguage(uiLanguage: string, systemLanguage = "en"): Messages {
+export function messagesForUiLanguage(uiLanguage: string, systemLanguage?: string): Messages {
   return messagesFor(resolveUiLocale(uiLanguage, systemLanguage));
 }
 

@@ -30,11 +30,7 @@ pub fn prepare(app: &AppHandle) -> bool {
             let snapshot = overlay.snapshot(state.clone());
             drop(state);
             let settings = ctx.settings.try_lock()?;
-            let locale = if settings.ui_language == "auto" {
-                system_locale()
-            } else {
-                settings.ui_language.clone()
-            };
+            let locale = crate::app::locale::resolved_ui_locale(&settings).to_owned();
             let target = ctx
                 .captured_target
                 .try_lock()?
@@ -83,18 +79,4 @@ pub fn prepare(app: &AppHandle) -> bool {
             false
         }
     }
-}
-
-fn system_locale() -> String {
-    use winreg::{enums::HKEY_CURRENT_USER, RegKey};
-    let name: String = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey("Control Panel\\International")
-        .and_then(|key| key.get_value("LocaleName"))
-        .unwrap_or_default();
-    if name.to_ascii_lowercase().starts_with("ru") {
-        "ru"
-    } else {
-        "en"
-    }
-    .into()
 }

@@ -56,7 +56,7 @@ export function ComparePane({
 }) {
   const [state, setState] = useState<CompareState>(emptyState);
   const [error, setError] = useState("");
-  const statusCopy = messagesForUiLanguage(settings.uiLanguage ?? "auto", navigator.language);
+  const statusCopy = messagesForUiLanguage(settings.uiLanguage ?? "auto");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const appliedRevisionRef = useRef(0);
   const startingRef = useRef(false);

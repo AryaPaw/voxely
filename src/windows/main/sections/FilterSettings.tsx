@@ -207,7 +207,7 @@ export function AudioFilterSettings({
           label={copy.silenceCompressionPause.replace(
             "{value}",
             (silence.maxPauseMs / 1000).toLocaleString(
-              resolveUiLocale(settings.uiLanguage ?? "auto", navigator.language),
+              resolveUiLocale(settings.uiLanguage ?? "auto"),
             ),
           )}
           min={500}

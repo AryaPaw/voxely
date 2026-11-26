@@ -343,8 +343,8 @@ describe("MainApp", () => {
     expect(toast.success).toHaveBeenCalled();
     listeners.get("session://insert")?.[0]({ payload: "partial" });
     expect(toast.warning).toHaveBeenCalled();
-    listeners.get("session://insert")?.[0]({ payload: "InsertFailed" });
-    expect(toast.error).toHaveBeenCalled();
+    listeners.get("session://insert")?.[0]({ payload: "TextInsertionFailed" });
+    expect(toast.error).toHaveBeenCalledWith("Не удалось вставить текст");
     await waitFor(() => {
       expect(listeners.get("session://insert-cancelled")?.length).toBeGreaterThan(0);
     });

@@ -41,7 +41,7 @@ export function CompareModelCard({
   } = useSortable({ id });
   const trimmed = model.trim();
   const isDefault = trimmed.length > 0 && trimmed === settings.model;
-  const statusCopy = messagesForUiLanguage(settings.uiLanguage ?? "auto", navigator.language);
+  const statusCopy = messagesForUiLanguage(settings.uiLanguage ?? "auto");
   const status = slot
     ? ({
         running: statusCopy.compareRunning,
